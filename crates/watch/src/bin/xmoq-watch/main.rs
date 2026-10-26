@@ -31,16 +31,18 @@ use xmoq_again::next_session::{After, Ended, NextSession, Pause};
 use xmoq_chat_tracks::names::Person;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
+use xmoq_moqt::message::request_error_code;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{
     ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequestId, RequestEvent, Role, Session,
     Transport,
 };
 use xmoq_moqt::stream_reset_code;
+use xmoq_moqt_io::client::{self, CloseWait, Signals, UntilClosed};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
-    Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent,
-    read_request_streams, read_uni_streams,
+    RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent, read_request_streams,
+    read_uni_streams,
 };
 use xmoq_msf::CatalogTrack;
 use xmoq_picture::video_decoder::VideoDecoder;
@@ -48,10 +50,8 @@ use xmoq_viewer::chat_track::{shown, shown_gap};
 use xmoq_viewer::room;
 use xmoq_viewer_io::catalog::{Became, FollowedCatalog};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
-use xmoq_viewer_io::ending::{self, UntilClosed};
 use xmoq_viewer_io::follow::RENDEZVOUS_MS;
 use xmoq_viewer_io::kept::{Asking, KeptTrack, Said, Wanted};
-use xmoq_viewer_io::reconnect::go_away_behind;
 use xmoq_viewer_io::room_client::{ChatTokens, ROOM_COMES_WITHIN, RoomClient};
 use xmoq_viewer_io::session::{
     self, Events, GoingAway, GoneAway, Requests, Subscription, new_url, timestamp_of,
@@ -395,19 +395,21 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
             Ok(None) => return Ok(()),
             Ok(Some(connection)) => {
                 let connection = Arc::new(connection);
-                let mut kept = UntilClosed::default();
-                let played = play(args, &connection, &place, ui, &mut began, &mut kept).await;
-                if played.is_err()
-                    && let Ok(end) =
-                        tokio::time::timeout(Duration::from_millis(500), connection.closed()).await
-                {
+                let (played, peer) = client::on_connection(
+                    &connection,
+                    CloseWait::VIEWER,
+                    async |connection, kept| {
+                        play(args, connection, &place, ui, &mut began, kept).await
+                    },
+                )
+                .await;
+                if let Some(end) = peer {
                     ui.note(&format!("SESSION_ENDED {end:?}"));
                     // To the person as well, where the note went elsewhere.
                     if !began && (ui.log.is_some() || std::io::stderr().is_terminal()) {
                         say(&format!("SESSION_ENDED {end:?}"));
                     }
                 }
-                ending::close(&connection, &played).await;
                 played
             }
             Err(error) => Err(error),
@@ -514,7 +516,13 @@ async fn beginning_failed(
         return Ok(Ended::Moved(new_url(go_away)));
     }
     if error.chain().any(<dyn std::error::Error>::is::<GoingAway>)
-        && let Some(go_away) = go_away_behind(session, events, args.answer_wait_ms).await?
+        && let Some(go_away) = client::go_away_behind(
+            session,
+            events,
+            request_error_code::GOING_AWAY,
+            Duration::from_millis(args.answer_wait_ms),
+        )
+        .await?
     {
         ui.note(&format!(
             "GOAWAY timeout_ms={} after GOING_AWAY",
@@ -759,13 +767,13 @@ async fn play(
     place: &Place,
     ui: &mut Ui,
     began_playing: &mut bool,
-    kept: &mut UntilClosed,
+    kept: &mut UntilClosed<WtConnection>,
 ) -> Result<Ended> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
     let (queue, received) = mpsc::channel(64);
     let mut events = Events::new(received);
-    kept.readers = Some(read_uni_streams(
+    kept.readers.push(read_uni_streams(
         Arc::clone(connection),
         StreamConfig::default(),
         stops.clone(),
@@ -776,7 +784,7 @@ async fn play(
     // (`session::refuse_peer_request`). They are read from here on and
     // answered once the broadcast plays; until then they wait in the queue.
     let (asks, mut asked) = mpsc::channel(16);
-    kept.requests = Some(read_request_streams(
+    kept.readers.push(read_request_streams(
         Arc::clone(connection),
         StreamConfig::default(),
         stops.clone(),
@@ -1265,7 +1273,7 @@ async fn play(
 async fn watch(args: Args) -> Result<()> {
     // Told to end by a signal: the loop ends, and what is below puts the
     // terminal back.
-    let stop = ending::on_signals();
+    let stop = client::on_signals(Signals::VIEWER);
     // The terminal is put back when `_raw` is dropped, on every way out of
     // this function.
     let (_raw, pressed) = match terminal::keys() {

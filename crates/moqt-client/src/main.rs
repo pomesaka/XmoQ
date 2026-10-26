@@ -62,9 +62,6 @@ const PUBLISH_TRACK_ALIAS: u64 = 1;
 /// (§10.11).
 const STREAM_COUNT_UNKNOWN: u64 = (1 << 62) - 1;
 
-/// How long the peer gets to acknowledge the close before the process exits.
-const CLOSE_GRACE: Duration = Duration::from_secs(2);
-
 /// The bytes of payload the answers to the peer's FETCH requests being
 /// written hold together ([`Bounds::bytes`]), as the gatherer and the
 /// transcriber hold theirs; a FETCH whose answer does not fit is refused
@@ -3251,19 +3248,15 @@ impl Client<'_> {
     }
 }
 
-/// What has to stay until the session is closed, so the caller keeps it.
-#[derive(Default)]
-struct UntilClosed {
-    /// This endpoint's control stream. §3.3: it stays open for the whole
-    /// session; ending it earlier is a `PROTOCOL_VIOLATION` for the peer.
-    control: Option<<WtConnection as Connection>::Send>,
-    /// The readers of the peer's streams, its control stream among them.
-    /// WHY kept: letting go of a stream that is not over tells the peer to
-    /// stop sending on it, and the close of the session takes a moment to
-    /// reach the peer. A relay that sees its control stream stopped first
-    /// closes the session with `PROTOCOL_VIOLATION`.
-    readers: Option<io::Readers>,
-}
+/// What has to stay until the session is closed: this endpoint's control
+/// stream (§3.3: it stays open for the whole session; ending it earlier is a
+/// `PROTOCOL_VIOLATION` for the peer), and the readers of the peer's
+/// streams, its control stream among them. WHY the readers: letting go of a
+/// stream that is not over tells the peer to stop sending on it, and the
+/// close of the session takes a moment to reach the peer; a relay that sees
+/// its control stream stopped first closes the session with
+/// `PROTOCOL_VIOLATION`.
+type UntilClosed = client::UntilClosed<WtConnection, io::Readers>;
 
 /// Runs the session until its mode is done. `kept` receives what has to
 /// outlive this function.
@@ -3288,7 +3281,7 @@ async fn run_session(
         args.answer_delay,
         args.waits.idle_subgroup_stream,
     );
-    kept.readers = Some(readers);
+    kept.readers.push(readers);
 
     // §3.3: each peer opens one control stream that begins with SETUP.
     // WHY NOT `client::setup`: this client's readers are its own
@@ -3353,10 +3346,21 @@ async fn run_session(
             // (`goAwayBehind`, `packages/moqt/src/webtransport/keep-moving.ts`).
             Err(error) if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) => {
                 let wait = Duration::from_millis(client.args.waits.answer);
-                match tokio::time::timeout(wait, session_inbox.next_control_message()).await {
-                    Ok(event) => event?,
-                    Err(_) => return Err(error),
-                }
+                let going_away = request_error_code::GOING_AWAY;
+                return match client::go_away_behind(
+                    &mut client.session,
+                    &mut session_inbox,
+                    going_away,
+                    wait,
+                )
+                .await?
+                {
+                    Some(go_away) => {
+                        report::go_away(&go_away);
+                        Ok(())
+                    }
+                    None => Err(error),
+                };
             }
             other => return other,
         },
@@ -3375,11 +3379,6 @@ async fn run_session(
         }
         ControlEvent::Setup(_) => bail!("the session accepted a second SETUP"),
     }
-}
-
-/// The code to close the session with (§3.5), `NO_ERROR` for a normal end.
-fn termination_code(result: &Result<()>) -> u32 {
-    client::termination_code_of(result)
 }
 
 /// How long a subgroup stream may wait to be opened: for the peer to allow
@@ -3430,10 +3429,6 @@ impl std::fmt::Display for GoingAway {
 
 impl std::error::Error for GoingAway {}
 
-/// How long a client that failed waits to learn whether the peer closed the
-/// session, and with what ([`run`]).
-const PEER_CLOSE_WAIT: Duration = Duration::from_millis(500);
-
 async fn run(args: &Args) -> Result<()> {
     // WHY one deadline for connecting and the session: `--timeout-secs` bounds
     // the whole run, and a relay that never answers the handshake must not
@@ -3450,28 +3445,25 @@ async fn run(args: &Args) -> Result<()> {
     let connection = Arc::new(connection);
     report::connected(&args.url);
 
-    // WHY the timeout sits here and not around `run`: the close below has to
+    // WHY the timeout sits inside and not around `run`: the close has to
     // happen on every path, a timeout included.
-    let mut kept = UntilClosed::default();
-    let session = run_session(&connection, &mut kept, args);
-    let result = match tokio::time::timeout_at(deadline, session).await {
-        Ok(result) => result,
-        Err(_) => Err(timed_out()),
-    };
-    // A session the peer closed: what failed first in this client is one of
-    // several things (a stream that ended, a read that was lost), and none
-    // of them says why. The connection does, a moment later.
-    if result.is_err()
-        && let Ok(ConnectionEnd::ClosedByPeer { code, reason }) =
-            tokio::time::timeout(PEER_CLOSE_WAIT, connection.closed()).await
-    {
+    let (result, peer) = client::on_connection(
+        &connection,
+        client::CloseWait::SERVING,
+        async |connection, kept: &mut UntilClosed| match tokio::time::timeout_at(
+            deadline,
+            run_session(connection, kept, args),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(timed_out()),
+        },
+    )
+    .await;
+    if let Some(ConnectionEnd::ClosedByPeer { code, reason }) = peer {
         report::closed_by_peer(code, &reason);
     }
-    connection.close(termination_code(&result), b"");
-    // The close carries its code to the peer, which takes a moment; a process
-    // that exits before that leaves the peer with a lost connection.
-    let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
-    drop(kept);
     result
 }
 
@@ -3571,7 +3563,7 @@ mod tests {
             ),
         ];
         for (result, code) in cases {
-            assert_eq!(termination_code(&result), code, "{result:?}");
+            assert_eq!(client::termination_code_of(&result), code, "{result:?}");
         }
     }
 
@@ -4241,7 +4233,7 @@ mod tests {
             ),
         ];
         for (result, code) in cases {
-            assert_eq!(termination_code(&result), code, "{result:?}");
+            assert_eq!(client::termination_code_of(&result), code, "{result:?}");
         }
     }
 }

@@ -16,6 +16,7 @@ use xmoq_chat_tracks::names::{person_of as person_of_namespace, room_namespace};
 use xmoq_chat_tracks::payloads::Line as ChatLine;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
+use xmoq_moqt::message::request_error_code;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{
@@ -23,6 +24,7 @@ use xmoq_moqt::session::{
     Role, Session, Transport,
 };
 use xmoq_moqt::stream_reset_code;
+use xmoq_moqt_io::client::{self, UntilClosed};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, RequestReader, RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace,
@@ -33,9 +35,7 @@ use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
 use xmoq_transcript_tracks::payloads::{Speech, read_speech};
 use xmoq_viewer_io::catalog::{Became, FollowedCatalog};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
-use xmoq_viewer_io::ending::UntilClosed;
 use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, RENDEZVOUS_MS, Track};
-use xmoq_viewer_io::reconnect::go_away_behind;
 use xmoq_viewer_io::room_client::{HeldSeat, SeatLost};
 use xmoq_viewer_io::session::{self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of};
 
@@ -516,7 +516,15 @@ async fn start_video(
             // GOAWAY, on the control stream, can come after.
             // WHY `unless_ended`: a signal and stdin are heard meanwhile.
             if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) {
-                let waiting = go_away_behind(session, events, args.answer_wait_ms);
+                let waiting = async {
+                    Ok(client::go_away_behind(
+                        session,
+                        events,
+                        request_error_code::GOING_AWAY,
+                        Duration::from_millis(args.answer_wait_ms),
+                    )
+                    .await?)
+                };
                 let wait = Duration::from_millis(args.answer_wait_ms) * 2;
                 match reader.unless_ended("the GOAWAY", wait, waiting).await? {
                     None => return Ok(Started::SessionEnds(Ended::Quit)),
@@ -553,13 +561,13 @@ pub async fn attend(
     seat: &mut Option<HeldSeat>,
     reader: &mut Reader,
     pictures: &mut Option<Pictures>,
-    kept: &mut UntilClosed,
+    kept: &mut UntilClosed<WtConnection>,
 ) -> Result<Ended> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
     let (queue, received) = mpsc::channel(64);
     let mut events = Events::new(received);
-    kept.readers = Some(read_uni_streams(
+    kept.readers.push(read_uni_streams(
         Arc::clone(connection),
         StreamConfig::default(),
         stops.clone(),
@@ -567,7 +575,7 @@ pub async fn attend(
         |event| event,
     ));
     let (asks, mut asked) = mpsc::channel(16);
-    kept.requests = Some(read_request_streams(
+    kept.readers.push(read_request_streams(
         Arc::clone(connection),
         StreamConfig::default(),
         stops.clone(),

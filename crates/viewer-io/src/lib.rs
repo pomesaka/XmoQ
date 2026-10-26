@@ -4,8 +4,9 @@
 //! catalog ([`session`]), the catalog of a broadcast that may not be there
 //! yet ([`catalog`]), a track kept on a session ([`kept`]), the chat on
 //! tracks ([`chat_tracks`]), the following of a track of one item a Group,
-//! the chat's `lines` and a transcript's `speech` ([`follow`]), and the end
-//! of a session and of the program ([`ending`]).
+//! and the chat's `lines` and a transcript's `speech` ([`follow`]). The
+//! start and the end of a session, and the GOAWAY behind a refusal, are
+//! `client` of `xmoq-moqt-io`'s, as every client's.
 //! What they decide is `xmoq-viewer`'s, where its tests are.
 //!
 //! WHY a crate of its own apart from `xmoq-viewer`, as `xmoq-moqt-io` is
@@ -14,11 +15,13 @@
 //! I/O and what decides would be in one library. WHY NOT a copy in each
 //! program: the two would drift.
 
+// FIXME: joining a room again and the wait before a try are written in
+// both programs, each with the `unless_ended` of its own loop; one here
+// once a wait that their signal ends is shared.
+
 pub mod catalog;
 pub mod chat_tracks;
-pub mod ending;
 pub mod follow;
 pub mod kept;
-pub mod reconnect;
 pub mod room_client;
 pub mod session;

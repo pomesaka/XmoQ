@@ -1,10 +1,11 @@
 # When a client asks again
 
-The pauses a client waits before it asks again: for a track on the same session (`same-session.tsv`), and for the next session (`next-session.tsv`). All the values are **provisional**.
+The pauses a client waits before it asks again: for a track on the same session (`same-session.tsv`), and for the next session (`next-session.tsv`); and how long it waits for the GOAWAY behind a refusal with `GOING_AWAY` (`go-away-behind.tsv`). All the values are **provisional**.
 
 | File | Read by |
 |---|---|
 | `same-session.tsv` | [`xmoq-again`](../../crates/again/README.md) (`AskAgain`) and `@xmoq/moqt` (`createAskAgain`, `packages/moqt/src/core/again.ts`) |
+| `go-away-behind.tsv` | [`xmoq-moqt-io`](../../crates/moqt-io/src/client.rs) (`client::go_away_behind`, which the terminal viewer, the agent and the Rust client wait by) and `@xmoq/moqt` (`goAwayBehind`, `packages/moqt/src/webtransport/keep-moving.ts`) |
 | `next-session.tsv` | `@xmoq/moqt` (`createNextSession`, the same file) and [`xmoq-again`](../../crates/again/README.md) (`NextSession`, which `xmoq-watch`, `xmoq-agent`, `xmoq-chat` and `xmoq-transcriber` go by) |
 
 What a Retry Interval on the wire means in milliseconds is in [`fixtures/retry-interval/`](../retry-interval/README.md); these rows begin from the milliseconds.
@@ -42,3 +43,16 @@ The pause before the next try at a session.
 **The pause is counted from the try before**: what is left of it since that try began, and 0 where the session lasted that long or longer. After a GOAWAY it is 0, unless the try before was itself one made at once after a GOAWAY; then it is counted as after any other end. A try made at once leaves the pause as it was. The roles have their own: the viewers `1000,1000,-`, the gatherer and the transcriber `1000,30000,60000` (`Pause` of `xmoq-again`).
 
 How the rows are read: the first try is at 0. For each step the clock moves by `L`, the session ends, the pause is compared with `N`, and the clock moves by the pause; the next try begins there.
+
+## `go-away-behind.tsv`
+
+§10.4: requests "that arrive after the GOAWAY, MUST be rejected with REQUEST_ERROR using error code GOING_AWAY"; the GOAWAY travels on the control stream and the refusal on the request's, between which QUIC keeps no order, so the refusal can be read first. A client that is refused with `GOING_AWAY` waits for the GOAWAY behind it, as long as an answer gets.
+
+| Column | Content |
+|---|---|
+| 2 | The code of the refusal, by its name in §10.6.2 |
+| 3 | What comes after the refusal, in order, separated by spaces, each as `what@T`, at `T` ms after it: `goaway` (on the control stream), `object` (on a data stream), `closed` (the connection ends); `-` for nothing |
+| 4 | How long the GOAWAY is waited for, in milliseconds |
+| 5 | What the wait gives: `goaway`, or `none` |
+
+What comes on a data stream while the Rust client waits is given back, to be read after the wait in its order, and its test counts it; `@xmoq/moqt` reads its data streams apart from the GOAWAY and has nothing to give back.

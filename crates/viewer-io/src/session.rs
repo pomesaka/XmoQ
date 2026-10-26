@@ -37,8 +37,9 @@ pub(crate) const CATALOG_LIMIT: usize = 1024 * 1024;
 /// Events of the session's unidirectional streams read ahead of their turn
 /// that are kept, while an answer is waited for ([`Events::while_waiting`]).
 /// **Provisional.** Beyond it reading pauses, and flow control holds the
-/// relay back.
-pub(crate) const MOST_READ_AHEAD: usize = 256;
+/// relay back. As many as a wait for the GOAWAY behind a refusal keeps
+/// (`client::go_away_behind`).
+pub(crate) const MOST_READ_AHEAD: usize = client::MOST_READ_AHEAD;
 
 /// The events of the session's unidirectional streams, with those read
 /// ahead while an answer was waited for, which come first.
@@ -861,6 +862,12 @@ impl client::UniEvents for Events {
         &mut self,
     ) -> impl std::future::Future<Output = Option<UniEvent>> + std::marker::Send {
         self.recv()
+    }
+}
+
+impl client::PutBack for Events {
+    fn put_back(&mut self, kept: VecDeque<UniEvent>) {
+        Events::put_back(self, kept);
     }
 }
 

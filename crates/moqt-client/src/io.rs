@@ -187,13 +187,26 @@ impl PeerHalf {
 /// Messages from the peer's control stream, and what ends the session when it
 /// comes from one of its streams.
 pub struct SessionInbox {
-    events: mpsc::Receiver<UniEvent>,
+    events: client::ReadAhead,
+}
+
+impl client::UniEvents for SessionInbox {
+    async fn next_event(&mut self) -> Option<UniEvent> {
+        self.events.next_event().await
+    }
+}
+
+impl client::PutBack for SessionInbox {
+    fn put_back(&mut self, kept: VecDeque<UniEvent>) {
+        self.events.put_back(kept);
+    }
 }
 
 impl SessionInbox {
     /// The next control message, or the error that ends the session.
     pub async fn next_control_message(&mut self) -> Result<ControlMessage> {
-        match self.events.recv().await {
+        use client::UniEvents as _;
+        match self.events.next_event().await {
             Some(UniEvent::Control(message)) => Ok(message),
             Some(UniEvent::Failed(error)) => Err(error.into()),
             Some(UniEvent::ReaderPanicked) => Err(xmoq_moqt_io::client::ReaderPanicked.into()),
@@ -411,7 +424,7 @@ pub fn start_readers(
     });
     (
         SessionInbox {
-            events: session_events,
+            events: client::ReadAhead::new(session_events),
         },
         DataInbox {
             events: data_events,
