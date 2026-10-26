@@ -5,11 +5,12 @@
 //! parser of flags that each program uses half of.
 
 use xmoq_chat_tracks::names::{Kind, Room};
+use xmoq_moqt_io::wt::certificate_hash;
 use xmoq_picture::frames::Settings;
 use xmoq_viewer::chat_track::{CATCH_UP_LINES, CATCH_UP_LINES_MOST};
 use xmoq_viewer::meeting::Limits;
 use xmoq_viewer::reconnect::{CONNECT_WAIT_MS, ROOM_WAIT_MS};
-use xmoq_viewer::room::{RoomAddress, RoomKind, certificate_hash, room_address};
+use xmoq_viewer::room::{RoomAddress, RoomKind, room_address};
 
 /// Where the broadcast is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,10 +183,9 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         match flag.as_str() {
             "--url" => url = Some(value),
             "--cert-sha256" => {
-                cert_sha256 = Some(
-                    certificate_hash(&value)
-                        .map_err(|error| Invalid(format!("--cert-sha256: {error}")))?,
-                );
+                cert_sha256 = Some(certificate_hash(&value).ok_or_else(|| {
+                    Invalid("--cert-sha256: the hash of a certificate is 64 hex digits".to_string())
+                })?);
             }
             "--namespace" => namespace = Some(value),
             "--meeting" => {

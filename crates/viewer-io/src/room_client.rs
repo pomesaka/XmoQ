@@ -23,9 +23,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use xmoq_again::AskAgain;
 use xmoq_chat_tracks::names::Person;
-use xmoq_viewer::room::{
-    self, Answer, NoSeat, Request, Room, RoomAddress, RoomKind, TakenSeat, TokenRole,
-};
+use xmoq_room_token::Role;
+use xmoq_viewer::room::{self, Answer, NoSeat, Request, Room, RoomAddress, RoomKind, TakenSeat};
 
 /// How long a room that refuses the connection is asked again, from the
 /// first try. **Provisional.** WHY asked again at all: rooms often start
@@ -193,7 +192,7 @@ impl RoomClient {
     /// # Errors
     ///
     /// As [`Self::room`].
-    pub async fn token(&self, role: TokenRole, namespace: &[String]) -> Result<Option<String>> {
+    pub async fn token(&self, role: Role, namespace: &[String]) -> Result<Option<String>> {
         match self.ask(self.room.ask_for_a_token(role, namespace)).await? {
             Answer::Token(token) => Ok(token),
             other => Err(anyhow!("the room answered {other:?} for a token")),
@@ -224,10 +223,8 @@ impl RoomClient {
             .collect();
         let under =
             |field: String| -> Vec<String> { room_fields.iter().cloned().chain([field]).collect() };
-        let publish = self
-            .token(TokenRole::Pub, &under(person.name.clone()))
-            .await?;
-        let subscribe = self.token(TokenRole::Sub, &under("*".to_string())).await?;
+        let publish = self.token(Role::Pub, &under(person.name.clone())).await?;
+        let subscribe = self.token(Role::Sub, &under("*".to_string())).await?;
         Ok(ChatTokens {
             publish: publish.map(|text| room::authorization_token(&text)),
             subscribe: subscribe.map(|text| room::authorization_token(&text)),
@@ -549,7 +546,7 @@ mod tests {
             let (address, mut told) = fake_room(vec![row(answer)]).await;
             let namespace = ["xmoq", "chat", "meeting", "blue"].map(str::to_string);
             let answered = client(address, "meetings/blue", WAIT)
-                .token(TokenRole::Sub, &namespace)
+                .token(Role::Sub, &namespace)
                 .await
                 .expect("a token");
             assert_eq!(answered.as_deref(), token, "{answer}");

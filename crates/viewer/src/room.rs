@@ -3,6 +3,8 @@
 //! `fixtures/room-api/README.md`.
 
 use serde_json::{Map, Value, json};
+use xmoq_moqt::token::Token;
+use xmoq_room_token::Role;
 
 /// The most characters of a line of the chat that are shown.
 pub const LINE_LIMIT: usize = 120;
@@ -69,39 +71,25 @@ fn fields_of(value: &Value) -> Option<Vec<String>> {
     (!fields.is_empty() && fields.iter().all(|field| !field.is_empty())).then_some(fields)
 }
 
-/// What a token of a room allows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenRole {
-    /// Watching, and the room's chat lines.
-    Sub,
-    /// The viewer's own chat namespace.
-    Pub,
-}
-
 /// The AUTHORIZATION TOKEN (§10.2.2 of `draft-ietf-moq-transport-18`) that
 /// carries a token of a room: Alias Type `USE_VALUE` (0x3), Token Type 0,
 /// and the text, as the pages send it.
 #[must_use]
 pub fn authorization_token(token: &str) -> Vec<u8> {
-    [&[0x03, 0x00], token.as_bytes()].concat()
+    Token::UseValue {
+        token_type: 0,
+        value: token.as_bytes().to_vec(),
+    }
+    .encode()
 }
 
-/// The SHA-256 of a certificate from its hex.
+/// Whether a text is the SHA-256 of a certificate: 64 hex digits.
 ///
-/// # Errors
-///
-/// [`Invalid`] for anything but 64 hex digits.
-pub fn certificate_hash(hex: &str) -> Result<[u8; 32], Invalid> {
-    let invalid = || Invalid("the hash of a certificate is 64 hex digits".to_string());
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(invalid());
-    }
-    let mut hash = [0; 32];
-    for (byte, digits) in hash.iter_mut().zip(hex.as_bytes().chunks(2)) {
-        let digits = std::str::from_utf8(digits).map_err(|_| invalid())?;
-        *byte = u8::from_str_radix(digits, 16).map_err(|_| invalid())?;
-    }
-    Ok(hash)
+/// WHY NOT `xmoq_moqt_io::wt::certificate_hash`, which the programs read the
+/// hash with: this crate is without I/O, and that one would bring the
+/// WebTransport library in. It accepts the same texts.
+fn is_certificate_hash(hex: &str) -> bool {
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Which of the two kinds of room an address names.
@@ -248,11 +236,8 @@ impl RoomAddress {
 
     /// A token for `role` in `namespace`, one of the room's.
     #[must_use]
-    pub fn ask_for_a_token(&self, role: TokenRole, namespace: &[String]) -> Request {
-        let role = match role {
-            TokenRole::Sub => "sub",
-            TokenRole::Pub => "pub",
-        };
+    pub fn ask_for_a_token(&self, role: Role, namespace: &[String]) -> Request {
+        let role = role.text();
         Request {
             asked: Asked::Token,
             method: Method::Post,
@@ -398,7 +383,7 @@ fn api_relay_of(value: &Value) -> Option<Relay> {
     // WHY https alone: a relay is reached by WebTransport, and an address
     // of any other kind from a room is not one to hand a token to. WHY the hash read here: a
     // relay that cannot be pinned is no relay to connect to.
-    if !url.starts_with("https://") || certificate_hash(hex).is_err() {
+    if !url.starts_with("https://") || !is_certificate_hash(hex) {
         return None;
     }
     Some(Relay {
@@ -569,24 +554,34 @@ mod tests {
     }
 
     #[test]
-    fn a_token_and_a_hash_as_bytes() {
-        assert_eq!(authorization_token("v1"), [0x03, 0x00, b'v', b'1']);
-        let mut expected = [0u8; 32];
-        expected[0] = 0x01;
-        expected[31] = 0xfe;
-        let hex = format!("01{}FE", "00".repeat(30));
-        assert_eq!(certificate_hash(&hex), Ok(expected));
-        // (what is no hash of 64 hex digits)
-        let cases = [
-            String::new(),
-            "00".repeat(31),
-            "00".repeat(33),
-            format!("{}zz", "00".repeat(31)),
-            format!("+1{}", "00".repeat(31)),
-            "\u{3042}".repeat(64),
+    fn a_token_of_a_room_is_a_use_value_of_token_type_0() {
+        // (the token; the AUTHORIZATION TOKEN)
+        let cases: [(&str, &[u8]); 2] = [
+            ("v1", &[0x03, 0x00, b'v', b'1']),
+            (
+                "v1|xmoq/demo|sub|1800000000|67e6",
+                b"\x03\x00v1|xmoq/demo|sub|1800000000|67e6",
+            ),
         ];
-        for hex in cases {
-            assert!(certificate_hash(&hex).is_err(), "{hex}");
+        for (token, bytes) in cases {
+            assert_eq!(authorization_token(token), bytes, "{token}");
+        }
+    }
+
+    #[test]
+    fn a_hash_is_64_hex_digits() {
+        // (the text; whether it is a hash)
+        let cases = [
+            (format!("01{}FE", "00".repeat(30)), true),
+            (String::new(), false),
+            ("00".repeat(31), false),
+            ("00".repeat(33), false),
+            (format!("{}zz", "00".repeat(31)), false),
+            (format!("+1{}", "00".repeat(31)), false),
+            ("\u{3042}".repeat(64), false),
+        ];
+        for (hex, is) in cases {
+            assert_eq!(is_certificate_hash(&hex), is, "{hex}");
         }
     }
 
@@ -661,13 +656,13 @@ mod tests {
                 None,
             ),
             (
-                broadcast.ask_for_a_token(TokenRole::Pub, &["xmoq".to_string()]),
+                broadcast.ask_for_a_token(Role::Pub, &["xmoq".to_string()]),
                 Method::Post,
                 "broadcasts/blue/tokens",
                 Some(r#"{"namespace":["xmoq"],"role":"pub"}"#),
             ),
             (
-                meeting.ask_for_a_token(TokenRole::Sub, &["xmoq".to_string(), "chat".to_string()]),
+                meeting.ask_for_a_token(Role::Sub, &["xmoq".to_string(), "chat".to_string()]),
                 Method::Post,
                 "meetings/blue/tokens",
                 Some(r#"{"namespace":["xmoq","chat"],"role":"sub"}"#),
@@ -787,8 +782,8 @@ mod tests {
             ("GET", [kind, name]) => room(kind, name).ask_for_the_room(),
             ("POST", [kind, name, "tokens"]) => {
                 let role = match text("role").as_str() {
-                    "pub" => TokenRole::Pub,
-                    "sub" => TokenRole::Sub,
+                    "pub" => Role::Pub,
+                    "sub" => Role::Sub,
                     other => panic!("a role: {other}"),
                 };
                 let namespace = body

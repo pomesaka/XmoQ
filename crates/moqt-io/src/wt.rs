@@ -754,6 +754,22 @@ impl ConnectStage {
     }
 }
 
+/// The SHA-256 of a certificate, as [`connect`] takes it, from its 64
+/// hexadecimal digits of either case; `None` for any other text.
+#[must_use]
+pub fn certificate_hash(hex: &str) -> Option<[u8; 32]> {
+    // WHY each byte checked first: `u8::from_str_radix` takes a sign, and
+    // would read `+f` as a byte.
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut hash = [0; 32];
+    for (byte, digits) in hash.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
+        *byte = u8::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()?;
+    }
+    Some(hash)
+}
+
 /// Connects to a `MoQ` Transport endpoint at an `https` URL, offering the
 /// subprotocol of this crate's draft.
 ///
@@ -1086,6 +1102,46 @@ mod tests {
     use web_transport_quinn::quinn::{ApplicationClose, VarInt};
 
     use super::*;
+
+    #[test]
+    fn a_certificate_hash_is_64_hex_digits() {
+        const HASH: [u8; 32] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+        // (the text; the hash)
+        let cases: [(&str, Option<[u8; 32]>); 7] = [
+            (
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                Some(HASH),
+            ),
+            (
+                "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F",
+                Some(HASH),
+            ),
+            (
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1",
+                None,
+            ),
+            (
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0",
+                None,
+            ),
+            (
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1g",
+                None,
+            ),
+            (
+                "+10102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                None,
+            ),
+            ("", None),
+        ];
+        for (hex, hash) in cases {
+            assert_eq!(certificate_hash(hex), hash, "{hex:?}");
+        }
+    }
 
     /// An error with a cause, which its own text names or leaves out.
     #[derive(Debug)]

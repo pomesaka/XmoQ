@@ -45,7 +45,6 @@ use xmoq_moqt::session::{
     ControlEvent, FetchStreamOpened, MalformedRequest, RequestEvent, RequestId, Role, Session,
     SubscribedAlias, Transport,
 };
-use xmoq_moqt::token::Token;
 use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
@@ -74,10 +73,6 @@ use xmoq_transcript_tracks::payloads::Speech;
 use crate::reader::{Read, ReaderPool, ToRead};
 
 type Send = <WtConnection as Connection>::Send;
-
-/// How long a token the transcriber makes runs, in seconds, as the
-/// gatherer's.
-const TOKEN_SECONDS: u64 = 600;
 
 /// How long a request may wait for the relay to allow its stream, as the
 /// gatherer waits. Provisional.
@@ -456,8 +451,8 @@ fn namespace_text(namespace: &TrackNamespace) -> String {
 }
 
 impl Transcribing<'_> {
-    /// A token of the transcriber's own for `role` in `namespace` that runs
-    /// for [`TOKEN_SECONDS`], as an AUTHORIZATION TOKEN (§10.2.2); `None`
+    /// A token of the transcriber's own for `role` in `namespace` from now,
+    /// as an AUTHORIZATION TOKEN ([`RoomKey::authorization_token`]); `None`
     /// without `--auth-key-hex`. Made anew for each request, as the
     /// gatherer's (why, at its `token`).
     fn token(&self, namespace: &str, role: TokenRole) -> Option<Vec<u8>> {
@@ -465,14 +460,7 @@ impl Transcribing<'_> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
-        let text = key.make(namespace, role, now.saturating_add(TOKEN_SECONDS));
-        Some(
-            Token::UseValue {
-                token_type: 0,
-                value: text.into_bytes(),
-            }
-            .encode(),
-        )
+        Some(key.authorization_token(namespace, role, now))
     }
 
     /// The token to read what is under a prefix: `sub` in `<prefix>/*`.

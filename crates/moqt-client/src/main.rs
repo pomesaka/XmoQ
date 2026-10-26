@@ -708,9 +708,8 @@ fn read_mode(
 
 /// Reads `--cert-sha256`: the SHA-256 of the relay's certificate, in hex.
 fn read_cert_sha256(text: Option<String>) -> Result<[u8; 32]> {
-    hex::decode(&text.context("--cert-sha256 is required")?)?
-        .try_into()
-        .map_err(|_| anyhow!("--cert-sha256 must be 32 bytes"))
+    xmoq_moqt_io::wt::certificate_hash(&text.context("--cert-sha256 is required")?)
+        .context("--cert-sha256 must be 64 hex digits")
 }
 
 /// The flags for how long this client waits for the peer, in milliseconds.

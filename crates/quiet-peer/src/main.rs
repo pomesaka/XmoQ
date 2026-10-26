@@ -166,7 +166,7 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{Role, Session, Transport};
-use xmoq_moqt_io::wt::{Congestion, QuicLimits, WtConnection, WtServer, accept};
+use xmoq_moqt_io::wt::{Congestion, QuicLimits, WtConnection, WtServer, accept, certificate_hash};
 use xmoq_moqt_io::{
     Connection, RecvStream, RequestReader, RequestStreamEvent, SendStream, StreamConfig,
     StreamStops, Trace, UniEvent, WriteError, read_uni_streams, send_message,
@@ -321,17 +321,9 @@ struct Ask {
     say_each: bool,
 }
 
-/// 32 bytes from 64 hexadecimal digits.
+/// `--cert-sha256`.
 fn sha256_of(text: &str) -> Result<[u8; 32]> {
-    let mut bytes = [0u8; 32];
-    if text.len() != 64 {
-        bail!("--cert-sha256 is 64 hexadecimal digits");
-    }
-    for (byte, index) in bytes.iter_mut().zip((0..64).step_by(2)) {
-        let digits = text.get(index..index + 2).context("--cert-sha256")?;
-        *byte = u8::from_str_radix(digits, 16).context("--cert-sha256")?;
-    }
-    Ok(bytes)
+    certificate_hash(text).context("--cert-sha256 is 64 hexadecimal digits")
 }
 
 /// Bytes from hexadecimal digits, two a byte.

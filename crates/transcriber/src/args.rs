@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use std::time::Duration;
 use xmoq_moqt::name::TrackNamespace;
+use xmoq_moqt_io::wt::certificate_hash;
 
 use xmoq_speech::command::CommandLimits;
 use xmoq_speech::engine::Engine;
@@ -195,8 +196,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
         match flag.as_str() {
             "--url" => url = Some(value),
             "--cert-sha256" => {
-                let hash = xmoq_room_token::unhex(&value)
-                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                let hash = certificate_hash(&value)
                     .ok_or_else(|| format!("--cert-sha256 is 64 hex digits, not {value:?}"))?;
                 cert_sha256 = Some(hash);
             }

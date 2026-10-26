@@ -31,6 +31,7 @@ use xmoq_agent::presence::Presence;
 use xmoq_chat_tracks::names::Person;
 use xmoq_moqt_io::StreamConfig;
 use xmoq_moqt_io::wt;
+use xmoq_room_token::Role;
 use xmoq_viewer::room::{self, NoSeat, Refusal};
 use xmoq_viewer_io::ending::{self, UntilClosed};
 use xmoq_viewer_io::follow::RENDEZVOUS_MS;
@@ -299,7 +300,7 @@ async fn transcript_token_of(
         .unless_ended(
             "the room's token for the transcript",
             reader.room_wait,
-            client.token(room::TokenRole::Sub, &fields),
+            client.token(Role::Sub, &fields),
         )
         .await?;
     Ok(given.map(|given| given.map(|text| room::authorization_token(&text))))
@@ -548,7 +549,7 @@ async fn place_in(
                     .unless_ended(
                         "the room's token",
                         reader.room_wait,
-                        client.token(room::TokenRole::Sub, namespace),
+                        client.token(Role::Sub, namespace),
                     )
                     .await?
             }
@@ -578,7 +579,8 @@ async fn place_in(
     }
     Ok(Some(Place {
         url: relay.relay_url,
-        cert_sha256: room::certificate_hash(&relay.cert_sha256_hex)?,
+        cert_sha256: wt::certificate_hash(&relay.cert_sha256_hex)
+            .ok_or_else(|| anyhow!("the hash of a certificate is 64 hex digits"))?,
         namespace,
         token,
         chat_tokens,

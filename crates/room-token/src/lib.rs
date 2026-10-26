@@ -6,19 +6,35 @@
 //! ```
 //!
 //! where the mac is HMAC-SHA-256, with the key the relay shares with the
-//! room, over the text before the last `|`. The relay reads it, and the
-//! gatherer of the chat makes its own with a key the relay shares with it
-//! (provisional), as the room (`@xmoq/room`, `packages/room/src/token.ts`)
-//! does.
+//! room, over the text before the last `|`. The relay reads it; the
+//! gatherer of the chat, the transcriber and the relay itself make their
+//! own ([`RoomKey::authorization_token`]) with a key the relay shares with
+//! them (provisional), as the room (`@xmoq/room`,
+//! `packages/room/src/token.ts`) does.
+//!
+//! The key, and making and reading a token with it, are of the feature
+//! `keys` (on by default). WHY a feature: they need HMAC-SHA-256 of `ring`,
+//! which builds C, and `xmoq-viewer`, which does no input or output, takes
+//! only [`Role`] and [`namespace_fits`] (`default-features = false`).
 //!
 //! WHY one crate for the Rust ones that make it and read it: one function
 //! for each half leaves no second copy of the format to drift. The room's
 //! is TypeScript: both read `fixtures/room-token/tokens.tsv`.
 
+#[cfg(feature = "keys")]
 use std::fmt::Write;
 
+#[cfg(feature = "keys")]
 use ring::hmac;
 use xmoq_moqt::name::TrackNamespace;
+#[cfg(feature = "keys")]
+use xmoq_moqt::token::Token;
+
+/// How long a token a Rust part makes for itself runs
+/// ([`RoomKey::authorization_token`]), in seconds: as long as one the room
+/// makes (`TOKEN_SECONDS` of `packages/room/src/token.ts`). Provisional.
+#[cfg(feature = "keys")]
+pub const TOKEN_SECONDS: u64 = 600;
 
 /// What a token allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +46,9 @@ pub enum Role {
 }
 
 impl Role {
-    fn text(self) -> &'static str {
+    /// The role as a token says it, and as the room is asked for one.
+    #[must_use]
+    pub fn text(self) -> &'static str {
         match self {
             Self::Pub => "pub",
             Self::Sub => "sub",
@@ -59,8 +77,10 @@ pub enum Fault {
 }
 
 /// The key the relay shares with the room.
+#[cfg(feature = "keys")]
 pub struct RoomKey(hmac::Key);
 
+#[cfg(feature = "keys")]
 impl RoomKey {
     /// The key of these bytes.
     #[must_use]
@@ -79,6 +99,20 @@ impl RoomKey {
             digits
         });
         format!("{signed}|{digits}")
+    }
+
+    /// The token that allows `role` in `namespace` for [`TOKEN_SECONDS`]
+    /// from `now_s` (seconds since 1970), as the value of an AUTHORIZATION
+    /// TOKEN (§10.2.2: Alias Type `USE_VALUE`, Token Type 0, "negotiated
+    /// out-of-band").
+    #[must_use]
+    pub fn authorization_token(&self, namespace: &str, role: Role, now_s: u64) -> Vec<u8> {
+        let text = self.make(namespace, role, now_s.saturating_add(TOKEN_SECONDS));
+        Token::UseValue {
+            token_type: 0,
+            value: text.into_bytes(),
+        }
+        .encode()
     }
 
     /// What `value` says, where the key made it. The expiry is not looked
@@ -164,6 +198,7 @@ mod tests {
     use super::*;
 
     /// `fixtures/room-token/tokens.tsv`, which `@xmoq/room` reads as well.
+    #[cfg(feature = "keys")]
     #[test]
     fn a_token_is_its_text_and_the_mac_of_it() {
         let table = include_str!("../../../fixtures/room-token/tokens.tsv");
@@ -198,6 +233,37 @@ mod tests {
             rows += 1;
         }
         assert_eq!(rows, 3);
+    }
+
+    /// Rows of `fixtures/room-token/tokens.tsv`, made [`TOKEN_SECONDS`]
+    /// before their expiry, after the Alias Type `USE_VALUE` (0x03) and the
+    /// Token Type 0.
+    #[cfg(feature = "keys")]
+    #[test]
+    fn an_authorization_token_is_a_use_value_of_the_token_that_runs_for_token_seconds() {
+        let key = RoomKey::new(b"a key of the room");
+        // (the namespace; the role; now; the bytes)
+        let cases: [(&str, Role, u64, &[u8]); 2] = [
+            (
+                "xmoq/chat/*",
+                Role::Sub,
+                1_799_999_460,
+                b"\x03\x00v1|xmoq/chat/*|sub|1800000060|53749e09d846bd5dcf000b8c12fc683114d5d538966d74056e43e21102604116",
+            ),
+            (
+                "xmoq/meet/blue/ann",
+                Role::Pub,
+                1_800_000_000,
+                b"\x03\x00v1|xmoq/meet/blue/ann|pub|1800000600|ed2d81f6d427ae030fda6a5d8d277820115b90f419d28b77714381aa9aa7db91",
+            ),
+        ];
+        for (namespace, role, now_s, bytes) in cases {
+            assert_eq!(
+                key.authorization_token(namespace, role, now_s),
+                bytes,
+                "{namespace}"
+            );
+        }
     }
 
     #[test]
