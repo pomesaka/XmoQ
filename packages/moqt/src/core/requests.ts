@@ -23,6 +23,7 @@ import {
 	InactiveError,
 	MoqtError,
 	madeUpRetryInterval,
+	PublishDoneCode,
 	protocolViolation,
 	RequestErrorCode,
 	SessionErrorCode,
@@ -652,9 +653,6 @@ const PEER_REQUEST_MESSAGE_TYPES: Record<
 	PEER_FETCH: FETCH_MESSAGE_TYPE,
 	PEER_TRACK_STATUS: TRACK_STATUS_MESSAGE_TYPE,
 };
-
-/** PUBLISH_DONE status code UPDATE_FAILED (§10.11). */
-const UPDATE_FAILED = 0x8n;
 
 /**
  * §10.2.1, with what §10.2 lets the update of a subscription carry: the codec
@@ -1483,7 +1481,7 @@ export function createRequests(options: RequestsOptions): Requests {
 				stream: request.stream,
 				data: encodeControlMessage({
 					type: "PUBLISH_DONE",
-					statusCode: UPDATE_FAILED,
+					statusCode: PublishDoneCode.UPDATE_FAILED,
 					streamCount,
 					errorReason: "REQUEST_UPDATE is not implemented",
 				}),

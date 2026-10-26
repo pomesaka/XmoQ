@@ -19,7 +19,6 @@ import {
 	DEFAULT_AUTO_SHARE,
 	DEFAULT_PLAYOUT_BUFFER_MS,
 	keepPlaying,
-	keepTrackOnSession,
 	playAudioTrack,
 	playVideoTrack,
 	type VideoPlayback,
@@ -30,6 +29,7 @@ import {
 	RequestFailedError,
 } from "@xmoq/moqt";
 import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
+import { keepTrackOnSession } from "@xmoq/tracks";
 import { showCaptions, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
 import { AGAIN, every, perSecond, say } from "../lib/page.ts";
 import { connectToRelay, firstBytes, through, why } from "../lib/relay.ts";

@@ -9,9 +9,10 @@
 		"@xmoq/meeting": "workspace:*",
 		"@xmoq/moqt": "workspace:*",
 		"@xmoq/msf": "workspace:*",
+		"@xmoq/room-client": "workspace:*",
+		"@xmoq/tracks": "workspace:*",
 		"@xmoq/transcript": "workspace:*",
-		"playwright-core": "1.64.0",
-		"@xmoq/room-client": "workspace:*"
+		"playwright-core": "1.64.0"
 	},
 	"scripts": {
 		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.page.json"

@@ -56,6 +56,29 @@ export const RequestErrorCode = {
 	INVALID_JOINING_REQUEST_ID: 0x32n,
 } satisfies Record<string, bigint>;
 
+/**
+ * The Status Codes of PUBLISH_DONE (§10.11, §15.10.3): why a subscription
+ * ended. The names and values are the draft's.
+ */
+export const PublishDoneCode = {
+	/** "An implementation specific or generic error occurred." */
+	INTERNAL_ERROR: 0x0n,
+	/** "The subscriber is no longer authorized to subscribe to the given track." */
+	UNAUTHORIZED: 0x1n,
+	/** "The track is no longer being published." */
+	TRACK_ENDED: 0x2n,
+	/** "The publisher reached the end of an associated subscription filter." */
+	SUBSCRIPTION_ENDED: 0x3n,
+	GOING_AWAY: 0x4n,
+	TOO_FAR_BEHIND: 0x5n,
+	EXPIRED: 0x6n,
+	/** A REQUEST_UPDATE of the subscription was refused (§10.9.1). */
+	UPDATE_FAILED: 0x8n,
+	EXCESSIVE_LOAD: 0x9n,
+	/** The track is malformed (§2.4.2). */
+	MALFORMED_TRACK: 0x12n,
+} satisfies Record<string, bigint>;
+
 /** What an endpoint that refuses for its own load gives as the wait before a retry. **Provisional.** */
 const RETRY_WHEN_LOADED_MS = 1000n;
 

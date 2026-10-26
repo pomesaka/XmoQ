@@ -881,7 +881,7 @@ async fn play(
     // goes on: a relay may end the sound's subscription alone (it ends the
     // one that falls behind), and a new session would stop the picture for
     // the sake of the sound. The watching page does the same
-    // (`keepTrackOnSession` of `@xmoq/media`), by the same rule
+    // (`keepTrackOnSession` of `@xmoq/tracks`), by the same rule
     // (`xmoq_subscriber::kept`).
     let mut audio = KeptTrack::subscribed(
         Wanted {

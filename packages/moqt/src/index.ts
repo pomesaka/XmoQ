@@ -20,7 +20,7 @@ export {
 	VIEWER_PAUSE,
 } from "./core/again.ts";
 export type { FetchRange, Redirect } from "./core/control-message.ts";
-export { RequestErrorCode } from "./core/error.ts";
+export { PublishDoneCode, RequestErrorCode } from "./core/error.ts";
 export type { FetchObject, RangeEnd } from "./core/fetch.ts";
 export type { KeyValuePair } from "./core/key-value-pair.ts";
 export {
@@ -60,7 +60,11 @@ export {
 	type SubgroupStreamLimits,
 	type SubgroupStreamResult,
 } from "./core/subgroup.ts";
-export type { FullTrackName, TrackNamespace } from "./core/track.ts";
+export {
+	type FullTrackName,
+	sameFullTrackName,
+	type TrackNamespace,
+} from "./core/track.ts";
 export type { ConnectOptions } from "./webtransport/connect.ts";
 export { connect } from "./webtransport/connect.ts";
 export type {
