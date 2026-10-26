@@ -136,8 +136,13 @@ impl ChatTracks {
         let mine = person_namespace(&person.room, &person.name)?;
         let said = FullTrackName::new(mine.clone(), SAID.as_bytes().to_vec())?;
         let (announce, message) = session.publish_namespace(mine, tokens)?;
-        let (announce_send, mut answers) =
-            send_request(connection, open_wait_ms, &message, "publish-namespace").await?;
+        let (announce_send, mut answers) = send_request(
+            connection.as_ref(),
+            open_wait_ms,
+            &message,
+            "publish-namespace",
+        )
+        .await?;
         let answer =
             tokio::time::timeout(Duration::from_millis(answer_wait_ms), answers.next_event())
                 .await

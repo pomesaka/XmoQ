@@ -23,26 +23,28 @@ use xmoq_moqt::session::{RequestEvent, RequestId, Session};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, FetchChunk, RequestReader, RequestStreamEvent, SendStream, Trace, send_message,
+    Connection, FetchChunk, RequestReader, RequestStreamEvent, SendStream, StreamEnd, Trace,
+    send_message,
 };
 use xmoq_viewer::chat_track::{LinesGap, Shown, history_to_fetch};
 
 pub use crate::kept::Asking;
 use crate::kept::{self, KeptTrack, Said, Wanted, on};
 
-type Send = <WtConnection as Connection>::Send;
-type Recv = <WtConnection as Connection>::Recv;
-
 /// What the follower has to be told of, from the loop of the session.
-pub enum Came {
+pub enum Came<C: Connection = WtConnection> {
     /// An item of the FETCH, by its number.
     Fetched(u64, Vec<u8>),
-    /// The FETCH's stream ended, or no stream comes.
-    FetchEnded,
+    /// The FETCH's stream ended.
+    FetchEnded {
+        /// Read to its FIN; not where it was reset, lost, stopped, or broke
+        /// the object model.
+        whole: bool,
+    },
     /// What came on the FETCH's request stream.
     FetchAnswer(Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>),
     /// What came of the subscription, or the time to ask for it.
-    Kept(kept::Came),
+    Kept(kept::Came<C>),
 }
 
 /// What the loop is to do with what came.
@@ -83,21 +85,21 @@ pub struct Track<T> {
 }
 
 /// One track followed on one session.
-pub struct Follower<T> {
+pub struct Follower<T, C: Connection = WtConnection> {
     track: Track<T>,
-    kept: KeptTrack,
+    kept: KeptTrack<C>,
     shown: Shown<T>,
     /// The Joining FETCH, while its answer may still come.
-    fetch: Option<(RequestId, RequestReader<Recv>)>,
-    /// The request streams of each `FETCH`, which stay open while the
-    /// session lasts.
-    held: Vec<(RequestId, Send)>,
+    fetch: Option<(RequestId, RequestReader<C::Recv>)>,
     /// The Joining FETCH of the subscription, while its items may still
-    /// come.
-    joining: Option<RequestId>,
+    /// come, with the sending half of its request stream: open until then,
+    /// for a malformed track to reset it (§2.4.2), and finished when the
+    /// FETCH is over (§5.2), which gives its place among the streams the
+    /// relay allows back.
+    joining: Option<(RequestId, C::Send)>,
     /// The stream of the Joining FETCH's items, while it is read.
     fetch_stream: Option<(RequestId, u64)>,
-    fetched: (mpsc::Sender<Came>, mpsc::Receiver<Came>),
+    fetched: (mpsc::Sender<Came<C>>, mpsc::Receiver<Came<C>>),
 }
 
 /// Opens the stream of a request and sends its message, within `wait_ms`.
@@ -106,12 +108,12 @@ pub struct Follower<T> {
 ///
 /// A stream the relay does not allow in time, and one that breaks before
 /// the message is written.
-pub async fn send_request(
-    connection: &WtConnection,
+pub async fn send_request<C: Connection>(
+    connection: &C,
     wait_ms: u64,
     message: &ControlMessage,
     label: &str,
-) -> Result<(Send, RequestReader<Recv>)> {
+) -> Result<(C::Send, RequestReader<C::Recv>)> {
     let wait = Duration::from_millis(wait_ms);
     let Ok(opened) = tokio::time::timeout(wait, connection.open_bi()).await else {
         bail!("the relay allowed no stream for {label} within {wait_ms} ms");
@@ -122,12 +124,12 @@ pub async fn send_request(
     Ok((send, RequestReader::new(recv, &trace, label)))
 }
 
-impl<T> Follower<T> {
+impl<T, C: Connection> Follower<T, C> {
     /// A follower that asks for the track at once, from the loop. `had` is
     /// the newest item given on the sessions before, so that what was
     /// missed between them is fetched.
     #[must_use]
-    pub fn new(track: Track<T>, asking_with: Asking, had: Option<u64>) -> Self {
+    pub fn new(track: Track<T>, asking_with: Asking<C>, had: Option<u64>) -> Self {
         let wanted = Wanted {
             namespace: track.namespace.clone(),
             name: track.name.to_string(),
@@ -140,7 +142,6 @@ impl<T> Follower<T> {
             kept: KeptTrack::new(wanted, asking_with),
             shown: Shown::fetching_after(had),
             fetch: None,
-            held: Vec::new(),
             joining: None,
             fetch_stream: None,
             fetched: mpsc::channel(32),
@@ -163,7 +164,7 @@ impl<T> Follower<T> {
     }
 
     /// What comes next.
-    pub async fn next(&mut self) -> Came {
+    pub async fn next(&mut self) -> Came<C> {
         let Self {
             fetched,
             fetch,
@@ -171,7 +172,7 @@ impl<T> Follower<T> {
             ..
         } = self;
         tokio::select! {
-            came = fetched.1.recv() => came.unwrap_or(Came::FetchEnded),
+            came = fetched.1.recv() => came.unwrap_or(Came::FetchEnded { whole: false }),
             answer = on(fetch.as_mut().map(|(_, answers)| answers.next_event())) => Came::FetchAnswer(answer),
             came = kept.next() => Came::Kept(came),
         }
@@ -186,16 +187,20 @@ impl<T> Follower<T> {
     pub async fn on(
         &mut self,
         session: &mut Session,
-        came: Came,
+        came: Came<C>,
     ) -> Result<Vec<Out<T>>, RequestFault> {
         Ok(match came {
             Came::Fetched(number, payload) => self.fetched(number, &payload).into_iter().collect(),
-            Came::FetchEnded => {
+            Came::FetchEnded { whole: true } => {
                 // Over in the session once it was answered too, so that
                 // `cancel_malformed` does not name it later.
                 if let Some((request, _)) = self.fetch_stream.take() {
                     session.on_fetch_stream_closed(request);
                 }
+                self.fetch_ended()
+            }
+            Came::FetchEnded { whole: false } => {
+                self.give_up_fetch(session);
                 self.fetch_ended()
             }
             Came::FetchAnswer(answer) => match self.on_fetch_answer(session, answer) {
@@ -205,6 +210,7 @@ impl<T> Follower<T> {
                         "{}_FETCH_FAILED {error:#}",
                         self.track.fetch_note
                     ))];
+                    self.give_up_fetch(session);
                     out.extend(self.fetch_ended());
                     out
                 }
@@ -222,18 +228,21 @@ impl<T> Follower<T> {
     /// `MALFORMED_TRACK` (§2.4.2), and the subscription is asked for again
     /// ([`KeptTrack::malformed`]). The Joining FETCH that was still open is
     /// given up ([`Shown::fetch_given_up`]): the next one asks for its lines
-    /// again. `None` where it is another's.
+    /// again. `None` where it is another's: a FETCH of this track that is
+    /// over or was given up is not named, the session holds it no more.
     pub fn malformed(&mut self, request: RequestId) -> Option<Vec<Out<T>>> {
         if let Some(said) = self.kept.malformed(request) {
             return Some(self.note_of(said).into_iter().collect());
         }
-        let at = self.held.iter().position(|(fetch, _)| *fetch == request)?;
-        let (_, send) = self.held.swap_remove(at);
-        send.reset(stream_reset_code::MALFORMED_TRACK);
-        // A Joining FETCH of a subscription before, whose stream the
-        // session did not see end.
-        if self.joining != Some(request) {
-            return Some(Vec::new());
+        if self
+            .joining
+            .as_ref()
+            .is_none_or(|(fetch, _)| *fetch != request)
+        {
+            return None;
+        }
+        if let Some((_, send)) = self.joining.take() {
+            send.reset(stream_reset_code::MALFORMED_TRACK);
         }
         if let Some((_, answers)) = self.fetch.take() {
             answers.stop(stream_reset_code::MALFORMED_TRACK);
@@ -247,7 +256,6 @@ impl<T> Follower<T> {
         // What its task read and did not hand over yet goes with it: the
         // next FETCH brings it again.
         self.fetched = mpsc::channel(32);
-        self.joining = None;
         self.shown.fetch_given_up();
         Some(vec![Out::Note(format!(
             "{}_FETCH_ENDED MALFORMED_TRACK",
@@ -330,7 +338,7 @@ impl<T> Follower<T> {
             .collect();
         let sent = match session.fetch(range, tokens) {
             Ok((fetch, message)) => send_request(
-                &asking_with.connection,
+                asking_with.connection.as_ref(),
                 asking_with.open_wait_ms,
                 &message,
                 "fetch",
@@ -341,8 +349,9 @@ impl<T> Follower<T> {
         };
         match sent {
             Ok((fetch, request_send, answers)) => {
-                self.held.push((fetch, request_send));
-                self.joining = Some(fetch);
+                // One of a subscription before, whose items did not end.
+                self.give_up_fetch(session);
+                self.joining = Some((fetch, request_send));
                 self.fetch = Some((fetch, answers));
             }
             Err(error) => {
@@ -364,6 +373,8 @@ impl<T> Follower<T> {
         };
         if let Some(joining) = self
             .joining
+            .as_ref()
+            .map(|(joining, _)| *joining)
             .filter(|joining| joining.value() == header.request_id)
         {
             self.fetch_stream = Some((joining, stream));
@@ -372,6 +383,7 @@ impl<T> Follower<T> {
         let most = self.track.fetch_most;
         tokio::spawn(async move {
             let mut decoder = FetchStreamDecoder::new(most, GroupOrder::Ascending);
+            let mut whole = false;
             // The readers took the header off; the decoder wants to see one.
             if decoder
                 .push(&FetchStreamEncoder::new(header, GroupOrder::Ascending).take_bytes())
@@ -396,11 +408,15 @@ impl<T> Follower<T> {
                                 break;
                             }
                         }
-                        _ => break,
+                        FetchChunk::End(StreamEnd::Fin) => {
+                            whole = true;
+                            break;
+                        }
+                        FetchChunk::End(_) | FetchChunk::Stopped => break,
                     }
                 }
             }
-            let _ = to.send(Came::FetchEnded).await;
+            let _ = to.send(Came::FetchEnded { whole }).await;
         });
     }
 
@@ -435,10 +451,39 @@ impl<T> Follower<T> {
         }
     }
 
+    /// Gives the Joining FETCH up before it is over, where one is open: in
+    /// the session, and the directions of its request stream that are open
+    /// with `CANCELLED` (§3.3.2; §5.2: "It MUST send `STOP_SENDING` for the
+    /// bidi request stream"), and its fetch stream with it (§5.2 has it
+    /// MAY). What its task read and did not hand over yet goes with it.
+    ///
+    /// WHY NOT a FIN, as for a FETCH that is over: the publisher may take a
+    /// FIN of a FETCH it is still answering for nothing more than the end of
+    /// what the subscriber says, and go on with the FETCH.
+    fn give_up_fetch(&mut self, session: &mut Session) {
+        let Some((fetch, send)) = self.joining.take() else {
+            return;
+        };
+        session.cancel(fetch);
+        send.reset(stream_reset_code::CANCELLED);
+        if let Some((_, answers)) = self.fetch.take() {
+            answers.stop(stream_reset_code::CANCELLED);
+        }
+        if let Some((_, stream)) = self.fetch_stream.take() {
+            self.kept
+                .asking_with()
+                .stops
+                .stop(stream, stream_reset_code::CANCELLED);
+        }
+        self.fetched = mpsc::channel(32);
+    }
+
     /// The FETCH is over: the items that waited.
     fn fetch_ended(&mut self) -> Vec<Out<T>> {
         self.fetch = None;
-        self.joining = None;
+        if let Some((_, send)) = self.joining.take() {
+            send.finish();
+        }
         self.shown
             .fetch_ended()
             .into_iter()
@@ -458,5 +503,159 @@ impl<T> Follower<T> {
         let item = (self.track.read)(number, payload)?;
         let (_, item) = self.shown.live(number, item)?;
         Some(item)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use xmoq_moqt::message::{
+        FetchOk, ReasonPhrase, RequestError, SubscribeOk, request_error_code,
+    };
+    use xmoq_moqt::name::Location;
+    use xmoq_moqt::session::{Role, Transport};
+    use xmoq_moqt_io::memory::{self, MemoryConnection};
+    use xmoq_moqt_io::{RecvStream, StreamStops};
+
+    use super::*;
+
+    /// How the Joining FETCH ends.
+    #[derive(Debug, Clone, Copy)]
+    enum Ends {
+        /// Its items come, and their stream ends with a FIN.
+        Read,
+        /// The relay refuses it.
+        Refused,
+        /// It is answered, and its items' stream ends without a FIN.
+        CutShort,
+    }
+
+    fn track() -> Track<u64> {
+        Track {
+            namespace: TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+            name: "lines",
+            rendezvous_ms: None,
+            payload_most: 1024,
+            fetch_most: 1024,
+            catch_up: 10,
+            note: "LINES",
+            fetch_note: "HISTORY",
+            read: |number, _| Some(number),
+        }
+    }
+
+    async fn answer(
+        relay: &MemoryConnection,
+        message: ControlMessage,
+    ) -> (impl SendStream, impl RecvStream) {
+        let (mut send, recv) = relay.accept_bi().await.unwrap();
+        send_message(&mut send, &message, &Trace::default(), "relay")
+            .await
+            .unwrap();
+        (send, recv)
+    }
+
+    /// How `recv` ends: "fin", "reset <code>", or "open" after a second.
+    async fn end_of(recv: &mut impl RecvStream) -> String {
+        let reading = async {
+            let mut buffer = [0; 256];
+            loop {
+                match recv.read(&mut buffer).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return "fin".to_string(),
+                    Err(error) => return format!("{error:?}"),
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), reading)
+            .await
+            .unwrap_or_else(|_| "open".to_string())
+    }
+
+    /// What `send` was stopped with, or "open" after a second.
+    async fn stop_of(send: &mut impl SendStream) -> String {
+        tokio::time::timeout(Duration::from_secs(1), send.stopped())
+            .await
+            .map_or_else(|_| "open".to_string(), |error| format!("{error:?}"))
+    }
+
+    /// A FETCH that is over has its request stream finished (§5.2); one
+    /// given up before it is over has it reset and stopped with
+    /// `CANCELLED` (§3.3.2, §5.2).
+    #[tokio::test]
+    async fn the_request_stream_of_a_joining_fetch_is_finished_when_the_fetch_is_over_and_cancelled_when_not()
+     {
+        // (how the FETCH ends; how the relay's reading half of its request
+        //  stream ends, and its sending half where the FETCH was given up:
+        //  one that is over has its answers let go of, and nothing more to
+        //  be said there)
+        let cases = [
+            (Ends::Read, "fin", None),
+            (Ends::Refused, "fin", None),
+            (Ends::CutShort, "Reset(Some(1))", Some("Stopped(Some(1))")),
+        ];
+        for (ends, read, stopped) in cases {
+            let (ours, relay) = memory::pair();
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            let asking_with = Asking {
+                connection: Arc::new(ours),
+                stops: StreamStops::default(),
+                token: None,
+                answer_wait_ms: 10_000,
+                open_wait_ms: 10_000,
+            };
+            let mut follower = Follower::new(track(), asking_with, None);
+            let ask_now = follower.next().await;
+            assert!(follower.on(&mut session, ask_now).await.unwrap().is_empty());
+            // A track with items: the Joining FETCH asks for the newest.
+            let subscribe_ok = ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: 1,
+                parameters: vec![Parameter::LargestObject(Location {
+                    group: 5,
+                    object: 0,
+                })],
+                track_properties: vec![],
+            });
+            let (settled, _subscription) =
+                tokio::join!(follower.next(), answer(&relay, subscribe_ok));
+            follower.on(&mut session, settled).await.unwrap();
+            assert!(follower.fetch_request_id().is_some(), "{ends:?}");
+            let fetch_answer = match ends {
+                Ends::Read | Ends::CutShort => ControlMessage::FetchOk(FetchOk {
+                    end_of_track: false,
+                    end_location: Location {
+                        group: 6,
+                        object: 0,
+                    },
+                    parameters: vec![],
+                    track_properties: vec![],
+                }),
+                Ends::Refused => ControlMessage::RequestError(RequestError {
+                    error_code: request_error_code::INVALID_RANGE,
+                    retry_interval: 0,
+                    error_reason: ReasonPhrase::default(),
+                    redirect: None,
+                }),
+            };
+            let (mut fetch_send, mut fetch_recv) = answer(&relay, fetch_answer).await;
+            let answered = follower.next().await;
+            follower.on(&mut session, answered).await.unwrap();
+            let whole = match ends {
+                Ends::Read => Some(true),
+                Ends::CutShort => Some(false),
+                Ends::Refused => None,
+            };
+            if let Some(whole) = whole {
+                follower
+                    .on(&mut session, Came::FetchEnded { whole })
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(end_of(&mut fetch_recv).await, read, "{ends:?}");
+            if let Some(stopped) = stopped {
+                assert_eq!(stop_of(&mut fetch_send).await, stopped, "{ends:?}");
+            }
+        }
     }
 }
