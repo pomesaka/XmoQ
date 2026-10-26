@@ -40,6 +40,7 @@ use xmoq_moqt::session::{
 };
 
 use xmoq_moqt::{ErrorScope, stream_reset_code};
+use xmoq_moqt_io::refuse::{on_refused_closed, on_refused_message};
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
     Connection, ConnectionEnd, Direction, IdleSubgroupStreamTimeout, PeerRequestStreamEvent,
@@ -2971,9 +2972,7 @@ impl Client<'_> {
                     // What crosses this client's PUBLISH_DONE or its
                     // REQUEST_ERROR is ignored by the session, which still
                     // has to see it.
-                    if let Some(request) = self.said_the_last.get(&stream) {
-                        self.session.on_peer_request_message(*request, message)?;
-                    }
+                    on_refused_message(&mut self.session, &self.said_the_last, stream, message)?;
                     return Ok(());
                 };
                 let event = self
@@ -2999,9 +2998,7 @@ impl Client<'_> {
                 if let Some(over) = self.answers.happened(stream, closed) {
                     self.fetch_over(stream, over);
                 }
-                if let Some(request) = self.said_the_last.remove(&stream) {
-                    self.session.on_peer_request_closed(request);
-                }
+                on_refused_closed(&mut self.session, &mut self.said_the_last, stream);
                 // A subscriber that only finishes its direction has not ended
                 // the subscription (§5.1); a reset has (§3.3.2).
                 if !how.is_fin()

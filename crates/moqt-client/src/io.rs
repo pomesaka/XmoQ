@@ -11,7 +11,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::session::{PeerRequestId, Role, Session, Transport};
-use xmoq_moqt::{RequestFault, TerminationCode, stream_reset_code};
+use xmoq_moqt::stream_reset_code;
+use xmoq_moqt_io::refuse::{Refusal, refusal};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, IdleSubgroupStreamTimeout, IncomingStreams, PeerRequestStreamEvent, RequestClose,
@@ -278,10 +279,11 @@ fn refuse_requests(
         while let Some(event) = requests.recv().await {
             match refusal(&mut session, &mut refused, event) {
                 Refusal::Answer {
+                    stream,
                     mut send,
                     response,
-                    label,
                 } => {
+                    let label = format!("bi#{stream}");
                     tokio::time::sleep(delay).await;
                     // An error means the peer is gone or stopped the stream.
                     let _ = send_message(&mut send, &response, &trace, &label).await;
@@ -299,89 +301,6 @@ fn refuse_requests(
         }
     });
     (streams, refuser)
-}
-
-/// What a client that serves no requests does with one event of the peer's
-/// request streams ([`refusal`]).
-#[derive(Debug)]
-enum Refusal<S> {
-    /// It answers on `send` with `response`, a `REQUEST_ERROR`, and a FIN.
-    Answer {
-        send: S,
-        response: ControlMessage,
-        /// The name of the stream in the trace.
-        label: String,
-    },
-    /// Nothing is to be done.
-    Nothing,
-    /// The session is closed with `code`.
-    Close {
-        code: u32,
-        why: String,
-        /// The fault of the peer, where it is one.
-        error: Option<xmoq_moqt::Error>,
-    },
-}
-
-/// What a client that serves no requests does with `event`, by `session`
-/// and the requests it keeps as `refused`, by the reader's name of their
-/// stream.
-fn refusal<S>(
-    session: &mut Session,
-    refused: &mut HashMap<u64, PeerRequestId>,
-    event: PeerRequestStreamEvent<S>,
-) -> Refusal<S> {
-    let closed = |error: xmoq_moqt::Error| Refusal::Close {
-        code: error.termination_code().map_or(0, TerminationCode::code),
-        why: error.to_string(),
-        error: Some(error),
-    };
-    match event {
-        PeerRequestStreamEvent::Opened {
-            stream,
-            send,
-            first,
-        } => match session.refuse_peer_request(first) {
-            Ok((response, request)) => {
-                if let Some(request) = request {
-                    refused.insert(stream, request);
-                }
-                Refusal::Answer {
-                    send,
-                    response,
-                    label: format!("bi#{stream}"),
-                }
-            }
-            Err(error) => closed(error),
-        },
-        PeerRequestStreamEvent::Message { stream, message } => match refused.get(&stream) {
-            Some(request) => match session.on_peer_request_message(*request, message) {
-                Err(RequestFault::Peer(error)) => closed(error),
-                // The session's own request: never another's.
-                Err(RequestFault::Usage(_)) | Ok(_) => Refusal::Nothing,
-            },
-            // The session keeps nothing of it (`MAX_PEER_REQUESTS`).
-            None => Refusal::Nothing,
-        },
-        PeerRequestStreamEvent::Closed { stream, .. } => {
-            if let Some(request) = refused.remove(&stream) {
-                session.on_peer_request_closed(request);
-            }
-            Refusal::Nothing
-        }
-        // A stream that breaks the protocol in its bytes is reported here
-        // alone, by the reader of the peer's request streams.
-        PeerRequestStreamEvent::Failed(error) => closed(error),
-        // The stream is lost, and what the peer sent on it: as the reader of
-        // the peer's other streams has it (`UniEvent::ReaderPanicked`), the
-        // session ends without a code of the peer's fault.
-        PeerRequestStreamEvent::ReaderPanicked => Refusal::Close {
-            // NO_ERROR (§3.5).
-            code: 0,
-            why: "a reader of a request stream panicked".to_owned(),
-            error: None,
-        },
-    }
 }
 
 /// Starts reading the peer's streams. With `serve`, the requests the peer
@@ -462,98 +381,4 @@ pub fn start_readers(
             refuser,
         },
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use xmoq_moqt::message::{RequestOk, RequestUpdate, Subscribe};
-    use xmoq_moqt::name::{FullTrackName, TrackNamespace};
-
-    use super::*;
-
-    fn subscribe(request_id: u64) -> ControlMessage {
-        let namespace = TrackNamespace::new(vec![b"a".to_vec()]).unwrap();
-        ControlMessage::Subscribe(Subscribe {
-            request_id,
-            full_track_name: FullTrackName::new(namespace, b"b".to_vec()).unwrap(),
-            parameters: vec![],
-        })
-    }
-
-    /// What the client does with each event, after a SUBSCRIBE of the peer
-    /// (Request ID 1) on stream 4 that it refused.
-    #[test]
-    fn a_refusing_client_answers_lets_be_or_closes_the_session() {
-        // (the case; the event; what is done)
-        let cases: Vec<(&str, PeerRequestStreamEvent<()>, &str)> = vec![
-            (
-                "another request",
-                PeerRequestStreamEvent::Opened {
-                    stream: 8,
-                    send: (),
-                    first: subscribe(3),
-                },
-                "answer bi#8",
-            ),
-            (
-                "a request with a Request ID the peer used",
-                PeerRequestStreamEvent::Opened {
-                    stream: 8,
-                    send: (),
-                    first: subscribe(1),
-                },
-                "close 0x4",
-            ),
-            (
-                // §10.1: an update uses up a Request ID of its own.
-                "a REQUEST_UPDATE on the refused stream, with the Request ID of the SUBSCRIBE",
-                PeerRequestStreamEvent::Message {
-                    stream: 4,
-                    message: ControlMessage::RequestUpdate(RequestUpdate {
-                        request_id: 1,
-                        parameters: vec![],
-                    }),
-                },
-                "close 0x4",
-            ),
-            (
-                "a message on a stream the session keeps nothing of",
-                PeerRequestStreamEvent::Message {
-                    stream: 12,
-                    message: ControlMessage::RequestOk(RequestOk::default()),
-                },
-                "nothing",
-            ),
-            (
-                "a stream that breaks the protocol in its bytes",
-                PeerRequestStreamEvent::Failed(xmoq_moqt::Error::ProtocolViolation("bytes")),
-                "close 0x3",
-            ),
-            (
-                "a reader that panicked",
-                PeerRequestStreamEvent::ReaderPanicked,
-                "close 0x0",
-            ),
-        ];
-        for (name, event, expected) in cases {
-            let mut session = Session::new(Role::Client, Transport::WebTransport);
-            session.setup(vec![]).unwrap();
-            let mut refused = HashMap::new();
-            let first = PeerRequestStreamEvent::Opened {
-                stream: 4,
-                send: (),
-                first: subscribe(1),
-            };
-            assert!(matches!(
-                refusal(&mut session, &mut refused, first),
-                Refusal::Answer { .. }
-            ));
-            let done = match refusal(&mut session, &mut refused, event) {
-                Refusal::Answer { label, .. } => format!("answer {label}"),
-                Refusal::Nothing => "nothing".to_owned(),
-                Refusal::Close { code, .. } => format!("close {code:#x}"),
-            };
-            assert_eq!(done, expected, "{name}");
-        }
-    }
 }

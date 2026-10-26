@@ -24,6 +24,7 @@ pub mod client;
 #[cfg(test)]
 mod contract;
 pub mod memory;
+pub mod refuse;
 mod streams;
 #[cfg(test)]
 mod tests;
