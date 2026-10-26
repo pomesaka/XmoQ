@@ -155,29 +155,34 @@ export async function joinRoom(as: string): Promise<Room> {
 	// with the same certificate's hash, as the broadcast's does (the relay
 	// that sends it away, `--when-full`, names one with the same certificate).
 	const chatRoom: ChatRoom = { kind: "broadcast", name: ROOM_NAME };
-	const chat = startChat(chatRoom, as, async (goAway) => {
-		const [sub, pub] = await Promise.all([
-			token("sub", roomFields(chatRoom)),
-			token("pub", [...roomFields(chatRoom), as]),
-		]);
-		const to =
-			goAway === undefined || goAway.newSessionUri === ""
-				? broadcast
-				: { ...broadcast, relayUrl: goAway.newSessionUri };
-		return {
-			connection: await connectToRelay(to, sub),
-			...(pub === undefined ? {} : { publishNamespaceToken: pub }),
-		};
-	}, {
-		shownLines: SHOWN_LINES,
-		onReactions: showReactions,
-		onPresent: (present) => {
-			if (line !== null) {
-				line.textContent = `room “${ROOM_NAME}”: ${present.count} in the chat`;
-			}
-			document.body.dataset.present = String(present.count);
+	const chat = startChat(
+		chatRoom,
+		as,
+		async (goAway) => {
+			const [sub, pub] = await Promise.all([
+				token("sub", roomFields(chatRoom)),
+				token("pub", [...roomFields(chatRoom), as]),
+			]);
+			const to =
+				goAway === undefined || goAway.newSessionUri === ""
+					? broadcast
+					: { ...broadcast, relayUrl: goAway.newSessionUri };
+			return {
+				connection: await connectToRelay(to, sub),
+				...(pub === undefined ? {} : { publishNamespaceToken: pub }),
+			};
 		},
-	});
+		{
+			shownLines: SHOWN_LINES,
+			onReactions: showReactions,
+			onPresent: (present) => {
+				if (line !== null) {
+					line.textContent = `room “${ROOM_NAME}”: ${present.count} in the chat`;
+				}
+				document.body.dataset.present = String(present.count);
+			},
+		},
+	);
 	for (const button of document.querySelectorAll<HTMLButtonElement>(
 		"button[data-reaction]",
 	)) {
@@ -190,4 +195,3 @@ export async function joinRoom(as: string): Promise<Room> {
 	}
 	return { broadcast, transcript: described.transcript, token };
 }
-

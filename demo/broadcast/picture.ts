@@ -34,4 +34,3 @@ export const SIZES = {
 	"720": { width: 1280, height: 720, level: "1F", bitrate: 3_000_000 },
 	"1080": { width: 1920, height: 1080, level: "28", bitrate: 6_000_000 },
 } as const;
-

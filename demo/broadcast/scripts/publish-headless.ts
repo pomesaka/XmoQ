@@ -12,7 +12,16 @@ const origin = process.argv[2] ?? "http://localhost:8080";
 const room = process.argv[3];
 const line = process.argv[4];
 const { chromium } = await import(
-	join(import.meta.dir, "..", "..", "..", "interop", "node_modules", "playwright-core", "index.mjs")
+	join(
+		import.meta.dir,
+		"..",
+		"..",
+		"..",
+		"interop",
+		"node_modules",
+		"playwright-core",
+		"index.mjs",
+	)
 );
 // WHY the signals are not Playwright's: the chat is read from the page when this is stopped.
 const browser = await chromium.launch({
@@ -27,8 +36,17 @@ const query = [
 	...(process.env.PUBLISH_QUERY ? [process.env.PUBLISH_QUERY] : []),
 ].join("&");
 await page.goto(`${origin}/publish${query === "" ? "" : `?${query}`}`);
-await new Promise((resolve) => setTimeout(resolve, 2000));
-console.log(`PUBLISHING ${((await page.textContent("#status")) ?? "").split("\n")[0]}`);
+// WHY until the page says it publishes, and not a fixed wait: the scripts start
+// the viewer at this line, and a viewer without a room that asks before the
+// broadcast is there is refused (a first build of the pages takes longer).
+// After 20 s the line says what the page shows instead.
+const status = async (): Promise<string> =>
+	((await page.textContent("#status")) ?? "").split("\n")[0] ?? "";
+for (let waited = 0; waited < 20_000; waited += 250) {
+	if ((await status()).startsWith("publishing")) break;
+	await new Promise((resolve) => setTimeout(resolve, 250));
+}
+console.log(`PUBLISHING ${await status()}`);
 if (line !== undefined) {
 	setTimeout(async () => {
 		await page.fill("form input", line);

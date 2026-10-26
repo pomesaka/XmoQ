@@ -19,6 +19,11 @@ export const MEETING_PAGES: Record<string, Page> = {
 	"/meet": {
 		entry: join(import.meta.dir, "meet.ts"),
 		html: (served) =>
-			pageHtml("meet", [{ href: "/meet", text: "meet" }], body(served), "/meet.js"),
+			pageHtml(
+				"meet",
+				[{ href: "/meet", text: "meet" }],
+				body(served),
+				"/meet.js",
+			),
 	},
 };

@@ -11,7 +11,6 @@ export interface Broadcast {
 	namespace: string[];
 }
 
-
 /** §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the text the room gave. */
 export const tokenOf = (text: string | null): Uint8Array | undefined =>
 	text === null
@@ -83,4 +82,3 @@ export const why = (error: unknown): string =>
 		: /closed the session: code=(2|22|24) /.test(String(error))
 			? `the relay closed the session: not authorized (${String(error).slice(0, 90)})`
 			: String(error).slice(0, 120);
-
