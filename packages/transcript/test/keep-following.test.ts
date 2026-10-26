@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import type { GoAwayNotice, SessionClose } from "@xmoq/moqt";
+import type {
+	GoAwayNotice,
+	ReceivedObject,
+	SessionClose,
+	SubscriptionEnd,
+} from "@xmoq/moqt";
 import {
 	type KeptTranscriptState,
 	keepFollowingTranscript,
@@ -128,4 +133,97 @@ test.each<{
 		},
 	});
 	expect({ toldTo, seen }).toEqual({ toldTo: connects, seen: states });
+});
+
+/**
+ * A session whose subscription to `speech` says `largest` was published and
+ * brings the piece `live` (not one that reads as a piece; the reader takes
+ * its number all the same), then is closed by the relay. Its FETCH, if one
+ * is asked for, is refused, and its Joining Start noted in `starts`.
+ */
+function sessionWith(
+	largest: bigint | undefined,
+	live: bigint | undefined,
+	starts: bigint[],
+): TranscriptConnection {
+	const closed = Promise.withResolvers<SessionClose>();
+	const close = (): void =>
+		closed.resolve({ type: "local", code: 0, reason: "" });
+	const objects = new ReadableStream<ReceivedObject>({
+		start(controller) {
+			if (live !== undefined) {
+				controller.enqueue({
+					groupId: live,
+					subgroupId: 0n,
+					publisherPriority: undefined,
+					object: {
+						objectId: 0n,
+						properties: [],
+						status: "Normal",
+						payload: new Uint8Array(),
+					},
+				});
+			}
+			setTimeout(() => {
+				controller.close();
+				close();
+			}, 10);
+		},
+	});
+	return {
+		subscribe: async () => ({
+			requestId: 0n,
+			trackAlias: 0n,
+			parameters:
+				largest === undefined
+					? {}
+					: { largestObject: { group: largest, object: 0n } },
+			trackProperties: [],
+			objects,
+			ended: closed.promise.then(
+				(close): SubscriptionEnd => ({ type: "session-closed", close }),
+			),
+			goAway: new Promise(() => {}),
+			cancel: async () => {},
+			update: () => Promise.reject(new Error("no update in this test")),
+		}),
+		async fetch(request) {
+			if (request.range.fetchType === "AbsoluteJoining") {
+				starts.push(request.range.joiningStart);
+			}
+			throw new Error("refused by the test");
+		},
+		close,
+		closed: closed.promise,
+		goAway: new Promise(() => {}),
+	};
+}
+
+// Q4 of the plan (decided on 2026-10-26): a transcript is read on from where
+// the session before left it, as the agent reads it, and not the latest
+// pieces anew.
+test("the next session's FETCH begins after the newest piece the session before had", async () => {
+	const stop = new AbortController();
+	const starts: bigint[] = [];
+	const made: [bigint | undefined, bigint | undefined][] = [
+		[undefined, 7n],
+		[9n, undefined],
+	];
+	let reading = 0;
+	await keepFollowingTranscript({
+		connect: async () => {
+			const session = made.shift();
+			if (session === undefined) throw new Error("no more sessions");
+			// Made when it is connected: its relay closes it 10 ms after.
+			return sessionWith(...session, starts);
+		},
+		follow: { listened: ["xmoq", "demo"], onSpeech() {} },
+		againMs: 1,
+		signal: stop.signal,
+		onState(state) {
+			if (state.type === "reading") reading += 1;
+			if (state.type === "session-ended" && reading === 2) stop.abort();
+		},
+	});
+	expect(starts).toEqual([8n]);
 });

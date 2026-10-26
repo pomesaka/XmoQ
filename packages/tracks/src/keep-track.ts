@@ -33,6 +33,24 @@ export interface KeepTrackOnSessionOptions<E> {
 }
 
 /**
+ * What a kept track asks again after, and how long it waits then, beside
+ * the pauses of `createAskAgain` (`fixtures/kept-track/`): a refusal
+ * (REQUEST_ERROR) is asked again after its Retry Interval, or the pause
+ * where it names none. Any other failure of `play` (a SUBSCRIBE not sent,
+ * or not answered, in time) gives the track up on the session, the `give-up`
+ * of the table. WHY: the sound beside the video is all that keeps a track
+ * this way, and the next session asks for it anyway, as the Rust viewers
+ * give their sound up (`again_after_failure` of `xmoq-subscriber`). A
+ * followed track (`followTrack`) asks again after every failure, the
+ * `again` of the table.
+ */
+export const keptTrackRules = {
+	notYet: (error: unknown): boolean => error instanceof RequestFailedError,
+	againAfter: (error: unknown): number | undefined =>
+		error instanceof RequestFailedError ? error.retryWaitMs : undefined,
+};
+
+/**
  * Plays one track on one session for as long as the session lasts: when its
  * subscription ends, or a SUBSCRIBE for it is refused (a REQUEST_ERROR), it
  * is asked for again on the same session, by the rules of `stay` on
@@ -54,9 +72,7 @@ export async function keepTrackOnSession<E>(
 		await stayOnSession<E, SessionClose>({
 			play: options.play,
 			closed: options.connection.closed,
-			notYet: (error) => error instanceof RequestFailedError,
-			againAfter: (error) =>
-				error instanceof RequestFailedError ? error.retryWaitMs : undefined,
+			...keptTrackRules,
 			wait: (ms) => waitFor(ms, signal),
 			stopped: () => signal.aborted,
 			...(options.againMs === undefined ? {} : { againMs: options.againMs }),

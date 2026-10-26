@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { SeenLines } from "../src/core/seen-lines.ts";
+import { SeenNumbers } from "../src/core/seen-numbers.ts";
 
-describe("SeenLines", () => {
+describe("SeenNumbers", () => {
 	test.each([
-		["each line once", 3, [0n, 1n, 1n, 0n], [true, true, false, false]],
+		["each item once", 3, [0n, 1n, 1n, 0n], [true, true, false, false]],
 		[
-			"the history after a live line",
+			"the history after a live item",
 			3,
 			[5n, 3n, 4n, 5n],
 			[true, true, true, false],
@@ -24,11 +24,11 @@ describe("SeenLines", () => {
 			[true, true, true, false],
 		],
 	])("%s", (_case, most, numbers, taken) => {
-		const seen = new SeenLines(most);
+		const seen = new SeenNumbers(most);
 		expect(numbers.map((number) => seen.take(number))).toEqual(taken);
 	});
 
 	test.each([0, 1.5, -1])("%p lines held is refused", (most) => {
-		expect(() => new SeenLines(most)).toThrow(RangeError);
+		expect(() => new SeenNumbers(most)).toThrow(RangeError);
 	});
 });

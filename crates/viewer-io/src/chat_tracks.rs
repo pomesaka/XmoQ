@@ -378,3 +378,35 @@ impl ChatTracks {
         }
     }
 }
+
+/// The rows of `fixtures/followed-track/limits.tsv` whose Rust value is
+/// here, against the table: the payload of `lines`.
+#[cfg(test)]
+#[test]
+fn the_payload_of_lines_is_as_the_shared_table_says() {
+    let path = format!(
+        "{}/../../fixtures/followed-track/limits.tsv",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let table = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+    assert!(table.ends_with('\n') && !table.ends_with("\n\n"), "{path}");
+    let ours = |name: &str| -> Option<Option<u64>> {
+        let count = |value: usize| u64::try_from(value).ok();
+        match name {
+            "lines-payload-bytes" => Some(count(LINES_PAYLOAD_MOST)),
+            _ => None,
+        }
+    };
+    let mut read = Vec::new();
+    for row in table.lines() {
+        let [name, rust, _] = row.split('\t').collect::<Vec<_>>()[..] else {
+            panic!("a row of three columns: {row:?}");
+        };
+        let Some(value) = ours(name) else { continue };
+        let expected = (rust != "-").then(|| rust.parse::<u64>().expect("a number"));
+        assert_eq!(value, expected, "{name}");
+        read.push(name);
+    }
+    // As many as are here: a table that lost a row would pass.
+    assert_eq!(read.len(), 1, "{read:?}");
+}

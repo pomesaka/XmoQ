@@ -5,23 +5,14 @@
 // draft-ietf-moq-transport-18.
 
 import {
-	createAskAgain,
-	decodeFetchBody,
 	type MoqtConnection,
 	type PeerSubscribe,
 	type PublishedTrack,
 	RequestErrorCode,
-	RequestFailedError,
-	type Subscription,
-	type SubscriptionEnd,
 	sameFullTrackName,
-	waitFor,
 } from "@xmoq/moqt";
-import {
-	catchUpLines,
-	historyToFetch,
-	type LinesGap,
-} from "../core/history.ts";
+import { type FollowGap, followTrack } from "@xmoq/tracks";
+import { catchUpLines, HISTORY_LINES } from "../core/history.ts";
 import {
 	type ChatLimits,
 	chatLimits,
@@ -51,17 +42,16 @@ import {
 	readReactions,
 	saidPayload,
 } from "../core/payloads.ts";
-import { SeenLines } from "../core/seen-lines.ts";
 
 /**
  * How many line numbers are remembered, so that a line is handed on once
- * (`SeenLines`), where `catchUpLines` is no more. WHY 200: what the demo's
+ * (`SeenNumbers` of `@xmoq/tracks`), where `catchUpLines` is no more. WHY 200: what the demo's
  * page keeps of the chat. **Provisional**. WHY as many as `catchUpLines`
  * where that is more: the lines of a FETCH that catches up come with older
  * numbers than live lines that came meanwhile, and a number below all those
  * remembered is passed over as had.
  */
-const SEEN_LINES = 200;
+export const SEEN_LINES = 200;
 
 /**
  * The longest payload of a line read from the Joining FETCH or the
@@ -69,24 +59,15 @@ const SEEN_LINES = 200;
  * the gatherer reads of one stream of `said` (`PAYLOAD_MOST`), which holds
  * the longest line it takes, 8,192 bytes of text, however it is escaped.
  */
-const MAX_LINE_PAYLOAD = 64 * 1024;
+export const MAX_LINE_PAYLOAD = 64 * 1024;
 
 /**
- * How long the SUBSCRIBE for `lines` asks the relay to wait for the room to
- * be published (RENDEZVOUS_TIMEOUT, §10.2.6). WHY: the gatherer publishes a
- * room only once it follows somebody in it (`crates/chat/README.md`), so the
- * first participant's SUBSCRIBE would otherwise come before the room's
- * PUBLISH and be refused. **Provisional**: meant to be longer than the
- * gatherer takes to be told of a participant and to publish, which was not
- * measured (the interop run `chat-pages.ts` had it answered within its step
- * of 20 s); the own relay holds 30 seconds at the most. A relay that does
- * not hold it (moqtail's 0.15.0) refuses at once, and the SUBSCRIBE is made
- * again after the pause of `createAskAgain` (@xmoq/moqt).
+ * How many Group numbers of `reactions` and `present` are remembered, so
+ * that an Object is handed on once. **Provisional**. WHY few: their Objects
+ * come live, and of `present` the newest alone by the Joining FETCH, so a
+ * number comes twice only where the FETCH and the subscription meet.
  */
-const RENDEZVOUS_MS = 10_000;
-
-/** How long the Joining FETCH has, as `followCatalog` of @xmoq/msf gives its own, and for the same reason. **Provisional**. */
-const FETCH_TIMEOUT_MS = 15_000;
+const SEEN_LIVE = 16;
 
 /**
  * Lines being written on `said` at once. One more is not sent. WHY a bound:
@@ -161,7 +142,7 @@ export interface JoinChatOptions {
 	 * after them: a subscription made again missed more lines than
 	 * `catchUpLines`, and only the newest of them are fetched.
 	 */
-	onGap?(gap: LinesGap): void;
+	onGap?(gap: FollowGap): void;
 	/**
 	 * How many of the lines it missed the participant fetches at the most,
 	 * when its subscription to `lines` is made again (or when it comes with
@@ -213,29 +194,16 @@ export interface ChatParticipant {
 	status(): ChatStatus;
 }
 
-function described(end: SubscriptionEnd): string {
-	switch (end.type) {
-		case "publish-done":
-			return `PUBLISH_DONE 0x${end.statusCode.toString(16)} ${end.errorReason}`;
-		case "peer-reset":
-			return `reset ${end.code ?? "without a code"}`;
-		case "session-closed":
-			return "the session closed";
-		default:
-			return end.type;
-	}
-}
-
 /**
  * Joins the room `room` as `name`: announces `xmoq/chat/<kind>/<room>/<name>`
  * (PUBLISH_NAMESPACE), serves the relay's SUBSCRIBE for `said` on it, and
- * subscribes to the room's `lines`, with a Joining FETCH for the newest
- * `HISTORY_LINES` where the room has lines. When the subscription ends it
- * is made again after the pause of `createAskAgain` (@xmoq/moqt): 1 s,
- * or the Retry Interval of a refusal, as the terminal viewer asks for the
- * same track. For as long as the session lasts, and
- * its Joining FETCH asks for the lines after the last one had
- * (`historyToFetch`).
+ * follows the room's `lines` (`followTrack` of `@xmoq/tracks`): the newest
+ * `HISTORY_LINES` on coming, and the lines after the last one had each time
+ * its subscription is made again, for as long as the session lasts. WHY a
+ * RENDEZVOUS_TIMEOUT on the SUBSCRIBE: the gatherer publishes a room only
+ * once it follows somebody in it (`crates/chat/README.md`), so the first
+ * participant's SUBSCRIBE would otherwise come before the room's PUBLISH
+ * and be refused.
  *
  * **It names the connection's `serve` handlers**: a SUBSCRIBE for another
  * track, and every FETCH, are refused. Give it a connection of its own.
@@ -345,245 +313,54 @@ export async function joinChat(
 		{ signal: stop.signal },
 	);
 
-	const remembered = Math.max(SEEN_LINES, catchUp);
-	let seen = new SeenLines(remembered);
-	/**
-	 * The largest line number that came, a line or not: the next
-	 * subscription's FETCH catches up from the one after it. WHY not only
-	 * the lines handed on: an Object that is no line was had all the same,
-	 * and fetching it again would bring it again.
-	 */
-	let had = options.lastHad;
-	const take = (
-		number: bigint,
-		payload: Uint8Array,
-		how: ReceivedLine["how"],
-	): void => {
-		if (had === undefined || number > had) had = number;
-		const read = readLine(number, payload);
-		if (!read.ok) {
-			options.onMalformed?.(number, read.why);
-			return;
-		}
-		if (seen.take(number)) options.onLine({ ...read.value, how });
-	};
-
-	const history = async (subscription: Subscription): Promise<void> => {
-		// §10.12.2: a Joining FETCH for a track whose SUBSCRIBE_OK said that
-		// nothing was published is refused with INVALID_RANGE; a room
-		// without lines has nothing to fetch (`historyToFetch`).
-		const largest = subscription.parameters.largestObject?.group;
-		// WHY decided here, before the first `await`: the live lines that
-		// come next would move `had` past what this FETCH is to bring.
-		const plan = historyToFetch(had, largest, catchUp);
-		if (plan.forget) {
-			seen = new SeenLines(remembered);
-			had = undefined;
-		}
-		if (plan.fetch === undefined || largest === undefined) return;
-		const { start, gap } = plan.fetch;
-		if (gap !== undefined) options.onGap?.(gap);
-		const most = largest - start + 1n;
-		const fetch = await connection.fetch(
-			{
-				range: {
-					// An Absolute Joining FETCH from the Group that
-					// `historyToFetch` gives (§10.12.2.1), to the Joining
-					// Location: why Absolute is at `historyStart`.
-					fetchType: "AbsoluteJoining",
-					joiningRequestId: subscription.requestId,
-					joiningStart: start,
-				},
-			},
-			{
-				signal: AbortSignal.any([
-					stop.signal,
-					AbortSignal.timeout(FETCH_TIMEOUT_MS),
-				]),
-			},
-		);
-		await fetch.response;
-		const reader = decodeFetchBody(connection, fetch, {
-			limits: { maxObjectPayloadLength: MAX_LINE_PAYLOAD },
-		}).getReader();
-		let objects = 0n;
-		for (;;) {
-			const next = await reader.read();
-			if (next.done) return;
-			if (next.value.type !== "object") continue;
-			const { groupId, objectId, payload } = next.value.object;
-			if (objectId !== 0n) continue;
-			take(groupId, payload, "history");
-			objects += 1n;
-			// A relay or a gatherer that sends more than was asked for is not
-			// read further.
-			if (objects >= most) {
-				await reader.cancel();
+	followTrack(connection, {
+		trackNamespace: roomNamespace(options.room),
+		trackName: utf8.encode(LINES_TRACK),
+		recent: HISTORY_LINES,
+		catchUp,
+		...(options.lastHad === undefined ? {} : { lastHad: options.lastHad }),
+		remembered: Math.max(SEEN_LINES, catchUp),
+		maxPayloadLength: MAX_LINE_PAYLOAD,
+		take(number, payload, how) {
+			const read = readLine(number, payload);
+			if (!read.ok) {
+				options.onMalformed?.(number, read.why);
 				return;
 			}
-		}
-	};
-
-	const live = async (subscription: Subscription): Promise<void> => {
-		const reader = subscription.objects.getReader();
-		for (;;) {
-			const next = await reader.read();
-			if (next.done) return;
-			const { groupId, object } = next.value;
-			// A line is Object 0 of its Group, and a status says no line.
-			if (object.status !== "Normal" || object.objectId !== 0n) continue;
-			take(groupId, object.payload, "live");
-		}
-	};
-
-	const follow = async (): Promise<void> => {
-		const again = createAskAgain();
-		while (!stop.signal.aborted) {
-			let subscription: Subscription;
-			try {
-				subscription = await connection.subscribe({
-					trackNamespace: roomNamespace(options.room),
-					trackName: utf8.encode(LINES_TRACK),
-					parameters: { rendezvousTimeout: BigInt(RENDEZVOUS_MS) },
-					// A longer Object ends its stream before it is gathered,
-					// and the subscription goes on.
-					maxObjectPayloadLength: MAX_LINE_PAYLOAD,
-				});
-			} catch (error) {
-				changed({ lastEnd: `refused: ${String(error).slice(0, 120)}` });
-				await waitFor(
-					again.afterRefusal(
-						error instanceof RequestFailedError ? error.retryWaitMs : undefined,
-					),
-					stop.signal,
-				);
-				continue;
-			}
-			const cancel = (): void => {
-				void subscription.cancel().catch(() => {});
-			};
-			// The signal can have aborted while the SUBSCRIBE waited for its
-			// answer: the subscription made after it is cancelled at once.
-			if (stop.signal.aborted) {
-				cancel();
-				return;
-			}
-			stop.signal.addEventListener("abort", cancel, { once: true });
-			again.subscribed();
-			changed({ following: true });
-			// WHY a failed FETCH is no failure of the participant: the lines
-			// that come live are there all the same; the history is missing.
-			const fetched = history(subscription).catch(() => {});
-			await live(subscription).catch(() => {});
-			const end = await subscription.ended;
-			await fetched;
-			stop.signal.removeEventListener("abort", cancel);
-			changed({ following: false, lastEnd: described(end) });
-			await waitFor(again.afterEnd(), stop.signal);
-		}
-	};
-	void follow();
+			options.onLine({ ...read.value, how });
+		},
+		...(options.onGap === undefined ? {} : { onGap: options.onGap }),
+		onStatus: ({ following, lastEnd }) => changed({ following, lastEnd }),
+		signal: stop.signal,
+	});
 
 	/**
-	 * Follows a track of the room that is live alone (`reactions`,
-	 * `present`): each Object 0 of a Group is handed to `take`, and where
-	 * `latest`, the largest Group when the subscription is made, by a
-	 * Relative Joining FETCH of none before it (§10.12.2), so that a
-	 * participant that comes has the count at once. Subscribed again after
-	 * it ends, as `lines` is.
+	 * Follows a track of the room whose Objects matter as they come
+	 * (`reactions`, `present`): nothing of what came before, or with
+	 * `latest`, the newest alone, so that a participant that comes has the
+	 * count at once.
 	 */
-	const followLive = async (
+	const followLive = (
 		trackName: string,
 		latest: boolean,
 		take: (payload: Uint8Array) => void,
-	): Promise<void> => {
-		const again = createAskAgain();
-		while (!stop.signal.aborted) {
-			let subscription: Subscription;
-			try {
-				subscription = await connection.subscribe({
-					trackNamespace: roomNamespace(options.room),
-					trackName: utf8.encode(trackName),
-					parameters: { rendezvousTimeout: BigInt(RENDEZVOUS_MS) },
-					maxObjectPayloadLength: MAX_LINE_PAYLOAD,
-				});
-			} catch (error) {
-				await waitFor(
-					again.afterRefusal(
-						error instanceof RequestFailedError ? error.retryWaitMs : undefined,
-					),
-					stop.signal,
-				);
-				continue;
-			}
-			const cancel = (): void => {
-				void subscription.cancel().catch(() => {});
-			};
-			if (stop.signal.aborted) {
-				cancel();
-				return;
-			}
-			stop.signal.addEventListener("abort", cancel, { once: true });
-			again.subscribed();
-			const fetched =
-				latest && subscription.parameters.largestObject !== undefined
-					? latestOf(subscription, take).catch(() => {})
-					: undefined;
-			const reader = subscription.objects.getReader();
-			for (;;) {
-				const next = await reader.read().catch(() => undefined);
-				if (next === undefined || next.done) break;
-				const { object } = next.value;
-				if (object.status !== "Normal" || object.objectId !== 0n) continue;
-				take(object.payload);
-			}
-			await subscription.ended;
-			await fetched;
-			stop.signal.removeEventListener("abort", cancel);
-			await waitFor(again.afterEnd(), stop.signal);
-		}
-	};
-
-	/** The Object 0 of the largest Group of `subscription`, by a Relative Joining FETCH of none before it. */
-	const latestOf = async (
-		subscription: Subscription,
-		take: (payload: Uint8Array) => void,
-	): Promise<void> => {
-		const fetch = await connection.fetch(
-			{
-				range: {
-					fetchType: "RelativeJoining",
-					joiningRequestId: subscription.requestId,
-					joiningStart: 0n,
-				},
-			},
-			{
-				signal: AbortSignal.any([
-					stop.signal,
-					AbortSignal.timeout(FETCH_TIMEOUT_MS),
-				]),
-			},
-		);
-		await fetch.response;
-		const reader = decodeFetchBody(connection, fetch, {
-			limits: { maxObjectPayloadLength: MAX_LINE_PAYLOAD },
-		}).getReader();
-		for (;;) {
-			const next = await reader.read();
-			if (next.done) return;
-			if (next.value.type !== "object" || next.value.object.objectId !== 0n) {
-				continue;
-			}
-			take(next.value.object.payload);
-			// One Group was asked for: what comes after it is not read.
-			await reader.cancel();
-			return;
-		}
+	): void => {
+		const recent = latest ? 1 : 0;
+		followTrack(connection, {
+			trackNamespace: roomNamespace(options.room),
+			trackName: utf8.encode(trackName),
+			recent,
+			catchUp: recent,
+			remembered: SEEN_LIVE,
+			maxPayloadLength: MAX_LINE_PAYLOAD,
+			take: (_number, payload) => take(payload),
+			signal: stop.signal,
+		});
 	};
 
 	const { onReactions, onPresent } = options;
 	if (onReactions !== undefined) {
-		void followLive(REACTIONS_TRACK, false, (payload) => {
+		followLive(REACTIONS_TRACK, false, (payload) => {
 			const read = readReactions(payload);
 			if (read.ok) onReactions(read.value);
 		});
@@ -592,7 +369,7 @@ export async function joinChat(
 		// WHY the newest alone: a FETCH and the live Objects can come in
 		// either order, and a count older than the one shown is no news.
 		let newest = -1;
-		void followLive(PRESENT_TRACK, true, (payload) => {
+		followLive(PRESENT_TRACK, true, (payload) => {
 			const read = readPresent(payload);
 			if (!read.ok || read.value.at < newest) return;
 			newest = read.value.at;
@@ -638,17 +415,17 @@ export async function joinChat(
 		}
 	};
 
-	const lines = new RateWindow(limits.linesPerSecond);
-	const reactions = new RateWindow(limits.reactionsPerSecond);
+	const lineRate = new RateWindow(limits.linesPerSecond);
+	const reactionRate = new RateWindow(limits.reactionsPerSecond);
 	return {
 		status: () => ({ ...status }),
 		async say(text) {
-			const why = keepBack(text, limits, lines, now());
+			const why = keepBack(text, limits, lineRate, now());
 			if (why !== undefined) return { type: "kept-back", why };
 			return write(said, () => saidPayload({ text, sentAt: now() }));
 		},
 		async react(emoji) {
-			const why = keepBackReaction(emoji, reactions, now());
+			const why = keepBackReaction(emoji, reactionRate, now());
 			if (why !== undefined) return { type: "kept-back", why };
 			return write(reacted, () => reactedPayload({ emoji, sentAt: now() }));
 		},

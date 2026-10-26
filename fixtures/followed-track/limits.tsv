@@ -1,0 +1,6 @@
+rendezvous-ms	30000	30000
+fetch-timeout-ms	-	15000
+lines-payload-bytes	65536	65536
+speech-payload-bytes	65536	65536
+remembered-lines	-	200
+remembered-pieces	-	200

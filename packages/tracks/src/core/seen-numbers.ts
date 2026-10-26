@@ -1,14 +1,14 @@
-// Which lines of a room a participant has had, so that each is handed on
-// once: a line comes by the Joining FETCH and by the subscription where the
-// two meet, and again by the FETCH of a subscription made anew (after the
-// gatherer has started again, say).
+// Which items of a followed track a reader has had, so that each is handed
+// on once: an item comes by the Joining FETCH and by the subscription where
+// the two meet, and again by the FETCH of a subscription made anew (after
+// the publisher has started again, say).
 
 /**
- * The numbers of the lines had, the largest `most` of them. A number below
+ * The numbers of the items had, the largest `most` of them. A number below
  * all of them, where `most` are held, counts as had: it is older than every
- * line kept, and a page that shows the newest lines has no place for it.
+ * item kept, and a reader that shows the newest items has no place for it.
  */
-export class SeenLines {
+export class SeenNumbers {
 	readonly #most: number;
 	/** In ascending order, `most` at the most. */
 	readonly #numbers: bigint[] = [];
@@ -20,7 +20,7 @@ export class SeenLines {
 		this.#most = most;
 	}
 
-	/** Whether the line `number` is new; a new one is noted. */
+	/** Whether the item `number` is new; a new one is noted. */
 	take(number: bigint): boolean {
 		const numbers = this.#numbers;
 		let low = 0;

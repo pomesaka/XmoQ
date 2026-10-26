@@ -520,6 +520,44 @@ impl<T, C: Connection> Follower<T, C> {
     }
 }
 
+/// The rows of `fixtures/followed-track/limits.tsv` whose Rust value is
+/// here, against the table: the waits, and the numbers remembered, which
+/// the Rust readers have none of. The payloads are of `chat_tracks` of
+/// `xmoq-viewer-io` and of `xmoq-agent`.
+#[cfg(test)]
+#[test]
+fn the_waits_are_as_the_shared_table_says() {
+    let path = format!(
+        "{}/../../fixtures/followed-track/limits.tsv",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let table = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+    assert!(table.ends_with('\n') && !table.ends_with("\n\n"), "{path}");
+    let ours = |name: &str| -> Option<Option<u64>> {
+        match name {
+            "rendezvous-ms" => Some(Some(RENDEZVOUS_MS)),
+            // The Joining FETCH is bounded by its bytes (`Track::fetch_most`)
+            // and by the session's wait for its answer, not by a time of its
+            // own; an item is handed on once by its number against the
+            // newest had (`Items`), with no set of numbers remembered.
+            "fetch-timeout-ms" | "remembered-lines" | "remembered-pieces" => Some(None),
+            _ => None,
+        }
+    };
+    let mut read = Vec::new();
+    for row in table.lines() {
+        let [name, rust, _] = row.split('\t').collect::<Vec<_>>()[..] else {
+            panic!("a row of three columns: {row:?}");
+        };
+        let Some(value) = ours(name) else { continue };
+        let expected = (rust != "-").then(|| rust.parse::<u64>().expect("a number"));
+        assert_eq!(value, expected, "{name}");
+        read.push(name);
+    }
+    // As many as are here: a table that lost a row would pass.
+    assert_eq!(read.len(), 4, "{read:?}");
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

@@ -73,29 +73,38 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn the_speech_track_of_a_prefix_and_back() {
-        let listened = namespace(&["xmoq", "demo"]);
-        let track = speech_track(&listened).unwrap();
-        assert_eq!(
-            track.namespace(),
-            &namespace(&["xmoq", "transcript", "xmoq", "demo"])
-        );
-        assert_eq!(track.name(), b"speech");
-        assert_eq!(listened_of(&track), Some(listened));
+    /// The rows of `fixtures/transcript-tracks/names.tsv`, which
+    /// `@xmoq/transcript` reads too: a track, and the prefix it is the
+    /// transcript of (`None` for none).
+    fn rows() -> Vec<(String, FullTrackName, Option<TrackNamespace>)> {
+        let table = include_str!("../../../fixtures/transcript-tracks/names.tsv");
+        assert!(table.ends_with('\n') && !table.ends_with("\n\n"));
+        table
+            .lines()
+            .map(|row| {
+                let [case, fields, name, listened] = row.split('\t').collect::<Vec<_>>()[..] else {
+                    panic!("a row of four columns: {row:?}");
+                };
+                let of = |json: &str| {
+                    let fields: Vec<String> = serde_json::from_str(json).expect("a JSON array");
+                    namespace(&fields.iter().map(String::as_str).collect::<Vec<_>>())
+                };
+                let track = FullTrackName::new(of(fields), name.as_bytes().to_vec()).unwrap();
+                let listened = (listened != "none").then(|| of(listened));
+                (case.to_owned(), track, listened)
+            })
+            .collect()
     }
 
     #[test]
-    fn other_tracks_are_no_transcript() {
-        let cases = [
-            (vec!["xmoq", "transcript", "xmoq", "demo"], "lines"),
-            (vec!["xmoq", "chat", "r"], "speech"),
-            // A transcript of nothing: no prefix has no field.
-            (vec!["xmoq", "transcript"], "speech"),
-        ];
-        for (fields, name) in cases {
-            let track = FullTrackName::new(namespace(&fields), name.as_bytes().to_vec()).unwrap();
-            assert_eq!(listened_of(&track), None, "{fields:?} {name}");
+    fn a_track_is_read_and_made_as_the_shared_table_says() {
+        let rows = rows();
+        assert_eq!(rows.len(), 6);
+        for (case, track, listened) in rows {
+            assert_eq!(listened_of(&track), listened, "{case}");
+            if let Some(listened) = listened {
+                assert_eq!(speech_track(&listened).unwrap(), track, "{case}");
+            }
         }
     }
 

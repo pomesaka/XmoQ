@@ -1,0 +1,6 @@
+the transcript of a prefix	["xmoq","transcript","xmoq","demo"]	speech	["xmoq","demo"]
+the transcript of a meeting's person	["xmoq","transcript","xmoq","meet","r","alice"]	speech	["xmoq","meet","r","alice"]
+a prefix of one field	["xmoq","transcript","demo"]	speech	["demo"]
+another track of a transcript's namespace	["xmoq","transcript","xmoq","demo"]	lines	none
+speech of the chat's namespace	["xmoq","chat","r"]	speech	none
+a transcript of no prefix	["xmoq","transcript"]	speech	none
