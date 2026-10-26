@@ -3213,8 +3213,9 @@ async fn an_object_from_the_cache_keeps_its_subgroup_its_priority_and_its_proper
         send.write_all(&encoder.take_bytes()).await.unwrap();
         streams_kept.push(send);
     }
-    // Six bytes of payload, two numbers of eight bytes and two bytes.
-    held_when(&hub, |held| held.relay.cached_bytes == 24).await;
+    // Six bytes of payload, 16 for each of the three properties, and the
+    // two bytes of one (`object_size` of `xmoq-relay-core`).
+    held_when(&hub, |held| held.relay.cached_bytes == 56).await;
 
     let mut alice = Peer::connect(&hub, true).await;
     let mut request = alice.start_fetching(vec![]).await;

@@ -5020,14 +5020,21 @@ fn reset_out_stream(
     actions.push(Action::ResetDataStream { out_stream, code });
 }
 
-/// What an Object counts for against [`MAX_EARLY_BYTES`]: its payload and its
-/// properties.
+/// What an Object counts for in bytes against every limit of the relay that
+/// counts bytes ([`MAX_EARLY_BYTES`], the cache's, and
+/// `MAX_BYTES_HELD_BEYOND_THE_CACHE`), and in the time a subscriber has for
+/// a fetch stream of the relay's cache (`HubConfig` of `xmoq-relay`): its
+/// payload and its properties.
 ///
 /// WHY the properties too: an Object can carry them without a payload, 64 of
-/// them with values of up to 64 KiB each.
-fn held_size(object: &SubgroupObject) -> usize {
+/// them with values of up to 64 KiB each. WHY one function: limits that
+/// count the same Object apart let what one of them keeps out through
+/// another.
+#[must_use]
+pub fn object_size(object: &SubgroupObject) -> usize {
     // What a pair takes apart from the bytes of its value: the type and a
-    // varint value, 8 bytes each.
+    // varint value, 8 bytes each. The relay's reckoning of what it keeps, not
+    // the length of the pair on the wire, which is shorter.
     const PAIR: usize = 16;
     let properties = object.properties.iter().map(|pair| match pair.value() {
         Value::Varint(_) => PAIR,
@@ -5050,10 +5057,10 @@ fn hold_early_object(
     };
     let held = state.early.iter().flat_map(|early| &early.objects);
     let (objects, bytes) = held.fold((0usize, 0usize), |(objects, bytes), object| {
-        (objects + 1, bytes.saturating_add(held_size(object)))
+        (objects + 1, bytes.saturating_add(object_size(object)))
     });
-    let over =
-        objects >= MAX_EARLY_OBJECTS || bytes.saturating_add(held_size(&object)) > MAX_EARLY_BYTES;
+    let over = objects >= MAX_EARLY_OBJECTS
+        || bytes.saturating_add(object_size(&object)) > MAX_EARLY_BYTES;
     if over {
         state.early.remove(position);
         actions.push(Action::StopEarlyTimer { session, stream });
