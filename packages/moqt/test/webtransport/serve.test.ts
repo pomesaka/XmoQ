@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { decodeControlMessage } from "../../src/core/control-message.ts";
 import {
 	connectOver,
@@ -12,6 +12,7 @@ import {
 	SessionClosedError,
 } from "../../src/webtransport/endings.ts";
 import { fixture, hex, MOQTAIL_RELAY_SETUP, toHex, utf8 } from "../helpers.ts";
+import { state } from "./clock.ts";
 import {
 	createFakePeer,
 	type FakePeer,
@@ -747,11 +748,6 @@ describe("serve: an accepted SUBSCRIBE that the subscriber ends", () => {
 				stream.sent.cancel(fakeStreamError(7, "stop")),
 			end: { type: "peer-reset", code: 7 },
 		},
-		{
-			name: "it sends a REQUEST_UPDATE (§10.9.1)",
-			act: (stream: PeerBidiStream) => stream.reply.write(REQUEST_UPDATE),
-			end: { type: "update-failed" },
-		},
 	])("$name: the Track ends, and its calls fail", async ({ act, end }) => {
 		const { stream, track } = await serving();
 		const subgroup = await track.openSubgroup(SUBGROUP);
@@ -762,6 +758,43 @@ describe("serve: an accepted SUBSCRIBE that the subscriber ends", () => {
 		);
 		expect(error).toBeInstanceOf(PublishEndedError);
 		expect(error).toMatchObject({ end });
+		expect(await rejection(track.openSubgroup(SUBGROUP))).toBeInstanceOf(
+			PublishEndedError,
+		);
+	});
+
+	test("it sends a REQUEST_UPDATE (§10.9.1), and the Subgroup being written is not closed in 5 s: it is reset, and the Track ends", async () => {
+		const { stream, track } = await serving();
+		const subgroup = await track.openSubgroup(SUBGROUP);
+		jest.useFakeTimers();
+		try {
+			await stream.reply.write(REQUEST_UPDATE);
+			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			jest.advanceTimersByTime(4_999);
+			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			expect(await state(track.ended)).toBe("pending");
+			jest.advanceTimersByTime(1);
+			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			expect(await state(track.ended)).toBe("resolved");
+		} finally {
+			jest.useRealTimers();
+		}
+		expect(await track.ended).toEqual({ type: "update-failed" });
+		expect(
+			await rejection(subgroup.write({ objectId: 0n, payload: utf8("a") })),
+		).toBeInstanceOf(PublishEndedError);
+	});
+
+	test("it sends a REQUEST_UPDATE (§10.9.1): the Subgroup being written is written to its end, no other is opened, and then the Track ends", async () => {
+		const { stream, track } = await serving();
+		const subgroup = await track.openSubgroup(SUBGROUP);
+		await stream.reply.write(REQUEST_UPDATE);
+		await settle();
+		expect(await state(track.ended)).toBe("pending");
+		await subgroup.write({ objectId: 0n, payload: utf8("a") });
+		expect(await rejection(track.openSubgroup(SUBGROUP))).toBeInstanceOf(Error);
+		await subgroup.close();
+		expect(await track.ended).toEqual({ type: "update-failed" });
 		expect(await rejection(track.openSubgroup(SUBGROUP))).toBeInstanceOf(
 			PublishEndedError,
 		);

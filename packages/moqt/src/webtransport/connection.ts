@@ -165,6 +165,17 @@ const DEFAULT_IDLE_SUBGROUP_STREAM_TIMEOUT_MS = 30_000;
 const DEFAULT_PUBLISH_DONE_TIMEOUT_MS = 5_000;
 
 /**
+ * How long the subgroup streams of a subscription whose REQUEST_UPDATE was
+ * refused have to be closed by the application; then those still open are
+ * reset and PUBLISH_DONE UPDATE_FAILED is sent. WHY a limit: PUBLISH_DONE
+ * waits for every stream to be closed (§10.11), and an application that
+ * closes none would hold it for good. WHY 5 s: what the Rust publishers
+ * give a Group to be written (`GROUP_WRITE_WAIT` of
+ * `crates/track-serving/src/streams.rs`). **Provisional.**
+ */
+const UPDATE_REFUSED_WAIT_MS = 5_000;
+
+/**
  * The value the Rust client has (PUBLISH_DONE_ANSWER_WAIT in
  * crates/moqt-client). Provisional.
  *
@@ -440,7 +451,11 @@ export interface PublishedTrack {
 	 * in `parameters`.
 	 */
 	onNewGroupRequest(handler: (group: bigint) => void): void;
-	/** Rejects with `PublishEndedError` once the subscription is over. */
+	/**
+	 * Rejects with `PublishEndedError` once the subscription is over, and
+	 * with an `Error` while a refused REQUEST_UPDATE ends it: the Subgroups
+	 * being written are written to their end first (§10.9.1).
+	 */
 	openSubgroup(options: SubgroupOptions): Promise<SubgroupWriter>;
 	/**
 	 * Sends PUBLISH_DONE and closes the request stream (§10.11), then waits
@@ -1110,6 +1125,8 @@ interface ActivePublish {
 	onNewGroup: ((group: bigint) => void) | undefined;
 	/** The last NEW_GROUP_REQUEST that came while no handler was named. */
 	newGroupAsked: bigint | undefined;
+	/** After a refused REQUEST_UPDATE: when the streams still open are given up (`UPDATE_REFUSED_WAIT_MS`). */
+	refusalTimer?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -1475,6 +1492,7 @@ export async function connectOver(
 		const publish = publishes.get(requestId);
 		if (publish === undefined) return;
 		publishes.delete(requestId);
+		clearTimeout(publish.refusalTimer);
 		publish.end = end;
 		publish.ended.resolve(end);
 	};
@@ -2460,6 +2478,16 @@ export async function connectOver(
 			case "new-group-request": {
 				const publish = publishes.get(event.requestId);
 				if (publish !== undefined) newGroupAsked(publish, event.group);
+				return undefined;
+			}
+			case "update-refused": {
+				const { requestId } = event;
+				const publish = publishes.get(requestId);
+				if (publish === undefined) return undefined;
+				publish.refusalTimer = setTimeout(
+					() => applyInput((s) => s.expireUpdateRefusal(requestId)),
+					UPDATE_REFUSED_WAIT_MS,
+				);
 				return undefined;
 			}
 			case "update-ok":

@@ -510,33 +510,48 @@ describe("Session", () => {
 		},
 	);
 
-	test("refuses a REQUEST_UPDATE for its PUBLISH and ends the subscription with UPDATE_FAILED (§10.9.1)", () => {
+	test("refuses a REQUEST_UPDATE for its PUBLISH, lets the stream being written end, and then ends the subscription with UPDATE_FAILED (§10.9.1)", () => {
 		const session = withRequests();
 		session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
-		session.openSubgroup(2n, SUBGROUP);
+		const { value: stream } = session.openSubgroup(2n, SUBGROUP);
 
-		// REQUEST_UPDATE with Request ID 1 and FORWARD = 0.
+		// REQUEST_UPDATE with Request ID 1 and FORWARD = 0: refused, and
+		// nothing more while the stream is open.
 		const outputs = session.receiveRequestStreamData(
 			2,
 			hex("02 00 04 01 01 10 00"),
 			false,
 		);
-		expect(outputs.map((output) => output.type)).toEqual([
-			"send",
-			"reset",
-			"send",
-			"event",
-			"finish",
-		]);
-		const [refusal, reset, done, closed] = outputs;
-		if (refusal?.type !== "send" || done?.type !== "send") {
-			throw new Error("the outputs are not the two messages expected");
-		}
+		expect(outputs.map((output) => output.type)).toEqual(["send", "event"]);
+		const [refusal] = outputs;
+		if (refusal?.type !== "send") throw new Error("no REQUEST_ERROR");
 		expect(decodeControlMessage(refusal.data)).toMatchObject({
 			status: "ok",
 			value: { type: "REQUEST_ERROR", errorCode: 3n },
 		});
-		expect(reset).toEqual({ type: "reset", stream: 3, code: 1 });
+		// Another update while it ends gets nothing (§10.9.1); no new stream
+		// is opened, and the application's own PUBLISH_DONE is refused.
+		expect(
+			session.receiveRequestStreamData(2, hex("02 00 02 03 00"), false),
+		).toEqual([]);
+		expect(() => session.openSubgroup(2n, SUBGROUP)).toThrow(
+			"a REQUEST_UPDATE of it was refused",
+		);
+		expect(() => session.publishDone(2n, 0n, "")).toThrow("UPDATE_FAILED");
+		// The stream is written to its end, and then PUBLISH_DONE follows.
+		expect(
+			session.writeObject(stream, { objectId: 0n, payload: hex("61") }).length,
+		).toBe(1);
+		const ended = session.closeSubgroup(stream);
+		expect(ended.map((output) => output.type)).toEqual([
+			"finish",
+			"send",
+			"event",
+			"finish",
+		]);
+		const [streamEnd, done, closed] = ended;
+		if (done?.type !== "send") throw new Error("no PUBLISH_DONE");
+		expect(streamEnd).toEqual({ type: "finish", stream });
 		expect(decodeControlMessage(done.data)).toMatchObject({
 			status: "ok",
 			value: { type: "PUBLISH_DONE", statusCode: 8n, streamCount: 1n },
@@ -547,6 +562,68 @@ describe("Session", () => {
 		});
 		expect(session.closed).toBe(false);
 	});
+
+	test("after a refused REQUEST_UPDATE, the caller is told to wait, and when its wait runs out the streams left are reset and PUBLISH_DONE follows", () => {
+		const session = withRequests();
+		session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
+		const { value: stream } = session.openSubgroup(2n, SUBGROUP);
+		const refused = session.receiveRequestStreamData(
+			2,
+			hex("02 00 04 01 01 10 00"),
+			false,
+		);
+		expect(refused.at(-1)).toEqual({
+			type: "event",
+			event: { type: "update-refused", requestId: 2n },
+		});
+		const expired = session.expireUpdateRefusal(2n);
+		expect(expired.map((output) => output.type)).toEqual([
+			"reset",
+			"send",
+			"event",
+			"finish",
+		]);
+		expect(expired[0]).toEqual({ type: "reset", stream, code: 1 });
+		// Over: a second expiry does nothing.
+		expect(session.expireUpdateRefusal(2n)).toEqual([]);
+	});
+
+	test.each([
+		{
+			name: "reset by this endpoint",
+			end: (session: Session, stream: number) =>
+				session.resetSubgroup(stream, 1),
+		},
+		{
+			name: "stopped by the subscriber",
+			end: (session: Session, stream: number) =>
+				session.localStreamStopped(stream, 1),
+		},
+		{
+			name: "not opened",
+			end: (session: Session, stream: number) =>
+				session.subgroupNotOpened(stream),
+		},
+	])(
+		"after a refused REQUEST_UPDATE, PUBLISH_DONE follows the last stream also where it was $name",
+		({ end }) => {
+			const session = withRequests();
+			session.receiveRequestStreamData(2, hex("07 00 01 00"), false);
+			const { value: stream } = session.openSubgroup(2n, SUBGROUP);
+			session.receiveRequestStreamData(2, hex("02 00 04 01 01 10 00"), false);
+			const outputs = end(session, stream);
+			const done = outputs.find(
+				(output) =>
+					output.type === "send" &&
+					decodeControlMessage(output.data).status === "ok",
+			);
+			if (done?.type !== "send") throw new Error("no PUBLISH_DONE");
+			expect(decodeControlMessage(done.data)).toMatchObject({
+				status: "ok",
+				value: { type: "PUBLISH_DONE", statusCode: 8n },
+			});
+		},
+	);
 
 	// §10.2.13. The bytes are written by hand: Request ID 1, one parameter,
 	// NEW_GROUP_REQUEST (0x32) with the value in the last byte.
