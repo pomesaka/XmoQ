@@ -240,6 +240,21 @@
 //     - Whether the encoder gave a `description` is said, and not judged:
 //       none is sent, and whether one is to be is undecided.
 //
+//   audio-beyond-time
+//                 A page serves an audio track Object by Object
+//                 (`serveTrack`, `sendObjectIn`), a Group each, with the
+//                 Opus packet `f8 ff fe` (one 20 ms frame of CELT, of no
+//                 sound); another plays it with `playAudioTrack` through the
+//                 own relay. The first Object has the LOC Timestamp 2^60
+//                 microseconds, which a decoder of WebCodecs does not take
+//                 (`MAX_DECODER_TIME` of `@xmoq/media`); the 50 after it have
+//                 the driver's clock, 20 ms apart. Written before the first
+//                 run: **the viewer drops the first as `beyond-time`, decodes
+//                 the 50 after it**, received 51, and its decoder does not
+//                 fail. Before `MAX_DECODER_TIME` was looked at, the first
+//                 Object threw as its chunk was made, and nothing after it
+//                 was decoded.
+//
 //   goaway-from-moqtail, goaway-from-moqtail-viewer-first, goaway-from-moqtail-rust
 //                 Through moqtail's relay (relay@0.15.0), started with
 //                 `--redirect-uri` naming the own relay on the run's port
@@ -305,6 +320,7 @@
 //       that day on GOAWAY and moqtail).
 //
 import { parseArgs } from "node:util";
+import { locProperties } from "@xmoq/loc";
 import {
 	captureGroup,
 	log,
@@ -326,6 +342,7 @@ import {
 import type {
 	OwnPageExtras,
 	PageKeptReport,
+	PageProperty,
 	PageVideoPublishReport,
 	PageVideoReport,
 	PageVideoSetup,
@@ -1245,6 +1262,97 @@ async function audio(): Promise<string> {
 	return `${pieces.length} pieces of Opus audio of a page decoded by another through the own relay, ${first.frames} frames each at 48000 Hz, one after the other (within ${offBy} microseconds), the largest sample ${peak.toFixed(2)} of 1; ${Math.round(sent.encodedBytes / sent.encoded)} bytes a chunk; the encoder gave ${sent.descriptionLength === null ? "no description" : `a description of ${sent.descriptionLength} bytes, which is not sent`}`;
 }
 
+/** Objects of the audio track of `audioBeyondTime` after the first: a second of Opus. */
+const AUDIO_AFTER_BEYOND = 50;
+/** The time of its first: past 2^53 - 1 microseconds, where a LOC Timestamp still is. */
+const BEYOND_DECODER_TIME = 2n ** 60n;
+/**
+ * One Opus frame of 20 ms, of no sound (RFC 6716 §3.1: TOC 0xF8 is CELT,
+ * fullband, 20 ms, mono, one frame).
+ */
+const OPUS_SILENCE_HEX = "f8fffe";
+
+async function audioBeyondTime(): Promise<string> {
+	const context = await startRun({
+		relay: "own",
+		port: options.port,
+		clients: ["own-browser"],
+		verbose: options.verbose,
+	});
+	const publisher = await openConnectedPage(
+		context,
+		"publisher",
+		"own-browser",
+	);
+	await withTimeout(
+		publisher.evaluate(
+			([namespace]) =>
+				window.xmoqOwn.serveTrack(namespace, "audio", "refuse", ""),
+			[PAGE_NAMESPACE] satisfies [string],
+		),
+		"the page to announce its namespace",
+	);
+	const viewer = await openConnectedPage(context, "viewer", "own-browser");
+	await withTimeout(
+		viewer.evaluate(
+			([namespace]) => window.xmoqOwn.playAudio(namespace, "audio"),
+			[PAGE_NAMESPACE] satisfies [string],
+		),
+		"the viewer to subscribe",
+	);
+	await withTimeout(
+		publisher.evaluate(() => window.xmoqOwn.servingTrack()),
+		"the publisher to be asked for the track",
+	);
+	/** A Group a piece, one Object each, as `createAudioTrackEncoder` sends. */
+	const send = async (group: number, microseconds: bigint): Promise<void> => {
+		const properties = locProperties({ timestamp: microseconds }).map(
+			({ type, value }) => ({
+				type: type.toString(),
+				varint: value.toString(),
+			}),
+		);
+		await withTimeout(
+			publisher.evaluate(
+				([g, hex, props]) =>
+					window.xmoqOwn.sendObjectIn(g, hex, true, props, null),
+				[String(group), OPUS_SILENCE_HEX, properties] satisfies [
+					string,
+					string,
+					PageProperty[],
+				],
+			),
+			`the publisher to send Group ${group}`,
+		);
+	};
+	await send(0, BEYOND_DECODER_TIME);
+	const now = BigInt(Date.now()) * 1000n;
+	for (let piece = 1; piece <= AUDIO_AFTER_BEYOND; piece++) {
+		await send(piece, now + BigInt(piece) * 20_000n);
+	}
+	const report = await withTimeout(
+		viewer.evaluate(
+			([pieces, timeoutMs]) => window.xmoqOwn.audioReport(pieces, timeoutMs),
+			[AUDIO_AFTER_BEYOND, PLAY_TIMEOUT_MS] satisfies [number, number],
+		),
+		"the viewer to report on its audio",
+		PLAY_TIMEOUT_MS + 5_000,
+	);
+	const seen = JSON.stringify({ ...report, pieces: report.pieces.length });
+	log("driver", `REPORT ${seen}`);
+	if (
+		report.pieces.length !== AUDIO_AFTER_BEYOND ||
+		report.received !== AUDIO_AFTER_BEYOND + 1 ||
+		JSON.stringify(report.dropped) !== JSON.stringify({ "beyond-time": 1 }) ||
+		report.decoderError !== null
+	) {
+		throw new Error(
+			`the viewer was to drop the first Object as beyond-time, and decode the ${AUDIO_AFTER_BEYOND} after it, with no decoder error: ${seen}`,
+		);
+	}
+	return `an Object whose time is 2^60 microseconds was dropped as beyond-time, and the ${AUDIO_AFTER_BEYOND} after it were decoded`;
+}
+
 /** Frames the viewer shows on a session before the run goes on: a second of them. */
 const SHOWN_A_SESSION = 25;
 
@@ -1681,6 +1789,7 @@ const CASES: Record<string, () => Promise<string>> = {
 	"goaway-from-own": () => goAwayAtSigterm("own", false),
 	"goaway-from-own-rust": () => goAwayAtSigtermRust("own"),
 	audio,
+	"audio-beyond-time": audioBeyondTime,
 	"late-viewer": lateViewer,
 	"late-viewer-new-group": lateViewerNewGroup,
 	"to-mlmsub": toMlmsub,

@@ -23,6 +23,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@xmoq/chat": "workspace:*",
+        "@xmoq/loc": "workspace:*",
         "@xmoq/media": "workspace:*",
         "@xmoq/meeting": "workspace:*",
         "@xmoq/moqt": "workspace:*",

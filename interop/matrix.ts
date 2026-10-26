@@ -1994,6 +1994,12 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 						relay: "own",
 					},
 					{
+						name: "own relay: audio: an Object whose time no decoder takes is dropped, and the sound after it is decoded",
+						script: "video.ts" as const,
+						args: ["--video", "audio-beyond-time"],
+						relay: "own",
+					},
+					{
 						name: "own relay: video: the relay is stopped and started anew, and the pages that publish and play connect again and go on",
 						script: "video.ts" as const,
 						args: ["--video", "reconnect"],
