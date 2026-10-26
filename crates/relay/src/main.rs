@@ -48,6 +48,11 @@ const MAX_HANDSHAKES: usize = 64;
 /// read on 2026-10-24).
 const GOAWAY_TIMEOUT_MS: u64 = 10_000;
 
+/// The most `ARRIVED` lines that wait to be written (`--log-arrivals on`):
+/// at about 100 bytes a line, some 6 MiB, and some 20 seconds of 100 tracks
+/// of 30 Objects a second. Provisional.
+const ARRIVALS_WAITING: usize = 65_536;
+
 /// The flags, and what each is without it. Every number is more than 0
 /// where the flag says it.
 const USAGE: &str = "\
@@ -549,7 +554,7 @@ async fn main() -> Result<()> {
     args.send.apply(&mut config);
     args.session.apply(&mut config);
     config.stats_every = args.stats_every;
-    config.log_arrivals = args.log_arrivals;
+    config.log_arrivals = args.log_arrivals.then(|| Log::stderr(ARRIVALS_WAITING));
     config.auth_key = args.auth_key;
     config.auth_setup = args.auth_setup;
     let limits = quic_limits(&config, args.idle_timeout, args.congestion);
