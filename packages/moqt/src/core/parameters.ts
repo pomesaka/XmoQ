@@ -53,8 +53,9 @@ export interface MessageParameters {
 	objectDeliveryTimeout?: bigint;
 	/**
 	 * 0x03, one entry per instance (§10.2.2 allows repeating it). Each entry is
-	 * the Token structure as bytes: it is carried, not interpreted, because
-	 * authorization is an open question of the project.
+	 * the Token structure as bytes: it is carried, not interpreted. The relay
+	 * checks it (`crates/relay/src/auth.rs`); who may get one is undecided
+	 * (`docs/open-questions.md`).
 	 */
 	authorizationToken?: Uint8Array[];
 	/** 0x04, milliseconds. */

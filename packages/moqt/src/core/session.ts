@@ -58,9 +58,9 @@ export interface SessionOptions {
  * becomes a `close-session` output. Methods the application calls throw when
  * they are misused.
  *
- * Not implemented: the server role, requests opened by the peer other than
+ * Not implemented: the server role; requests opened by the peer other than
  * SUBSCRIBE, a Standalone FETCH and TRACK_STATUS (they are answered with
- * REQUEST_ERROR), REQUEST_UPDATE, GOAWAY,
+ * REQUEST_ERROR, a Joining FETCH with NOT_SUPPORTED);
  * delivering Object Datagrams (their type is checked, `receiveDatagram`),
  * SUBSCRIBE_TRACKS and timers. Of a FETCH this endpoint
  * sends, the fetch stream is handed on as bytes; `fetch.ts` decodes them for

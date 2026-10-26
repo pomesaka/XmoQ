@@ -548,7 +548,7 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 							// docs/experiments/2026-10-12-a-request-that-waits-for-a-stream.md).
 							// Asked again, the request waits here as the API has
 							// it wait there.
-							// WHY not the end of the session, which it was: a peer
+							// WHY not the end of the session: a peer
 							// that has no room for a request for a moment has not
 							// ended anything. A session that is gone is reported
 							// by the transport, and ends this by `cleared`.

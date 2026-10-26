@@ -189,7 +189,10 @@ const MAX_VALUE = 2n ** 64n - 1n;
  *   of the one before would hold the picture back for a frame that is shown
  *   for a moment. WHY NOT only the limits: a Group whose last frames were
  *   lost would hold the next one back until 32 Objects of it had come.
- *   FIXME: decide this again with a buffer for playback and measurements.
+ *   WHY NOT a later Group waiting for the one before it, with a buffer for
+ *   playback: tried, and not put in, as it showed no more frames, and fewer
+ *   with 5% lost (docs/experiments/2026-10-12-a-later-group-of-video-waits-for-the-one-before-it.md,
+ *   which has what a later try needs).
  * - **Where the publisher says that nothing exists, nothing is waited
  *   for**: an End of Group or an End of Track as an Object (transport draft
  *   18 §11.2.1.1) is taken when it arrives, whatever came before it. The

@@ -106,7 +106,7 @@ const NAMESPACE_CHANGES_HIGH_WATER_MARK = 64;
  */
 const MAX_STREAM_ERROR_CODE = 255;
 const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
-/** Provisional: the time the peer's SETUP and an answer get. The Rust client has the same (`STREAM_OPEN_WAIT`). */
+/** Provisional: how long a request may wait for its stream to be opened (`openStreamTimeoutMs`). The Rust client has the same (`STREAM_OPEN_WAIT_MS`). */
 const DEFAULT_OPEN_STREAM_TIMEOUT_MS = 10_000;
 /** The Error Reason of the PUBLISH_DONE that ends a PUBLISH nobody answered; the Rust client sends the same. */
 const NO_ANSWER_IN_TIME = "no answer in time";
@@ -2529,8 +2529,8 @@ export async function connectOver(
 			case "peer-track-status": {
 				// WHY refused, and not handed to `serve`: this is a client, and
 				// none of its callers is a relay or a publisher that answers what
-				// a SUBSCRIBE would get (§10.14). NOT_SUPPORTED, as before the
-				// session decoded TRACK_STATUS. Through `answer` for the reason
+				// a SUBSCRIBE would get (§10.14). NOT_SUPPORTED, as the Rust
+				// client answers it. Through `answer` for the reason
 				// in `handOver`: the request can be gone by now.
 				const { requestId } = event;
 				pendingPeerRequest(requestId)
