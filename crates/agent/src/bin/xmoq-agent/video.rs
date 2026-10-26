@@ -7,7 +7,7 @@ use xmoq_moqt::RequestFault;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestId, Session};
 use xmoq_msf::CatalogTrack;
-use xmoq_subscriber::kept::{Asking, Came, KeptTrack, Said, Wanted};
+use xmoq_subscriber::kept::{Asking, KeptTrack, KeptTrackChange, KeptTrackInput, Wanted};
 use xmoq_subscriber::session::{CatalogKept, Events, Requests};
 
 /// The video of one session.
@@ -102,7 +102,7 @@ impl Video {
     }
 
     /// What comes next.
-    pub async fn next(&mut self) -> Came {
+    pub async fn next(&mut self) -> KeptTrackInput {
         self.kept.next().await
     }
 
@@ -116,7 +116,7 @@ impl Video {
     pub fn on(
         &mut self,
         session: &mut Session,
-        came: Came,
+        came: KeptTrackInput,
     ) -> Result<Option<String>, RequestFault> {
         Ok(self.kept.on(session, came)?.and_then(tell))
     }
@@ -151,23 +151,23 @@ impl Video {
 
 /// Writes what became of the video; `Some` with why where it is given up on
 /// the session.
-fn tell(said: Said) -> Option<String> {
+fn tell(said: KeptTrackChange) -> Option<String> {
     match said {
-        Said::Subscribed { track_alias } => {
+        KeptTrackChange::Subscribed { track_alias } => {
             eprintln!("XMOQ_AGENT_VIDEO_AGAIN track_alias={track_alias}");
         }
-        Said::Ended { how, pause_ms } => {
+        KeptTrackChange::Ended { how, pause_ms } => {
             eprintln!("XMOQ_AGENT_VIDEO_ENDED {how}; asking again in {pause_ms} ms");
         }
-        Said::Refused {
+        KeptTrackChange::Refused {
             error_code,
             pause_ms,
         } => eprintln!(
             "XMOQ_AGENT_VIDEO_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"
         ),
         // Not asked again on this session, as `again_after_failure` says.
-        Said::GivenUp(why) | Said::Failed { why, .. } => return Some(why),
-        Said::Other(other) => eprintln!("XMOQ_AGENT_VIDEO_SAID {other:?}"),
+        KeptTrackChange::GivenUp(why) | KeptTrackChange::Failed { why, .. } => return Some(why),
+        KeptTrackChange::Other(other) => eprintln!("XMOQ_AGENT_VIDEO_SAID {other:?}"),
     }
     None
 }

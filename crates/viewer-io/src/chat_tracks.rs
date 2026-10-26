@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Result, anyhow, bail};
 use xmoq_chat_tracks::limits::TEXT_BYTES;
 use xmoq_chat_tracks::names::{LINES, Person, SAID, person_namespace, room_namespace};
-use xmoq_chat_tracks::payloads::{Line, Said, read_line};
+use xmoq_chat_tracks::payloads::{Line, SentLine, read_line};
 use xmoq_moqt::RequestFault;
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
@@ -32,7 +32,7 @@ use xmoq_viewer::chat_track::{Say, Saying};
 use xmoq_subscriber::follow::{self, Asking, Follower, Track, send_request};
 use xmoq_subscriber::session::Requests;
 
-pub use xmoq_subscriber::follow::Came;
+pub use xmoq_subscriber::follow::FollowerInput;
 
 type Send = <WtConnection as Connection>::Send;
 type Recv = <WtConnection as Connection>::Recv;
@@ -63,11 +63,11 @@ pub enum ChatOutcome {
 }
 
 impl ChatOutcome {
-    fn of(out: follow::Out<Line>) -> Self {
+    fn of(out: follow::FollowOutcome<Line>) -> Self {
         match out {
-            follow::Out::Item(line) => Self::Line(line),
-            follow::Out::Gap(gap) => Self::Gap(gap),
-            follow::Out::Note(note) => Self::Note(note),
+            follow::FollowOutcome::Item(line) => Self::Line(line),
+            follow::FollowOutcome::Gap(gap) => Self::Gap(gap),
+            follow::FollowOutcome::Note(note) => Self::Note(note),
         }
     }
 }
@@ -202,7 +202,7 @@ impl ChatTracks {
     }
 
     /// What comes next.
-    pub async fn next(&mut self) -> Came {
+    pub async fn next(&mut self) -> FollowerInput {
         self.lines.next().await
     }
 
@@ -214,7 +214,7 @@ impl ChatTracks {
     pub async fn on(
         &mut self,
         session: &mut Session,
-        came: Came,
+        came: FollowerInput,
     ) -> Result<Vec<ChatOutcome>, RequestFault> {
         Ok(self
             .lines
@@ -286,7 +286,7 @@ impl ChatTracks {
             object_id: 0,
             properties: vec![],
             status: ObjectStatus::Normal,
-            payload: Said {
+            payload: SentLine {
                 text: text.to_string(),
                 sent_at,
             }

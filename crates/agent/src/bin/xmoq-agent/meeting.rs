@@ -17,7 +17,7 @@ use xmoq_moqt::session::{RequestEvent, RequestId, Session};
 use xmoq_moqt_io::client;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
-use xmoq_subscriber::kept::{Asking, Came as VideoCame};
+use xmoq_subscriber::kept::{Asking, KeptTrackInput};
 use xmoq_subscriber::namespaces::KeptNamespace;
 use xmoq_subscriber::session::{Events, GoingAway, GoneAway, new_url};
 use xmoq_viewer::meeting::{Limits, Meeting, Video as VideoStep};
@@ -39,7 +39,7 @@ pub enum MeetingInput {
     /// No picture of the watched participant was asked for in a while.
     Linger,
     /// What came of the video.
-    Video(VideoCame),
+    Video(KeptTrackInput),
 }
 
 /// Who is in the meeting, and whose voice was read last, from one session

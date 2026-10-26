@@ -16,7 +16,7 @@ pub const MAX_SENT_AT: u64 = (1 << 53) - 1;
 
 /// A line as its sender said it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Said {
+pub struct SentLine {
     /// `text`.
     pub text: String,
     /// `sentAt`, which only its form is checked of.
@@ -64,15 +64,15 @@ impl Malformed {
 /// # Errors
 ///
 /// What is wrong with it.
-pub fn read_said(payload: &[u8]) -> Result<Said, Malformed> {
+pub fn read_said(payload: &[u8]) -> Result<SentLine, Malformed> {
     let members = object(payload)?;
-    Ok(Said {
+    Ok(SentLine {
         text: string(&members, "text", Malformed::Text)?,
         sent_at: time(&members, "sentAt", Malformed::SentAt)?,
     })
 }
 
-impl Said {
+impl SentLine {
     /// The payload of the line on `said`, `{"text":...,"sentAt":...}`.
     #[must_use]
     pub fn payload(&self) -> Vec<u8> {
@@ -208,7 +208,7 @@ mod tests {
             let read = read_said(payload.as_bytes());
             let expected = match column(malformed) {
                 Some(word) => Err(word),
-                None => Ok(Said {
+                None => Ok(SentLine {
                     text: text_of(text),
                     sent_at: sent_at.parse().unwrap(),
                 }),

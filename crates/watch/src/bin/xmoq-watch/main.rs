@@ -48,7 +48,7 @@ use xmoq_msf::CatalogTrack;
 use xmoq_picture::video_decoder::VideoDecoder;
 use xmoq_subscriber::catalog::{Became, FollowedCatalog};
 use xmoq_subscriber::follow::RENDEZVOUS_MS;
-use xmoq_subscriber::kept::{Asking, KeptTrack, Said, Wanted};
+use xmoq_subscriber::kept::{Asking, KeptTrack, KeptTrackChange, Wanted};
 use xmoq_subscriber::session::{
     self, Events, GoingAway, GoneAway, Requests, Subscription, new_url, timestamp_of,
 };
@@ -738,19 +738,23 @@ fn tell_chat(ui: &mut Ui, out: ChatOutcome) {
 }
 
 /// Writes what became of the sound kept on the session.
-fn tell_audio(ui: &mut Ui, said: Said) {
+fn tell_audio(ui: &mut Ui, said: KeptTrackChange) {
     let line = match said {
-        Said::Subscribed { track_alias } => format!("AUDIO_AGAIN track_alias={track_alias}"),
-        Said::Ended { how, pause_ms } => {
+        KeptTrackChange::Subscribed { track_alias } => {
+            format!("AUDIO_AGAIN track_alias={track_alias}")
+        }
+        KeptTrackChange::Ended { how, pause_ms } => {
             format!("AUDIO_ENDED {how}; asking again in {pause_ms} ms")
         }
-        Said::Refused {
+        KeptTrackChange::Refused {
             error_code,
             pause_ms,
         } => format!("AUDIO_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"),
         // As the page: not asked for again on this session.
-        Said::GivenUp(why) | Said::Failed { why, .. } => format!("AUDIO_GIVEN_UP {why}"),
-        Said::Other(other) => format!("AUDIO_SAID {other:?}"),
+        KeptTrackChange::GivenUp(why) | KeptTrackChange::Failed { why, .. } => {
+            format!("AUDIO_GIVEN_UP {why}")
+        }
+        KeptTrackChange::Other(other) => format!("AUDIO_SAID {other:?}"),
     };
     ui.note(&line);
 }

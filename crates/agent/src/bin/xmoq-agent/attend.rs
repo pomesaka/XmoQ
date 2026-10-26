@@ -32,7 +32,7 @@ use xmoq_moqt_io::{
 };
 use xmoq_msf::CatalogTrack;
 use xmoq_subscriber::catalog::{Became, FollowedCatalog};
-use xmoq_subscriber::follow::{Asking, Follower, Out as FollowOut, RENDEZVOUS_MS, Track};
+use xmoq_subscriber::follow::{Asking, FollowOutcome, Follower, RENDEZVOUS_MS, Track};
 use xmoq_subscriber::namespaces::KeptNamespace;
 use xmoq_subscriber::session::{
     self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of,
@@ -358,9 +358,9 @@ const SPEECH_CATCH_UP: u64 = xmoq_viewer::chat_track::CATCH_UP_LINES;
 
 /// Writes what came of the transcript; a piece also tells the meeting who
 /// spoke.
-fn on_speech(reader: &mut Reader, out: FollowOut<Speech>) {
+fn on_speech(reader: &mut Reader, out: FollowOutcome<Speech>) {
     match out {
-        FollowOut::Item(piece) => {
+        FollowOutcome::Item(piece) => {
             crate::meeting::spoke(reader, &piece.from);
             reader.tell(&Event::Speech {
                 number: piece.number,
@@ -371,13 +371,13 @@ fn on_speech(reader: &mut Reader, out: FollowOut<Speech>) {
                 read_at: piece.at,
             });
         }
-        FollowOut::Gap(gap) => reader.error(format!(
+        FollowOutcome::Gap(gap) => reader.error(format!(
             "speech: {} pieces not fetched ({} to {})",
             gap.before - gap.after - 1,
             gap.after + 1,
             gap.before - 1
         )),
-        FollowOut::Note(note) => eprintln!("{note}"),
+        FollowOutcome::Note(note) => eprintln!("{note}"),
     }
 }
 
@@ -915,7 +915,7 @@ pub async fn attend(
                 {
                     if let Some(follower) = speech.as_mut() {
                         if let Some(piece) = follower.live(header.group_id, &object.payload) {
-                            on_speech(reader, FollowOut::Item(piece));
+                            on_speech(reader, FollowOutcome::Item(piece));
                         }
                         remember_speech(reader, place, follower);
                     }
