@@ -15,7 +15,9 @@ export {
 	MAX_NAMED_ASK_AGAIN_DELAY_MS,
 	MIN_ASK_AGAIN_DELAY_MS,
 	type NextSession,
+	type Pause,
 	type SessionEnding,
+	VIEWER_PAUSE,
 } from "./core/again.ts";
 export type { FetchRange, Redirect } from "./core/control-message.ts";
 export { RequestErrorCode } from "./core/error.ts";

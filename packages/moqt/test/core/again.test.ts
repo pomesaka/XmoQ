@@ -115,8 +115,18 @@ describe("the next session", () => {
 	// The first try is at 0; each step moves the clock by how long its
 	// session lasted from its try (`@N`, 0 where it is not said), and then
 	// by the pause before the next try.
-	test.each(nextSession)("%s", (_name, againMs, steps) => {
-		const next = createNextSession(Number(againMs), 0);
+	test.each(nextSession)("%s", (_name, pauseText, steps) => {
+		const [first, most, wentWell, ...rest] = (pauseText ?? "").split(",");
+		const firstMs = cellOf(first);
+		const mostMs = cellOf(most);
+		if (firstMs === undefined || mostMs === undefined || rest.length > 0) {
+			throw new Error(`no pause ${pauseText}`);
+		}
+		const wentWellMs = cellOf(wentWell);
+		const next = createNextSession(
+			{ firstMs, mostMs, ...(wentWellMs === undefined ? {} : { wentWellMs }) },
+			0,
+		);
 		let now = 0;
 		const expected = (steps ?? "").split(" ");
 		const seen = expected.map((step) => {
