@@ -55,6 +55,11 @@ export interface SessionLimits extends SubgroupStreamLimits {
 	 * fetch stream is being written. One more is answered with REQUEST_ERROR
 	 * `EXCESSIVE_LOAD`.
 	 *
+	 * A FETCH that was accepted and that the subscriber neither reads nor
+	 * gives up holds its two streams, and its place among these, for the
+	 * session. Behind the own relay this does not happen: the relay gives up
+	 * on a subscriber that does not read and cancels upstream.
+	 *
 	 * WHY 32, where an XmoQ relay asks one publisher for 16 at once: the
 	 * relay has room for its next FETCH when it cancels one, and this
 	 * endpoint has it when it has read that cancellation, which travels on

@@ -1111,6 +1111,16 @@ fn fetch_to_answer(answering: Option<Pace>, request: &PeerRequest) -> Option<&Fe
 /// error code"). WHY NOT `UNINTERESTED`: that is a subscriber's that takes
 /// PUBLISH and does not want this track (§10.10), which would read as if
 /// another track were taken.
+///
+/// A SUBSCRIBE read before this client has sent its PUBLISH gets
+/// `NOT_SUPPORTED` too. No rule is broken: the subscription §5.1 means ("an
+/// existing subscription in Pending (publisher) state") begins with the
+/// PUBLISH, and once that is sent the session answers
+/// `DUPLICATE_SUBSCRIPTION`, as `@xmoq/moqt` does. The relay waits for a
+/// PUBLISH after `DUPLICATE_SUBSCRIPTION` and not after `NOT_SUPPORTED`, so a
+/// subscriber whose SUBSCRIBE reaches this client through the relay before
+/// its PUBLISH is on the way gets `DOES_NOT_EXIST`; the track is there a
+/// moment later.
 fn refusal_code(serves: bool, request: &PeerRequest) -> u64 {
     match request {
         // A track other than the one it announced.
@@ -2566,6 +2576,12 @@ impl Client<'_> {
     /// and a FIN, and goes on: how the peer ends its direction is read as
     /// what comes on the stream of a request that is over
     /// (`said_the_last`).
+    ///
+    /// FIXME: the peer's direction is waited for here without an end, where
+    /// [`Self::end_serving`] gives it `PUBLISH_DONE_ANSWER_WAIT`: after
+    /// `UPDATE_FAILED` while the client still publishes, and after the
+    /// driver's `publish-done` line. A peer that never ends it keeps the
+    /// request in the session (read, not run).
     async fn end_served(&mut self, serving: &mut Option<Serving>, status: u64) -> Result<()> {
         let Some(mut ended) = serving.take() else {
             return Ok(());
@@ -2645,6 +2661,18 @@ impl Client<'_> {
 
     /// What the flags put between a SUBSCRIBE of the peer and its
     /// `SUBSCRIBE_OK`: a time, and a line of the driver.
+    ///
+    /// The peer is left unanswered in two waits of a mode that publishes:
+    /// this one, and the up to 3 seconds after the last `PUBLISH_DONE`, when
+    /// the client waits for the peer to end that stream. A request of the
+    /// peer that comes in the first is answered when the wait is over; one
+    /// that comes in the second gets no answer, and the session closes right
+    /// after. In every other wait (the answers to its `PUBLISH_NAMESPACE` and
+    /// PUBLISH, `--publish-delay-ms`, the driver's line `publish`, an Object
+    /// under way, the end of the first stream when it publishes anew) the
+    /// client answers ([`Self::attending`]). What it holds unread meanwhile is
+    /// `EVENT_QUEUE` events a queue (`src/io.rs`), after which its readers
+    /// wait.
     async fn before_serving(&self, request: PeerRequestId, stdin: &mut DriverLines) -> Result<()> {
         tokio::time::sleep(self.args.serve_delay).await;
         if self.args.on_line.serve {

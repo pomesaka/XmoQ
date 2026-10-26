@@ -136,7 +136,8 @@ impl Default for StreamConfig {
 /// subscription and the session go on. Fetch, control and padding streams do
 /// not have this time. As `idleSubgroupStreamTimeoutMs` of `@xmoq/moqt`
 /// (`docs/moqt-implementation-notes.md`, "A subgroup stream of the peer that
-/// sends nothing after its header"). Provisional.
+/// sends nothing after its header"). Provisional. A relay passes such an
+/// end on to its subscribers as a reset with `INTERNAL_ERROR`.
 ///
 /// WHY a time at all: §11.4 and §11.4.3 say nothing of a subgroup stream
 /// left open without bytes, and §13.6 advises timeouts against "a peer that
@@ -432,7 +433,9 @@ impl StreamStops {
     /// WHY by Track Alias, where stops are by stream: the stream is opened
     /// before its header says its alias, and the alias is bound to the
     /// subscription when its `SUBSCRIBE_OK` comes, while the stream may be
-    /// read already. WHY its caller lets go of it ([`Self::unlimit_payload`]):
+    /// read already: an Object whose length was read while the alias of its
+    /// stream was not known is held only to the bound of every subgroup
+    /// stream. WHY its caller lets go of it ([`Self::unlimit_payload`]):
     /// a publisher can give the alias to another subscription after this
     /// one is over (§11.1).
     pub fn limit_payload(&self, track_alias: u64, limit: usize) {
@@ -1642,6 +1645,14 @@ pub struct SendLimits {
     /// the timeouts are set to a non-zero value, all Objects ... are
     /// delivered"** for a receiver that set none; it is an experiment, and
     /// `None` unless asked for.
+    ///
+    /// WHY NOT give the older Groups of a track up when a newer one begins:
+    /// with a sound of one piece a Group and no grace, 204 to 375 of about
+    /// 985 pieces sounded on a link of 2 and 2.5 Mbit/s
+    /// (`docs/experiments/2026-10-12-a-page-behind-a-link-with-too-little-room-and-a-relay-that-gives-groups-up.md`),
+    /// and a viewer that asks for 100 ms on its video alone has the picture
+    /// that gave with 100 ms of grace, and its sound whole
+    /// (`docs/experiments/2026-10-12-the-relay-follows-the-delivery-timeout-a-viewer-asks-for.md`).
     pub delivery_patience: Option<Duration>,
 }
 

@@ -276,7 +276,9 @@ export interface SessionConnectOptions {
 	 * A SUBSCRIBE that was accepted (`MoqtConnection.serve`) keeps its stream
 	 * open, and its place, while the subscription lasts. With as many
 	 * subscriptions accepted as this number, no further request of the peer
-	 * is read until one of them ends.
+	 * is read until one of them ends. Nothing ends a subscription whose
+	 * subscriber neither ends it nor is sent anything: that is a
+	 * subscription that goes on, not a stream that fails to end.
 	 */
 	maxPeerBidiStreams?: number;
 	/**
@@ -462,6 +464,9 @@ export interface PublishedTrack {
 	 * seconds) from the moment PUBLISH_DONE and the FIN were written; a
 	 * subscriber that does not read can hold up that write, and `done()` with
 	 * it. `ended` resolves when PUBLISH_DONE was sent and does not wait.
+	 * Where PUBLISH_DONE could not be written, this rejects with the error
+	 * of the write, and `ended` resolves only when the session ends, although
+	 * the session state has ended the subscription.
 	 *
 	 * Every subgroup stream has to be closed or reset first; otherwise this
 	 * rejects with an `Error` and nothing is sent. Rejects with
@@ -1134,7 +1139,9 @@ interface ActivePublish {
  * WHY: a write is encoded and handed to the transport when it is called,
  * and the transport holds what it cannot send. An application that does not
  * wait for its writes, to a peer that does not read, would have every
- * Object it made held here, without an end. WHY 16: the number of Objects a
+ * Object it made held here, without an end: 20,000 writes of 1 KB to a
+ * subscriber that read nothing were all held, about 37 MB
+ * (docs/experiments/2026-10-11-a-page-answers-a-fetch.md). WHY 16: the number of Objects a
  * subscription holds for a reader that does not read
  * (`subscriptionHighWaterMark`). Provisional.
  */

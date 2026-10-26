@@ -110,6 +110,20 @@ pub const MAX_EARLY_BYTES: usize = 1024 * 1024;
 /// remembered. WHY not for ever: a track can go on for as long as its
 /// publisher likes. What becomes of a stream of a Group older than these
 /// is at [`Subgroups::admit`].
+///
+/// 8 Groups are 8 Objects for a publisher that sends one Object a Group, as
+/// the own clients do. Sources that do not number their Groups alike fall
+/// under the rule of `Subgroups::admit`: the one with the smaller numbers
+/// has all its streams stopped, and all it is told is `STOP_SENDING` with
+/// `CANCELLED`. A publisher on another session that takes over a track at
+/// Group 50 and counts from 0 has every stream stopped until it is at Group
+/// 43, 7 below the newest the old source sent; so has one that joins a track
+/// at Group 1000 and counts from 0, and a second publisher that starts with
+/// larger numbers than the first silences the first. Two publishers of a
+/// track have to agree on the Group IDs; nothing in the relay helps them to.
+/// MSF has the same as a rule for the publisher (`draft-ietf-moq-msf-01`
+/// §6.1): "Group IDs for a track MUST be unique and MUST increase
+/// monotonically".
 pub const MAX_REMEMBERED_GROUPS: u64 = 8;
 
 /// Subgroups of one track the relay remembers at most, over all the Groups
@@ -140,6 +154,13 @@ pub const CHECKED_STREAM_WAIT_MS: u64 = 10_000;
 /// or not. §9.3 allows the limit: "An implementation can use mechanisms such
 /// as `REQUEST_ERROR` or unsubscribing ... if it cannot accept an additional
 /// publisher due to implementation constraints."
+///
+/// Beyond it a PUBLISH gets `EXCESSIVE_LOAD`, a draining source counting:
+/// §9.3 names no code, and it is the code of the relay's other limits. The
+/// room of a track is counted when the relay asks
+/// (`Relay::ask_the_publishers`), and a PUBLISH is accepted without a look
+/// at what is asked, so a track can have sources and open requests that are
+/// more than this together.
 pub const MAX_SOURCES: usize = 4;
 
 /// The Stream Count of a `PUBLISH_DONE` whose sender cannot give the exact
@@ -631,6 +652,19 @@ enum Admission {
 ///   where its source ends, and the next Subgroup comes from whichever source
 ///   sends it first.
 ///
+/// WHY `CANCELLED` for the stop: it is the code a subscriber that is no
+/// longer interested sends, and the publisher cannot tell the two apart; of
+/// the ten codes §3.3.3 lists, it is the one that fits. So a publisher's
+/// subgroup streams are stopped as a matter of course whenever another
+/// publisher of the track was first. What a publisher makes of the stop is
+/// its own: the own Rust client reports it and goes on with the next Group;
+/// in `@xmoq/moqt`, `write()` on that stream fails with `SubgroupClosedError`
+/// and the publication goes on (as read in
+/// `packages/moqt/src/webtransport/connection.ts`; not run with two
+/// publishers). A publisher that takes a stopped stream for a failure of the
+/// whole publication drops out as a source at its first Subgroup that
+/// another one sent first: the Rust client of the `moqtail` spike does.
+///
 /// A stream for a Subgroup that came before with another Publisher Priority
 /// makes the track malformed, from the same source or another, and however
 /// the first stream stands. §2.4.2 has it as its first example: "An Object
@@ -639,6 +673,26 @@ enum Admission {
 /// WHY the priority and nothing else of the header: `END_OF_GROUP` is a hint
 /// a publisher need not give (§11.4.2), `PROPERTIES` says how the Objects
 /// are laid out, and what the Objects hold is not compared at all.
+///
+/// The priority of a stream is the one in its header or the source's
+/// DEFAULT PUBLISHER PRIORITY, 128 without one ([`default_publisher_priority`]).
+/// Two headers are enough: the priority in a header is that of every Object
+/// of the stream, and the relay stops a second stream for a Subgroup when it
+/// has read the header. Which of the two is wrong the relay cannot know; the
+/// one that came first is taken as given, so a publisher that sends a
+/// Subgroup with a priority of its own can end a track for everyone (known
+/// gap on authorization in `docs/moqt-implementation-notes.md`). A publisher
+/// that publishes anew under the same alias with another default, and sends
+/// a Subgroup of the first subscription again without a priority in the
+/// header, ends its own track; one that changes its default has to write the
+/// priority into the headers of what it sends again. Two publishers of a
+/// track have to agree on the DEFAULT PUBLISHER PRIORITY as they have to
+/// agree on the Group IDs ([`MAX_REMEMBERED_GROUPS`]), or write the priority
+/// into every header. The relay reads a default as how a header is written
+/// short, so that a Subgroup has one priority across subscriptions (§9.1,
+/// §7), and not as a number a publisher may choose anew for each
+/// subscription (§12.4); §7.1 names a parameter the draft does not have, and
+/// the relay reads the Track Property of §12.4. The clients do not compare.
 ///
 /// A second stream of the same source for a Subgroup it delivered whole is
 /// read, and nothing of it goes on ([`Passage::Checked`]): the track is
@@ -1472,6 +1526,17 @@ impl Tracks {
     /// ones of the new source from then on, and its largest Location the
     /// larger of the two (§10.2.11: "the largest of the following").
     ///
+    /// What a publisher that says `PUBLISH_DONE` and publishes anew at once
+    /// gets depends on a race: where every stream it counted has ended, its
+    /// source is over and the PUBLISH makes a new track; where one is still
+    /// under way, the PUBLISH is accepted for the track as it is; and where
+    /// the relay reads the PUBLISH before the `PUBLISH_DONE`, which travels on
+    /// another stream, it is refused with `DUPLICATE_SUBSCRIPTION` (seen once
+    /// in CI, run 38076391019 of PR #48). The refusal says not to try again
+    /// (Retry Interval 0; known gap on the Retry Interval in
+    /// `docs/moqt-implementation-notes.md`), though the same PUBLISH a moment
+    /// later is accepted.
+    ///
     /// WHY one place for a name without an entry and one that waits: what a
     /// pending track holds, subscribers that wait and requests that are open,
     /// must not be dropped without a word, and a caller that makes the entry
@@ -1635,7 +1700,11 @@ impl Tracks {
     /// for, in an order that does not depend on the map.
     ///
     /// WHY not a track that has a source and no subscriber: the relay holds
-    /// it for a publisher that sent PUBLISH, and nobody wants more of it.
+    /// it for a publisher that sent PUBLISH, and nobody wants more of it;
+    /// the publisher that is asked would send it to the relay all the same.
+    /// §9.5's "a namespace that matches one or more existing subscriptions
+    /// to other upstream sessions" is read as being about tracks somebody is
+    /// subscribed to (known gap on several publishers of one track).
     fn subscribed_in(&self, namespace: &TrackNamespace) -> BTreeSet<FullTrackName> {
         let subscribed = |entry: &TrackEntry| match entry {
             TrackEntry::Pending(_) => true,
@@ -2842,6 +2911,27 @@ impl Relay {
         }
     }
 
+    /// A SUBSCRIBE beyond the [`MAX_WAITING_SUBSCRIBERS`] that wait for one
+    /// track gets `EXCESSIVE_LOAD`, where one beyond the limits of the hold
+    /// ([`MAX_HELD_SUBSCRIBES_PER_SESSION`], [`MAX_HELD_TRACKS`]) gets
+    /// `DOES_NOT_EXIST` while nobody is asked: the two codes are not alike.
+    /// A viewer that asks anew in the session it watched in gets
+    /// `DUPLICATE_SUBSCRIPTION` until the relay sent it `PUBLISH_DONE`, and
+    /// never after.
+    ///
+    /// When the publisher is back within the time a track drains
+    /// (`HubConfig::drain_timeout` of `xmoq-relay`), the track is the same
+    /// one: the `SUBSCRIBE_OK` carries the Largest Object of what was
+    /// published before. The relay leaves that as it is, and a publisher that
+    /// publishes a track anew begins above every Group it used before (§2.4).
+    /// WHY NOT have the relay take the new publisher's Largest Object: its
+    /// cache and what it answers a FETCH with rest on one name being one
+    /// content. Seen in a run: a second own-rust process that began at Group
+    /// 0 again within the 2 seconds had its Groups 0 to 2 left out for the
+    /// held subscriber; with `--first-group now` the subscriber gets the
+    /// first Object (interop run `another-publisher-comes`). The `moqtail`
+    /// relay 0.15.0 does not hold: it answered such a SUBSCRIBE at once with
+    /// `0x10` (`docs/experiments/2026-10-13-a-viewer-that-comes-before-the-broadcast.md`).
     fn on_subscribe(
         &mut self,
         session: SessionKey,
@@ -2899,9 +2989,15 @@ impl Relay {
             // has no Established upstream subscription (§9.4). §9.5 has the
             // publishers of the namespace asked then; a subscriber that
             // did not ask to be held is refused instead (known gap; §10.2.6
-            // has it answered at once). WHY a PUBLISH_NAMESPACE that arrives
-            // now does have its publisher asked: the track has subscribers,
-            // who are there already and stay if that publisher accepts.
+            // has it answered at once). The same goes while the relay still
+            // waits for the answer of a publisher it asked for this track
+            // earlier. WHY NOT hold one that did not ask to be held: §10.2.6
+            // has the relay answer at once where the parameter is absent, and
+            // the case needs a source that drains inside the time an answer
+            // may take (`UPSTREAM_ANSWER_WAIT_MS`). WHY a PUBLISH_NAMESPACE
+            // that arrives now does have its publisher asked: the track has
+            // subscribers, who are there already and stay if that publisher
+            // accepts.
             //
             // One that is held for a publisher to appear waits with the
             // track: its sources are all done, so it has no publisher
@@ -3441,6 +3537,17 @@ impl Relay {
     /// Original Publisher's way to the relay. A source that came with a
     /// PUBLISH is asked on the stream of its PUBLISH, one the relay
     /// subscribed to on the stream of the relay's SUBSCRIBE.
+    ///
+    /// The subscriber's own update gets `REQUEST_OK` whatever is passed on.
+    /// A request is outstanding until an Object of a larger Group comes, and
+    /// also ends when a source is added ([`Tracks::add_source`]). The
+    /// relay's `PUBLISH_OK` carries no `NEW_GROUP_REQUEST`.
+    ///
+    /// WHY the relay's upstream subscription is the "Established
+    /// subscription" of a SUBSCRIBE the relay answers from a track it has:
+    /// the draft does not say whose it is. A publisher's answer that comes
+    /// after its `PUBLISH_DONE` closes its session: §10.11 has `PUBLISH_DONE`
+    /// as "the final message".
     fn ask_for_a_new_group(
         &mut self,
         track_name: &FullTrackName,
@@ -3689,6 +3796,17 @@ impl Relay {
         }
     }
 
+    /// Opens the downstream streams of a subgroup stream of a source once
+    /// its Subgroup is known: at the header where it names the Subgroup ID or
+    /// has none (Subgroup 0), at the first Object otherwise (§11.4.2: "0b01:
+    /// The Subgroup ID field is absent and the Subgroup ID is the Object ID
+    /// of the first Object transmitted in this Subgroup"). A header followed
+    /// by a FIN and no Object is passed on and counts as delivered whole; it
+    /// does not fit §11.4 ("followed by one or more sets of serialized Object
+    /// fields"), and the draft does not say what a receiver does with it. A
+    /// stream whose header leaves the Subgroup ID to its first Object and
+    /// that starts inside a Subgroup is taken for a Subgroup of its own
+    /// ([`Track::taking_of_whole`]).
     fn on_data_stream_opened(
         &mut self,
         session: SessionKey,
@@ -3803,7 +3921,10 @@ impl Relay {
         if passage == Passage::Passed {
             // A subscription that starts inside this Group gets its stream
             // with the first Object that passes (`Self::on_object`): which
-            // Objects the stream will carry is not known here.
+            // Objects the stream will carry is not known here. WHY NOT with
+            // the header: a stream that is opened and carries nothing would
+            // count in the Stream Count of `PUBLISH_DONE`, and be one the
+            // subscriber has to end.
             let passing = |subscriber: &&mut Subscriber| subscriber.passes_all_of(header.group_id);
             for subscriber in track.subscribers.iter_mut().filter(passing) {
                 let out = OutStreamAllocator {
@@ -4275,6 +4396,8 @@ impl Relay {
     /// from one of several. The track ends with its last source
     /// ([`Self::end_track`]); while it has another, it goes on, and only what
     /// the relay took from this one is cut ([`Self::let_go_of_sources`]).
+    /// §9.4's "the upstream publisher terminates the subscription" speaks of
+    /// one publisher; with several the relay takes it to mean the last.
     fn source_gone(
         &mut self,
         track_name: &FullTrackName,
@@ -4560,7 +4683,10 @@ impl Relay {
     }
 
     /// A `REQUEST_UPDATE` set the `SUBGROUP_DELIVERY_TIMEOUT` of a
-    /// subscription, in milliseconds; 0 is no timeout (§8).
+    /// subscription, in milliseconds; 0 is no timeout (§8). An update
+    /// without the parameter leaves it as it is, and the smaller of it and
+    /// `--delivery-patience-ms` of `xmoq-relay` holds
+    /// (`SendLimits::delivery_patience` of `xmoq-moqt-io`).
     ///
     /// WHY not sent on to the publishers: §10.2.3 has "SHOULD NOT be
     /// forwarded upstream by a relay that intends to serve multiple
@@ -4997,6 +5123,13 @@ impl OutStreamAllocator<'_> {
 ///   second and its video one, both counted from the time of day: with
 ///   the older Group first the video's would be older for good, and on a
 ///   link with less room than both the sound would not be sent at all.
+/// - **Not to be built**: a relay that sends from its writers of the
+///   highest priority first, and the sound above the video by default.
+///   Behind a narrow link the sound waited behind the send window of the
+///   connection, with a priority above the video as without
+///   (`docs/experiments/2026-10-15-what-the-sound-waits-behind-on-a-narrow-link.md`);
+///   the demo's viewer asks for 150 ms on its video, and with that the send
+///   window does not fill.
 #[must_use]
 pub fn send_order(subscriber_priority: u8, publisher_priority: u8) -> i32 {
     -1 - ((i32::from(subscriber_priority) << 8) | i32::from(publisher_priority))
@@ -5094,6 +5227,10 @@ enum TrackEnd {
 impl TrackEnd {
     /// The Status Code of the `PUBLISH_DONE` the subscribers get, and the
     /// code streams are reset and stopped with.
+    ///
+    /// The draft has no rule for the status a relay sends when its upstream
+    /// ends; `TRACK_ENDED` for a track whose last source is over is the
+    /// relay's choice.
     fn codes(self) -> (u64, u32) {
         match self {
             Self::Done | Self::TimedOut | Self::SourceGone | Self::Unwanted => (

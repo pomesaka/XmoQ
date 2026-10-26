@@ -52,6 +52,10 @@ export interface StreamIoOptions {
 	 * How long a bidirectional stream of this endpoint, a request, may wait
 	 * to be opened: for the peer to allow one more stream. Then what was to
 	 * be written on it fails with `StreamNotOpenedError`.
+	 *
+	 * Nothing bounds how many requests wait at once, nor what is kept for a
+	 * stream that is being opened (`opening`): every request is a call of the
+	 * application, which is what keeps their number down.
 	 */
 	openBidiTimeoutMs: number;
 	/** Called with the bytes of every stream, and of every datagram the peer sends, named `datagram`. */
@@ -649,6 +653,12 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 				case "send": {
 					const { stream, data } = output;
 					if (!opening.has(stream) && !localStreams.has(stream)) {
+						// WHY a throw, which closes the session, where the failure
+						// to open the stream did not: the session of this library
+						// has forgotten the stream by then in every path it has (a
+						// request is cancelled, a Subgroup is told to be not
+						// opened), so no such write is made; a caller of this layer
+						// alone could make one.
 						throw new Error(`stream ${stream} is not open`);
 					}
 					return inTurn(stream, () => {

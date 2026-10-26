@@ -41,6 +41,12 @@ export interface MoqtTransport {
 	 * stream and the transport did not pass the reason on: a stop whose code
 	 * is not known. False for the end of the session. It is asked about a
 	 * writer only: what a reader fails with was not looked at.
+	 *
+	 * Such a stream counts as stopped: a PUBLISH whose request stream it is
+	 * ends, and a write on it is rejected with `SubgroupClosedError` whose
+	 * `code` is `undefined`. The Rust implementation is always told of a stop
+	 * as one (`WriteError::Stopped`), with a code wherever what arrived is an
+	 * application error code.
 	 */
 	isStopWithoutCode(error: unknown): boolean;
 	/** Whether a stream failed with `error` because the whole session ended. */
