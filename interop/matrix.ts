@@ -1,5 +1,5 @@
-// Runs every pairing of `run.ts` in which at least one client is an own one,
-// and the scenarios of `disconnect.ts`, and prints a table of the outcomes.
+// Runs the interop drivers, each run with its arguments and its relay, and
+// prints a table of the outcomes.
 //
 // Usage: bun matrix.ts [--relay moqtail] [--relay own] [--base-port N]
 //                      [--only TEXT] [--pairing-timeout-seconds N]

@@ -1,6 +1,6 @@
 # Interop
 
-Moves MOQT draft 18 Objects through a relay between clients, at least one of which is an own client, and checks that the received payload equals the sent one. One set of runs moves a single Object between every pair of clients; another has a client leave on the way and checks what the others see. The own clients are the browser client on [`@xmoq/moqt`](../packages/moqt/) and the Rust client [`xmoq-moqt-client`](../crates/moqt-client/). The relay is the [moqtail](https://github.com/moqtail/moqtail) relay or the own relay [`xmoq-relay`](../crates/relay/). The browser clients run in a real Chromium. Results go to [`docs/experiments/`](../docs/experiments/).
+Runs the own clients and parts through a relay with each other and with those of others, and checks what each run is to show, which is at the top of its driver (the list of files below). The own clients are the browser client on [`@xmoq/moqt`](../packages/moqt/) and the Rust client [`xmoq-moqt-client`](../crates/moqt-client/). The relay is the [moqtail](https://github.com/moqtail/moqtail) relay or the own relay [`xmoq-relay`](../crates/relay/). The browser clients run in a real Chromium. Results go to [`docs/experiments/`](../docs/experiments/).
 
 This is the one entry point for interop runs. `spikes/moqtail/browser/run.mjs` is kept only to reproduce the Phase 0 records.
 
@@ -80,7 +80,7 @@ Every driver starts what it needs (the certificate, the relay, the pages in a he
 
 One side of a pairing has to be an own client: a run between two moqtail peers checks nothing of this repository.
 
-**The runs wait for lines of the own relay's log**, so changing the form of such a line breaks them. What a run counts in the relay's log, or expects not to be there, it counts before a line of the relay that it names, and never "so far": the lines of the relay and of a client reach the driver in no order, and a count taken when a client had reported something missed the relay's line that was on its way, three times in CI. `RelayLog` in `harness.ts` has no other way to count, so a run that does not name such a line does not pass the type check. A run with no step of its own after the moment it checks has `connectedNow` connect a client, whose session line is the fence.
+**The runs wait for lines of the own relay's log**, so changing the form of such a line breaks them. What a run counts in the relay's log, or expects not to be there, it counts before a line of the relay that it names, and never "so far": the lines of the relay and of a client reach the driver in no order, and a count taken when a client has reported something can miss the relay's line that is on its way. `RelayLog` in `harness.ts` has no other way to count, so a run that does not name such a line does not pass the type check. A run with no step of its own after the moment it checks has `connectedNow` connect a client, whose session line is the fence.
 
 ## Certificate
 
@@ -149,7 +149,7 @@ The parts they share.
 | [`clients.ts`](clients.ts) | The four clients of the interop runs behind one shape each for a publisher and a subscriber, so that a driver can put any of them in any role. |
 | [`fetch-publishers.ts`](fetch-publishers.ts) | The two publishers that answer a FETCH, as the drivers of the FETCH runs start them (fetch.ts for a page that fetches, fetch-rust.ts for the own Rust client). |
 | [`harness.ts`](harness.ts) | What every interop driver needs: the certificate, the relay, the browser with its pages, the Rust clients, and the teardown of all of them. |
-| [`matrix.ts`](matrix.ts) | Runs every pairing of `run.ts` in which at least one client is an own one, and the scenarios of `disconnect.ts`, and prints a table of the outcomes. |
+| [`matrix.ts`](matrix.ts) | Runs the interop drivers, each run with its arguments and its relay, and prints a table of the outcomes. |
 | [`page.ts`](page.ts) | Own browser client of the interop run: a publisher and a subscriber built on @xmoq/moqt. |
 | [`voice-file.ts`](voice-file.ts) | The voice of `fixtures/speech/`, as the pages take it (`publishVoice`, `publishBroadcast` with a voice). |
 | [`xmoq-page.ts`](xmoq-page.ts) | Contract between the driver (`run.ts`) and every browser page it drives. |

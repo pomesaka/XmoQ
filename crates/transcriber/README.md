@@ -71,8 +71,8 @@ The library (`src/*.rs`) decides and does no input or output: what the flags mea
 
 ## Not done
 
-- Run through the own relay alone, not through `moqtail`'s.
-- On Linux it was neither built nor run here. CI is to build it and to run the interop pairing with the smallest model. How fast the larger models read on the processor of a Linux machine was not measured.
+- Through `moqtail`'s relay no run has a voice reach it: the run there (`--case catalog-refused` of `interop/transcriber.ts`) ends once the page takes the SUBSCRIBE for its catalog again, since that relay answers the Joining FETCH for the catalog with nothing.
+- On Linux, only the interop job of CI builds it and runs it, with the model `tiny` (`scripts/ci/interop.sh`). How fast the larger models read on the processor of a Linux machine was not measured.
 - A broadcast whose catalog cannot be read, or names no Opus track, is not asked for its catalog again until its namespace is announced again.
 
 ## Checks

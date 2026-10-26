@@ -2,7 +2,7 @@
 
 A publisher receives a FETCH on a bidirectional stream the peer opened: a relay asks it for a range of a track. The session of each implementation decides, before the application sees the request, whether it is handed on, refused, or a reason to close the session; and once the application has the request, what is sent for each thing that happens to it. Both implementations read the two tables here in their tests, so that the same bytes in the same state get the same answer from both.
 
-**Every outcome here was written after the row had been run through the Rust session** (`crates/moqt` of `main` at `59d76ab8`, in a test that is not kept), and then through `@xmoq/moqt`. Two outcomes had first been written from reading the code, and were wrong: an End Location that names the same Location as the Start Location is taken (§10.12.3 asks for "the same or a larger Location"), in the FETCH and in the answer.
+**Every outcome here was written after the row had been run through the Rust session** (`crates/moqt` of `main` at `59d76ab8`, in a test that is not kept), and then through `@xmoq/moqt`. An End Location that names the same Location as the Start Location is taken (§10.12.3 asks for "the same or a larger Location"), in the FETCH and in the answer.
 
 ## `opened.tsv`
 

@@ -17,6 +17,6 @@ Measure glass-to-glass latency (p50/p95/p99), dropped frames, stalls, relay RSS,
 The goals to aim at are in the [requirements](requirements.md) (row "Latency, capacity"). Not run yet: over real networks, on more than one machine, with real viewers. Do not invent benchmark results.
 
 ## Security
-Before real use, decide authentication, authorization at relay, TLS, quotas, privacy and log retention.
+Before real use, decide authentication, who may get a token of the relay and what it allows ([open decisions](open-questions.md)), TLS, quotas, privacy and log retention.
 
 For each experiment record commit SHA, commands, environment, observed results and limitations.
