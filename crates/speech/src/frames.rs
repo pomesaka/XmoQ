@@ -9,6 +9,16 @@ pub const FRAME: usize = 320;
 /// The microseconds of one frame.
 pub const FRAME_US: u64 = 20_000;
 
+/// The latest a packet's sound may end at, in microseconds: 2^53 - 1. A
+/// packet that ends later is not taken ([`Framer::push`]).
+///
+/// WHY: the times of a piece go into the payloads of a transcript, whose
+/// numbers stop there (`MAX_NUMBER` of `xmoq-transcript-tracks`, so that a
+/// JavaScript number holds them exactly), and below it nothing that is
+/// added to a Timestamp here overflows; the publisher chose the Timestamp,
+/// which may be as large as a vi64 of §1.4.1 of the transport, 2^64 - 1.
+pub const LATEST_US: u64 = (1 << 53) - 1;
+
 /// A packet whose Timestamp is this far from where the sound before it
 /// ended begins anew: packets were lost, or the publisher began again.
 const GAP_US: u64 = 100_000;
@@ -41,8 +51,12 @@ pub struct Framer {
 impl Framer {
     /// The samples of one packet, whose first sample has the Timestamp
     /// `start_us`. The samples of a frame that is not full wait for the
-    /// next packet.
-    pub fn push(&mut self, start_us: u64, samples: &[f32]) -> Vec<Framed> {
+    /// next packet. `None`, and nothing is taken, for a packet that ends
+    /// after [`LATEST_US`].
+    pub fn push(&mut self, start_us: u64, samples: &[f32]) -> Option<Vec<Framed>> {
+        let end_us = start_us
+            .checked_add(micros(samples.len()))
+            .filter(|end_us| *end_us <= LATEST_US)?;
         let mut framed = Vec::new();
         if self
             .next_us
@@ -54,7 +68,7 @@ impl Framer {
         if self.partial.is_empty() {
             self.partial_us = start_us;
         }
-        self.next_us = Some(start_us + micros(samples.len()));
+        self.next_us = Some(end_us);
         self.partial.extend_from_slice(samples);
         while self.partial.len() >= FRAME {
             let samples: Vec<f32> = self.partial.drain(..FRAME).collect();
@@ -64,7 +78,7 @@ impl Framer {
             });
             self.partial_us += FRAME_US;
         }
-        framed
+        Some(framed)
     }
 
     /// The track ended: what does not fill a frame is let go of.
@@ -90,7 +104,11 @@ mod tests {
         let mut framer = Framer::default();
         packets
             .iter()
-            .flat_map(|(start_us, samples)| framer.push(*start_us, &vec![0.0; *samples]))
+            .flat_map(|(start_us, samples)| {
+                framer
+                    .push(*start_us, &vec![0.0; *samples])
+                    .expect("a Timestamp in range")
+            })
             .map(|framed| match framed {
                 Framed::Frame { at, .. } => Some(at),
                 Framed::Gap => None,
@@ -131,5 +149,32 @@ mod tests {
         for (name, packets, expected) in cases {
             assert_eq!(framed(packets), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn a_packet_that_ends_after_the_latest_timestamp_is_not_taken() {
+        // The name, the Timestamp of a packet of 20 ms, and whether it is
+        // taken.
+        let cases: [(&str, u64, bool); 4] = [
+            ("one that ends at the latest", LATEST_US - FRAME_US, true),
+            (
+                "one that ends a microsecond later",
+                LATEST_US - FRAME_US + 1,
+                false,
+            ),
+            ("one that begins after it", LATEST_US + 1, false),
+            // Added to, it would overflow (a panic in a debug build).
+            ("the largest a Timestamp can be", u64::MAX, false),
+        ];
+        for (name, start_us, taken) in cases {
+            let taken_by = Framer::default().push(start_us, &[0.0; FRAME]);
+            assert_eq!(taken_by.is_some(), taken, "{name}");
+        }
+    }
+
+    /// The latest Timestamp is the largest number of a transcript.
+    #[test]
+    fn the_latest_timestamp_is_the_largest_number_of_a_transcript() {
+        assert_eq!(LATEST_US, xmoq_transcript_tracks::payloads::MAX_NUMBER);
     }
 }

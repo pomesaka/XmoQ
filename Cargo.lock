@@ -2805,6 +2805,7 @@ dependencies = [
  "opus-rs",
  "rustix",
  "whisper-rs",
+ "xmoq-transcript-tracks",
 ]
 
 [[package]]

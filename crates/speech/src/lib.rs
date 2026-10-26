@@ -45,6 +45,9 @@ pub struct AudioPacket<'a> {
 pub struct Left {
     /// Packets the decoder refused.
     pub refused: u64,
+    /// Packets whose sound ends after [`frames::LATEST_US`], by their
+    /// Timestamp.
+    pub out_of_range: u64,
     /// Pieces with too little voice to be read ([`Cut::least_voice_ms`]).
     pub too_little_voice: u64,
     /// Chunks of half a second the model of voice activity failed on, whose
@@ -70,6 +73,7 @@ pub struct Listener {
     judge: Judge,
     cutter: Cutter,
     refused: u64,
+    out_of_range: u64,
 }
 
 impl Listener {
@@ -84,6 +88,7 @@ impl Listener {
             judge,
             cutter: Cutter::new(cut),
             refused: 0,
+            out_of_range: 0,
         })
     }
 
@@ -93,8 +98,12 @@ impl Listener {
             self.refused += 1;
             return Vec::new();
         };
+        let Some(framed) = self.framer.push(packet.timestamp_us, samples) else {
+            self.out_of_range += 1;
+            return Vec::new();
+        };
         let mut pieces = Vec::new();
-        for framed in self.framer.push(packet.timestamp_us, samples) {
+        for framed in framed {
             match framed {
                 Framed::Frame { at, samples } => {
                     let judged = self.judge.push(at, samples);
@@ -133,6 +142,7 @@ impl Listener {
     pub fn left(&self) -> Left {
         Left {
             refused: self.refused,
+            out_of_range: self.out_of_range,
             too_little_voice: self.cutter.left().too_little_voice,
             judge_failed: self.judge.failed(),
         }
@@ -203,5 +213,18 @@ mod tests {
         });
         assert_eq!(pieces, []);
         assert_eq!(listener.left().refused, 1);
+    }
+
+    #[test]
+    fn a_packet_whose_timestamp_is_out_of_range_is_counted() {
+        let mut listener =
+            Listener::new(Judge::Loudness(judge::VOICE_DBFS), Cut::default()).unwrap();
+        let [opus] = tone_packets(1, 0.3).try_into().unwrap();
+        let pieces = listener.push(AudioPacket {
+            timestamp_us: u64::MAX,
+            opus: &opus,
+        });
+        assert_eq!(pieces, []);
+        assert_eq!(listener.left().out_of_range, 1);
     }
 }

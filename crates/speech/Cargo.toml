@@ -21,3 +21,7 @@ rustix = { version = "=1.1.5", features = ["process"] }
 # processor alone (README). Elsewhere whisper.cpp reads on the processor.
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "=0.16.0", features = ["metal"] }
+
+[dev-dependencies]
+# A test pins frames::LATEST_US to the largest number of a transcript.
+xmoq-transcript-tracks = { path = "../transcript-tracks" }
