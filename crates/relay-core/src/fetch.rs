@@ -1729,7 +1729,7 @@ impl Relay {
     ) -> Option<Refusal> {
         let held = self.held_beyond_the_cache();
         let over = held.total >= self.held_beyond_cache_limit
-            || held.of(session) >= self.held_beyond_cache_share;
+            || held.of(session) >= self.held_beyond_cache_share();
         if !over {
             return None;
         }
@@ -1878,6 +1878,12 @@ impl Relay {
             .is_some_and(|live| live.born == kept.track && live.cache.keeps(kept.group))
     }
 
+    /// What one subscriber's session may have kept beyond the cache, of
+    /// what the relay may ([`SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE`]).
+    pub(crate) fn held_beyond_cache_share(&self) -> usize {
+        self.held_beyond_cache_limit / SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE
+    }
+
     /// The cache of a track has let go of a Group, or a track is over: the
     /// fetch streams that carry what was let go of keep it alive from here
     /// on. Where that is more than a session may have kept, or the relay,
@@ -1887,7 +1893,7 @@ impl Relay {
     /// answered from the Group the cache has, which costs nothing then, and
     /// becomes what keeps the Group when the cache moves on.
     pub(crate) fn trim_what_is_held_beyond_the_cache(&mut self, actions: &mut Vec<Action>) {
-        let share = self.held_beyond_cache_share;
+        let share = self.held_beyond_cache_share();
         loop {
             let held = self.held_beyond_the_cache();
             // The session that has the most over its share; then, where
