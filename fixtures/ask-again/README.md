@@ -5,7 +5,7 @@ The pauses a client waits before it asks again: for a track on the same session 
 | File | Read by |
 |---|---|
 | `same-session.tsv` | [`xmoq-again`](../../crates/again/README.md) (`AskAgain`) and `@xmoq/moqt` (`createAskAgain`, `packages/moqt/src/core/again.ts`) |
-| `next-session.tsv` | `@xmoq/moqt` (`createNextSession`, the same file) and [`xmoq-viewer`](../../crates/viewer/src/reconnect.rs) (`NextSession`, which `xmoq-watch` and `xmoq-agent` go by) |
+| `next-session.tsv` | `@xmoq/moqt` (`createNextSession`, the same file) and [`xmoq-again`](../../crates/again/README.md) (`NextSession`, which `xmoq-watch`, `xmoq-agent`, `xmoq-chat` and `xmoq-transcriber` go by) |
 
 What a Retry Interval on the wire means in milliseconds is in [`fixtures/retry-interval/`](../retry-interval/README.md); these rows begin from the milliseconds.
 

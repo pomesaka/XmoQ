@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
+use xmoq_again::next_session::{After, Ended, NextSession};
 use xmoq_chat_tracks::names::Person;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
@@ -43,7 +44,7 @@ use xmoq_moqt_io::{
 };
 use xmoq_picture::video_decoder::VideoDecoder;
 use xmoq_viewer::chat_track::{shown, shown_gap};
-use xmoq_viewer::reconnect::{After, BETWEEN_TRIES_MS, Ended, NextSession};
+use xmoq_viewer::reconnect::BETWEEN_TRIES_MS;
 use xmoq_viewer::room::{self, Broadcast};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
 use xmoq_viewer_io::ending::{self, UntilClosed};

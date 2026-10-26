@@ -157,6 +157,9 @@ fn answered(
                 Ok(RequestEvent::SubscriptionDone(done)) => {
                     format!("PUBLISH_DONE status_code={:#x}", done.status_code)
                 }
+                // FIXME: a New Session URI names another session for the
+                // subscription, which is asked again on this one (§10.4: "on
+                // a session at the specified URI").
                 Ok(RequestEvent::GoAway(go_away)) => {
                     session.cancel(request);
                     format!("REQUEST_GOAWAY timeout_ms={}", go_away.timeout_ms)

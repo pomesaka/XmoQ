@@ -7,7 +7,7 @@ mise run chat -- --url https://127.0.0.1:4443/ --cert-sha256 <64 hex digits> --s
 mise run chat -- --url ... --cert-sha256 ... --store room-r.sqlite3 --room r     # one room alone
 ```
 
-It runs until Ctrl-C or SIGTERM, and connects again after a session ends: a second later at first, twice as long after each session that lasted less than a minute, up to 30 seconds (`backoff` of [`xmoq-track-serving`](../track-serving/README.md), provisional). With a flag it does not know it prints its flags (`USAGE` in `src/args.rs`).
+It runs until Ctrl-C or SIGTERM, and connects again after a session ends: a second later at first, twice as long after each session that lasted less than a minute, up to 30 seconds (`backoff` of [`xmoq-track-serving`](../track-serving/README.md), provisional). After a GOAWAY it connects to the New Session URI at once, once in a row, and keeps to it (`NextTry`); a GOAWAY on the stream of one of its requests has that request asked again on the session. With a flag it does not know it prints its flags (`USAGE` in `src/args.rs`).
 
 **Building it needs a C compiler**: `rusqlite` builds SQLite from the source it carries (`bundled`), through the `cc` crate. On macOS the Command Line Tools' `clang`, on Linux `gcc`.
 

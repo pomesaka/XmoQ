@@ -18,6 +18,11 @@
 //! their packages of layer 0 cannot depend on each other (the top of
 //! `again.ts` there). WHY NOT a copy in each client: the rule would be in
 //! two places, and the two would drift.
+//!
+//! When and where the next session goes after one ended is
+//! [`next_session`], by the same reasoning (`createNextSession` there).
+
+pub mod next_session;
 
 /// The pause after a subscription ended, and after a refusal that names
 /// no time (`DEFAULT_ASK_AGAIN_DELAY_MS`).

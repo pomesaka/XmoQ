@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 use xmoq_again::AskAgain;
+pub use xmoq_again::next_session::Ended;
 use xmoq_agent::events::{Asked as FrameAsked, Event};
 use xmoq_agent::input::{self, Input};
 use xmoq_agent::presence::SETTLE_MS;
@@ -29,7 +30,6 @@ use xmoq_moqt_io::{
 };
 use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
 use xmoq_transcript_tracks::payloads::{Speech, read_speech};
-pub use xmoq_viewer::reconnect::Ended;
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out};
 use xmoq_viewer_io::ending::UntilClosed;
 use xmoq_viewer_io::follow::{Asking, Follower, Out as FollowOut, Track};

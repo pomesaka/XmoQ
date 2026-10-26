@@ -72,6 +72,7 @@ use xmoq_moqt_io::{
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 
+use xmoq_again::next_session::new_url;
 use xmoq_track_serving::answers::{self, FETCHES_AT_ONCE, Fetches};
 use xmoq_track_serving::backoff::Backoff;
 use xmoq_track_serving::fetch::{pieces_of, plan};
@@ -133,8 +134,9 @@ const MAX_BYTES_HELD: usize = 64 * 1024 * 1024;
 pub enum Ended {
     /// The gatherer was told to stop.
     Stopped,
-    /// The relay sent GOAWAY (§10.4).
-    GoAway,
+    /// The relay sent GOAWAY on the control stream (§10.4), with the URL
+    /// to go to, or none for the same.
+    Moved(Option<String>),
 }
 
 /// A participant that is followed in this session.
@@ -923,9 +925,9 @@ impl Gathering<'_> {
         self.settle_early()?;
         match event {
             UniEvent::Control(message) => match self.session.on_control_message(message)? {
-                ControlEvent::GoAway(_) => {
+                ControlEvent::GoAway(go_away) => {
                     println!("GOAWAY");
-                    return Ok(Some(Ended::GoAway));
+                    return Ok(Some(Ended::Moved(new_url(&go_away.new_session_uri))));
                 }
                 ControlEvent::Setup(_) => bail!("the session took a second SETUP"),
             },
@@ -1044,6 +1046,36 @@ impl Gathering<'_> {
         }
     }
 
+    /// The relay sent GOAWAY on the stream of a request of the gatherer: the
+    /// request alone is asked again, on this session, as after its end
+    /// (§10.4: "the endpoint SHOULD re-issue that specific request ... and
+    /// close the old request stream using the appropriate mechanism (e.g.
+    /// FIN, stream reset, or `PUBLISH_DONE`)"). A subscription is cancelled
+    /// (§5.1), and the PUBLISH of a room ends with `PUBLISH_DONE`
+    /// `GOING_AWAY` once its streams are closed (§10.11) and is sent again.
+    ///
+    /// FIXME: a New Session URI names another session for the request, and
+    /// the request is asked again on this one (§10.4: "on a session at the
+    /// specified URI"); the gatherer keeps one session.
+    fn request_moved(&mut self, token: u64, purpose: &Purpose) {
+        match purpose {
+            Purpose::Lines(room) => {
+                if self
+                    .rooms
+                    .get(room)
+                    .is_some_and(|entry| entry.publish() == Some(token))
+                {
+                    let room = room.clone();
+                    self.end_publish(&room, publish_done_status::GOING_AWAY, false);
+                }
+            }
+            purpose => {
+                self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
+                self.request_over(token, purpose, "GOAWAY");
+            }
+        }
+    }
+
     /// A request of the gatherer is over, and was let go of.
     ///
     /// WHY the `SUBSCRIBE_NAMESPACE` is asked for again alone, after a wait
@@ -1110,7 +1142,7 @@ impl Gathering<'_> {
         match (purpose, event) {
             (_, RequestEvent::GoAway(_)) => {
                 println!("GOAWAY on a request stream");
-                return Ok(Some(Ended::GoAway));
+                self.request_moved(token, purpose);
             }
             (Purpose::Watch(index), RequestEvent::NamespacesSubscribed) => {
                 if let Some(watch) = self.watches.get(*index) {
