@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
-use xmoq_again::AskAgain;
 pub use xmoq_again::next_session::Ended;
+use xmoq_again::next_session::Pause;
 use xmoq_agent::events::{Asked as FrameAsked, BroadcastState, Event};
 use xmoq_agent::input::{self, Input};
 use xmoq_agent::presence::SETTLE_MS;
@@ -33,6 +33,7 @@ use xmoq_moqt_io::{
 use xmoq_msf::CatalogTrack;
 use xmoq_subscriber::catalog::{Became, FollowedCatalog};
 use xmoq_subscriber::follow::{Asking, Follower, Out as FollowOut, RENDEZVOUS_MS, Track};
+use xmoq_subscriber::namespaces::KeptNamespace;
 use xmoq_subscriber::session::{
     self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of,
 };
@@ -128,14 +129,13 @@ fn chat_event(line: ChatLine) -> Event {
 /// The chat on tracks of the session, and who is in it.
 struct Chat {
     tracks: ChatTracks,
-    room: TrackNamespace,
     /// The `sub` token of the room's namespace, where the room gave one.
     token: Option<Vec<u8>>,
     open_wait_ms: u64,
     watching: Option<Watching>,
-    /// When to ask for the namespaces again, after one that failed or ended.
-    watch_at: Option<tokio::time::Instant>,
-    again: AskAgain,
+    /// The `SUBSCRIBE_NAMESPACE` for the namespaces, and when it is asked
+    /// for again (`xmoq-subscriber`).
+    kept: KeptNamespace,
     /// When those not told of again on this session are taken to have left.
     settle_at: Option<tokio::time::Instant>,
 }
@@ -148,11 +148,11 @@ impl Chat {
         connection: &WtConnection,
         reader: &mut Reader,
     ) {
-        self.watch_at = None;
+        self.kept.asked(std::time::Instant::now());
         match watch(
             connection,
             session,
-            &self.room,
+            self.kept.prefix(),
             self.token.as_deref(),
             self.open_wait_ms,
         )
@@ -163,12 +163,24 @@ impl Chat {
         }
     }
 
+    /// The `SUBSCRIBE_NAMESPACE` ended, or could not be sent: asked for again
+    /// after the role's pause.
     fn watch_failed(&mut self, reader: &mut Reader, how: &str) {
+        let pause = self.kept.ended(std::time::Instant::now());
+        self.watch_again_in(reader, how, pause);
+    }
+
+    /// The `SUBSCRIBE_NAMESPACE` was refused: asked for again after the wait
+    /// its Retry Interval names (`named_ms`).
+    fn watch_refused(&mut self, reader: &mut Reader, how: &str, named_ms: Option<u64>) {
+        let pause = self.kept.refused(named_ms, std::time::Instant::now());
+        self.watch_again_in(reader, how, pause);
+    }
+
+    fn watch_again_in(&mut self, reader: &mut Reader, how: &str, pause: u64) {
         if let Some(watching) = self.watching.take() {
             watching.cancel();
         }
-        let pause = self.again.after_end();
-        self.watch_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause));
         reader.error(format!(
             "who is in the chat: {how}; asking again in {pause} ms"
         ));
@@ -176,10 +188,11 @@ impl Chat {
 
     /// What came on the stream of the `SUBSCRIBE_NAMESPACE`.
     ///
-    /// FIXME: one keeping of a `SUBSCRIBE_NAMESPACE` for this and for the
-    /// other (`meeting::InMeeting::on_watching`), as `xmoq_subscriber::kept` is for a track, where only
-    /// more namespaces than the session keeps ask again, and any other
-    /// message that breaks the protocol closes the session.
+    /// FIXME: one reading of the stream of a `SUBSCRIBE_NAMESPACE` for this
+    /// and for the other (`meeting::InMeeting::on_watching`), where only more namespaces than the
+    /// session keeps ask again, and any other message that breaks the
+    /// protocol closes the session. When it is asked again is
+    /// `KeptNamespace` of `xmoq-subscriber` already.
     fn on_watching(
         &mut self,
         session: &mut Session,
@@ -206,7 +219,7 @@ impl Chat {
         };
         match session.on_request_message(request, message) {
             Ok(RequestEvent::NamespacesSubscribed) => {
-                self.again.subscribed();
+                self.kept.subscribed();
                 self.settle_at =
                     Some(tokio::time::Instant::now() + Duration::from_millis(SETTLE_MS));
             }
@@ -226,7 +239,8 @@ impl Chat {
             }
             Ok(RequestEvent::Rejected(error)) => {
                 session.cancel(request);
-                self.watch_failed(reader, &format!("refused with {:#x}", error.error_code));
+                let how = format!("refused with {:#x}", error.error_code);
+                self.watch_refused(reader, &how, error.retry_wait_ms());
             }
             Ok(RequestEvent::GoAway(go_away)) => return Some(Ended::Moved(new_url(&go_away))),
             Ok(other) => reader.error(format!("who is in the chat: {other:?}")),
@@ -658,12 +672,10 @@ pub async fn attend(
     };
     let mut chat = Chat {
         tracks,
-        room: room_namespace,
         token: place.chat_tokens.subscribe.clone(),
         open_wait_ms: args.open_wait_ms,
         watching: None,
-        watch_at: None,
-        again: AskAgain::default(),
+        kept: KeptNamespace::new(room_namespace, Pause::VIEWER),
         settle_at: None,
     };
     chat.watch(&mut session, connection, reader).await;
@@ -715,7 +727,7 @@ pub async fn attend(
         let Chat {
             tracks,
             watching,
-            watch_at,
+            kept,
             settle_at,
             ..
         } = &mut chat;
@@ -874,7 +886,7 @@ pub async fn attend(
                     break ended;
                 }
             }
-            () = on(watch_at.map(tokio::time::sleep_until)) => {
+            () = on(kept.again_at().map(|at| tokio::time::sleep_until(at.into()))) => {
                 chat.watch(&mut session, connection, reader).await;
             }
             () = on(settle_at.map(tokio::time::sleep_until)) => {

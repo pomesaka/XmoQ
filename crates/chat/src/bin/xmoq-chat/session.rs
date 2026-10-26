@@ -63,7 +63,7 @@ use xmoq_moqt::message::{
     ControlMessage, FetchRange, ReasonPhrase, publish_done_status, request_error_code,
 };
 use xmoq_moqt::name::{Location, TrackNamespace};
-use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
+use xmoq_moqt::params::{GroupOrder, Parameter};
 use xmoq_moqt::session::{
     ControlEvent, MalformedRequest, RequestEvent, RequestId, Role, Session, SubscribedAlias,
     Transport,
@@ -76,17 +76,15 @@ use xmoq_moqt_io::{
 };
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 
-use xmoq_again::AskAgain as AskingAgain;
-use xmoq_again::next_session::{Growing, Pause, new_url};
+use xmoq_again::next_session::{Pause, new_url};
 use xmoq_publisher::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
 use xmoq_publisher::fetch::{pieces_of, plan};
+use xmoq_publisher::own::OwnRequests;
 use xmoq_publisher::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
 use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
-use xmoq_publisher::streams::{
-    COMMAND_QUEUE, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request,
-    send_group,
-};
+use xmoq_publisher::streams::{COMMAND_QUEUE, Command, GroupToSend, Heard, Sending, send_group};
 use xmoq_publisher::{shown, sleep_until};
+use xmoq_subscriber::namespaces::KeptNamespace;
 
 use crate::storage::Store;
 
@@ -230,32 +228,13 @@ enum Purpose {
     Room(Room, RoomTrack),
 }
 
-/// A request of the gatherer, by the token its task reports with.
-struct Own {
-    purpose: Purpose,
-    request: RequestId,
-    task: RequestTask,
-}
-
-/// One `SUBSCRIBE_NAMESPACE` of the gatherer, and when it is asked for again
-/// after it ended.
-struct Watch {
-    prefix: TrackNamespace,
-    again: Option<Instant>,
-    sent: Instant,
-    /// The wait after it ended, which grows while it ends again and again.
-    ends: Growing,
-    /// The wait after it was refused, by the Retry Interval.
-    refusals: AskingAgain,
-}
-
-/// Has `watch` asked for again `wait_ms` from now, and says so.
-fn watch_again_in(watch: &mut Watch, wait_ms: u64, why: &str) {
+/// Says that the `SUBSCRIBE_NAMESPACE` for `prefix` is asked for again
+/// `wait_ms` from now.
+fn watch_ended(prefix: &TrackNamespace, why: &str, wait_ms: u64) {
     println!(
         "WATCH_ENDED prefix={} why={why:?} again_in_ms={wait_ms}",
-        shown(&watch.prefix)
+        shown(prefix)
     );
-    watch.again = Some(Instant::now() + Duration::from_millis(wait_ms));
 }
 
 /// Everything of one session.
@@ -265,9 +244,7 @@ struct Gathering<'a> {
     gatherer: &'a mut Gatherer,
     session: Session,
     stops: StreamStops,
-    own: HashMap<u64, Own>,
-    next_token: u64,
-    heard: mpsc::Sender<(u64, Heard)>,
+    own: OwnRequests<Purpose>,
     /// The tracks of each room the gatherer numbers, with the Objects that
     /// wait for their `PUBLISH_OK` by Group ID.
     published: HashMap<(Room, RoomTrack), Publication<Waiting>>,
@@ -295,7 +272,7 @@ struct Gathering<'a> {
     /// they are.
     ending: HashMap<u64, ((Room, RoomTrack), Ending)>,
     drained: mpsc::Sender<u64>,
-    watches: Vec<Watch>,
+    watches: Vec<KeptNamespace>,
     /// The rooms the gatherer takes (`--room`).
     taken: &'a Taken,
     /// `--auth-key-hex`.
@@ -377,9 +354,7 @@ pub async fn gather(
         gatherer,
         session: Session::new(Role::Client, Transport::WebTransport),
         stops,
-        own: HashMap::new(),
-        next_token: 0,
-        heard,
+        own: OwnRequests::new(heard, OPEN_WAIT),
         published: HashMap::new(),
         last_group: HashMap::new(),
         reacting,
@@ -397,13 +372,7 @@ pub async fn gather(
         drained,
         watches: prefixes(rooms_taken)?
             .into_iter()
-            .map(|prefix| Watch {
-                prefix,
-                again: None,
-                sent: Instant::now(),
-                ends: Growing::new(Pause::SERVING),
-                refusals: AskingAgain::default(),
-            })
+            .map(|prefix| KeptNamespace::new(prefix, Pause::SERVING))
             .collect(),
         taken: rooms_taken,
         key,
@@ -508,9 +477,8 @@ impl Gathering<'_> {
         let Some(watch) = self.watches.get_mut(index) else {
             return Ok(());
         };
-        watch.again = None;
-        watch.sent = Instant::now();
-        let prefix = watch.prefix.clone();
+        watch.asked(Instant::now());
+        let prefix = watch.prefix().clone();
         let (request, message) = self.session.subscribe_namespace(
             prefix,
             self.token_parameter(TokenRole::Sub).into_iter().collect(),
@@ -521,19 +489,17 @@ impl Gathering<'_> {
 
     /// When the next watch that ended is to be asked for again.
     fn next_watch(&self) -> Option<Instant> {
-        self.watches.iter().filter_map(|watch| watch.again).min()
+        self.watches
+            .iter()
+            .filter_map(KeptNamespace::again_at)
+            .min()
     }
 
     /// Asks again for every watch whose time has come.
     fn watch_again(&mut self) -> Result<()> {
         let now = Instant::now();
         let due: Vec<usize> = (0..self.watches.len())
-            .filter(|index| {
-                self.watches
-                    .get(*index)
-                    .and_then(|watch| watch.again)
-                    .is_some_and(|again| again <= now)
-            })
+            .filter(|index| self.watches.get(*index).is_some_and(|watch| watch.due(now)))
             .collect();
         for index in due {
             self.watch(index)?;
@@ -549,22 +515,8 @@ impl Gathering<'_> {
         message: ControlMessage,
         parameters: &[Parameter],
     ) -> u64 {
-        let token = self.next_token;
-        self.next_token += 1;
-        let waits = Waits {
-            open: OPEN_WAIT,
-            answer: Duration::from_millis(answer_wait_ms(ANSWER_WAIT_MS, parameters)),
-        };
-        let task = open_request(self.connection, token, message, waits, self.heard.clone());
-        self.own.insert(
-            token,
-            Own {
-                purpose,
-                request,
-                task,
-            },
-        );
-        token
+        self.own
+            .open(self.connection, purpose, request, message, parameters)
     }
 
     /// Tells the task of a request stream something.
@@ -578,10 +530,7 @@ impl Gathering<'_> {
     /// the request is cancelled with `EXCESSIVE_LOAD` (§3.3.3), as the own
     /// relay ends a FETCH with too many updates waiting.
     fn tell(&mut self, token: u64, command: Command) {
-        let full = self
-            .own
-            .get(&token)
-            .is_some_and(|own| own.task.commands.try_send(command).is_err());
+        let full = self.own.tell(token, command).is_err();
         if full {
             self.cancel_request(token, stream_reset_code::EXCESSIVE_LOAD);
         }
@@ -597,22 +546,7 @@ impl Gathering<'_> {
 
     /// Ends a request in the session and on its stream, and forgets it.
     fn let_go(&mut self, token: u64, command: Command) -> Option<Purpose> {
-        let mut own = self.own.remove(&token)?;
-        match command {
-            Command::Cancel(code) => {
-                self.session.cancel(own.request);
-                if let Some(abort) = own.task.abort.take() {
-                    let _ = abort.send(code);
-                }
-            }
-            // Queued before the sender is dropped, it is read before the
-            // task sees the end of the queue; where it does not fit, the
-            // dropped sender cancels the stream.
-            command => {
-                let _ = own.task.commands.try_send(command);
-            }
-        }
-        Some(own.purpose)
+        self.own.let_go(&mut self.session, token, command)
     }
 
     /// Publishes every track of a room ([`ROOM_TRACKS`]).
@@ -729,7 +663,7 @@ impl Gathering<'_> {
         let Some(((room, track), ending)) = self.ending.remove(&token) else {
             return Ok(());
         };
-        if let Some(own) = self.own.get(&token) {
+        if let Some(own) = self.own.get(token) {
             let streams = ending.streams();
             let done = self.session.publish_done(
                 own.request,
@@ -1242,7 +1176,7 @@ impl Gathering<'_> {
 
     /// What the task of one of the gatherer's request streams heard.
     fn on_heard(&mut self, token: u64, heard: Heard) -> Result<Option<SessionEnd>> {
-        let Some(own) = self.own.get(&token) else {
+        let Some(own) = self.own.get(token) else {
             return Ok(None);
         };
         let (purpose, request) = (own.purpose.clone(), own.request);
@@ -1250,7 +1184,7 @@ impl Gathering<'_> {
             Heard::Opened => Ok(None),
             Heard::NotOpened(why) => {
                 self.session.cancel(request);
-                self.own.remove(&token);
+                self.own.forget(token);
                 self.request_over(token, &purpose, &format!("not sent: {why}"));
                 Ok(None)
             }
@@ -1333,10 +1267,8 @@ impl Gathering<'_> {
         match purpose {
             Purpose::Watch(index) => {
                 if let Some(watch) = self.watches.get_mut(*index) {
-                    let lasted =
-                        u64::try_from(watch.sent.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    let wait = watch.ends.after(lasted);
-                    watch_again_in(watch, wait, why);
+                    let wait = watch.ended(Instant::now());
+                    watch_ended(watch.prefix(), why, wait);
                 }
             }
             Purpose::Person(person, track) => {
@@ -1359,10 +1291,7 @@ impl Gathering<'_> {
     /// request: §2.4.2, "it MUST cancel any corresponding subscription or
     /// fetches for that Track". Its stream is reset with `MALFORMED_TRACK`.
     fn malformed(&mut self, request: RequestId) {
-        let token = self
-            .own
-            .iter()
-            .find_map(|(token, own)| (own.request == request).then_some(*token));
+        let token = self.own.token_of(request);
         let Some(token) = token else {
             return;
         };
@@ -1424,8 +1353,8 @@ impl Gathering<'_> {
             }
             (Purpose::Watch(index), RequestEvent::NamespacesSubscribed) => {
                 if let Some(watch) = self.watches.get_mut(*index) {
-                    watch.refusals.subscribed();
-                    println!("WATCHING prefix={}", shown(&watch.prefix));
+                    watch.subscribed();
+                    println!("WATCHING prefix={}", shown(watch.prefix()));
                 }
             }
             (Purpose::Watch(_), RequestEvent::Namespace(namespace)) => {
@@ -1474,8 +1403,8 @@ impl Gathering<'_> {
                 self.let_go(token, Command::Finish);
                 let why = format!("refused with {:#x}", error.error_code);
                 if let Some(watch) = self.watches.get_mut(*index) {
-                    let wait = watch.refusals.after_refusal(error.retry_wait_ms());
-                    watch_again_in(watch, wait, &why);
+                    let wait = watch.refused(error.retry_wait_ms(), Instant::now());
+                    watch_ended(watch.prefix(), &why, wait);
                 }
             }
             (_, RequestEvent::Rejected(error)) => {
@@ -1501,7 +1430,7 @@ impl Gathering<'_> {
                     ..
                 },
             ) => {
-                let request = self.own.get(&token).map(|own| own.request);
+                let request = self.own.get(token).map(|own| own.request);
                 if let Some(request) = request {
                     self.malformed(request);
                 }

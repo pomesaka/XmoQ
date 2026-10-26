@@ -2837,6 +2837,7 @@ dependencies = [
  "xmoq-moqt-io",
  "xmoq-publisher",
  "xmoq-room-token",
+ "xmoq-subscriber",
 ]
 
 [[package]]
@@ -2981,6 +2982,7 @@ dependencies = [
  "xmoq-publisher",
  "xmoq-room-token",
  "xmoq-speech",
+ "xmoq-subscriber",
  "xmoq-transcript-tracks",
 ]
 
