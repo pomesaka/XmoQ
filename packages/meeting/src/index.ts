@@ -31,7 +31,6 @@ export {
 	INBOX_EVERY_MS,
 } from "./web/agent-bridge.ts";
 export {
-	AGENT_ROOT,
 	type AgentFolder,
 	allowRoot,
 	chooseRoot,
@@ -47,8 +46,6 @@ export {
 } from "./web/keep-attending.ts";
 export {
 	createMeeting,
-	DEFAULT_MOST_OTHERS,
-	DEFAULT_MOST_WATCHED,
 	type Meeting,
 	type MeetingEvent,
 	type MeetingOptions,

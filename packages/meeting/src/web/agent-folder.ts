@@ -8,18 +8,6 @@
 import { type AgentEvent, agentLine } from "../core/agent-lines.ts";
 
 /**
- * The name the root is to have, under the person's Documents:
- * `~/Documents/xmoq`. WHY there: Chromium lets a page have no home, desktop
- * or Documents folder itself, and every folder in them that is not blocked
- * otherwise (`kBlockPaths` of
- * chrome/browser/file_system_access/chrome_file_system_access_permission_context.cc,
- * Chromium's main, read on 2026-10-25). The page cannot know the path of
- * what was chosen; this name is what it tells the person to choose, and
- * what an agent is told to read.
- */
-export const AGENT_ROOT = "~/Documents/xmoq";
-
-/**
  * How long a line waits to be written to `events.jsonl`, with the lines
  * after it, in ms. **Provisional.** WHY: every write copies the whole file
  * (the WHY at `flush`); a second is as long as the inbox waits too.

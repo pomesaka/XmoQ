@@ -15,7 +15,6 @@ import {
 	keepPublishing,
 } from "@xmoq/media";
 import {
-	AGENT_ROOT,
 	type AgentBridge,
 	allowRoot,
 	chooseRoot,
@@ -42,7 +41,19 @@ import { every, say } from "../lib/page.ts";
 import { type Broadcast, connectToRelay, tokenOf, why } from "../lib/relay.ts";
 import { AUDIO_TRACK, DECODER_CODEC, ENCODER_CODEC, SAMPLE_RATE, TRACK } from "../lib/tracks.ts";
 
-declare const XMOQ_DEMO: { roomsUrl: string | null };
+declare const XMOQ_DEMO: { roomsUrl: string | null; mostWatched: number };
+
+/**
+ * The name the root of the agent's folder is to have, under the person's
+ * Documents: `~/Documents/xmoq`. WHY there: Chromium lets a page have no
+ * home, desktop or Documents folder itself, and every folder in them that
+ * is not blocked otherwise (`kBlockPaths` of
+ * chrome/browser/file_system_access/chrome_file_system_access_permission_context.cc,
+ * Chromium's main, read on 2026-10-25). The page cannot know the path of
+ * what was chosen; this name is what it tells the person to choose, and
+ * what an agent is told to read.
+ */
+const AGENT_ROOT = "~/Documents/xmoq";
 
 /**
  * How many lines of the chat the page shows; the oldest go. Not a flag:
@@ -125,6 +136,8 @@ function seats(): {
 	): Promise<Uint8Array | undefined>;
 	/** The prefix the room says a transcriber listens under for its meeting; null without one. */
 	meetingTranscript(): Promise<string[] | null>;
+	/** How many seats the meeting has. */
+	most(): Promise<number>;
 } {
 	const roomsUrl = XMOQ_DEMO.roomsUrl;
 	if (roomsUrl === null) {
@@ -203,6 +216,9 @@ function seats(): {
 		seat,
 		async meetingTranscript() {
 			return (await meeting()).transcript;
+		},
+		async most() {
+			return (await meeting()).most;
 		},
 	};
 }
@@ -541,9 +557,23 @@ async function main(): Promise<void> {
 	});
 	callButton?.addEventListener("click", () => agentCall.press());
 
+	// The others kept: everybody the room lets in besides this page. Asked
+	// of the room until it answers, as a seat is.
+	let seatsOfTheMeeting: number | undefined;
+	while (seatsOfTheMeeting === undefined) {
+		try {
+			seatsOfTheMeeting = await theRoom.most();
+		} catch (error) {
+			state.seat = `the room did not answer (${why(error)}); asking again`;
+			show();
+			await new Promise((resolve) => setTimeout(resolve, AGAIN_MS));
+		}
+	}
 	const meeting = createMeeting({
 		room,
 		self,
+		mostWatched: XMOQ_DEMO.mostWatched,
+		mostOthers: seatsOfTheMeeting - 1,
 		onFrame(id, frame, at) {
 			others(id).frames += 1;
 			tileOf(id).getContext("2d")?.drawImage(frame, 0, 0, WIDTH, HEIGHT);

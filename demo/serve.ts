@@ -50,6 +50,9 @@ import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+// WHY the limits alone: the package itself has the chat of a page, of the
+// DOM, which this side does not run.
+import { chatLimits } from "@xmoq/chat/limits";
 import { BROADCAST_PAGES } from "./broadcast/pages.ts";
 import type { Page, Served } from "./lib/shell.ts";
 import { MEETING_PAGES } from "./meeting/pages.ts";
@@ -80,11 +83,36 @@ const { values: options } = parseArgs({
 		// voice read in that language: an English voice read with `ja` came
 		// out in Japanese (crates/speech/README.md).
 		"transcribe-language": { type: "string", default: "auto" },
+		// The model of whisper.cpp the transcriber reads with, and its model of
+		// voice activity: the files `mise run speech-model` fetches into the
+		// cache when left out.
+		"speech-model": { type: "string" },
+		"vad-model": { type: "string" },
+		// The limits of a line of the chat: the gatherer drops a line over
+		// them, and the pages keep it back and say so. 512 bytes and 5 lines
+		// a second (provisional, the gatherer's defaults).
+		"chat-text-bytes": { type: "string", default: "512" },
+		"chat-lines-per-second": { type: "string", default: "5" },
+		// Whose video a page of the meeting receives at once, the first that
+		// many as they came (decided on 2026-10-25: 8); 0 for none.
+		"meeting-most-watched": { type: "string", default: "8" },
 		port: { type: "string", default: "8080" },
 	},
 });
 
 const here = import.meta.dir;
+// The values given to the gatherer and the pages, checked before anything is
+// started: a value that is none stops the demo, as the gatherer would stop.
+const chatLimitsOfTheRun = chatLimits({
+	textBytes: Number(options["chat-text-bytes"]),
+	linesPerSecond: Number(options["chat-lines-per-second"]),
+});
+const mostWatched = Number(options["meeting-most-watched"]);
+if (!Number.isSafeInteger(mostWatched) || mostWatched < 0) {
+	throw new RangeError(
+		`--meeting-most-watched is a whole number from 0, not ${options["meeting-most-watched"]}`,
+	);
+}
 /** The broadcast the transcriber reads: that of the room `/publish` and `/watch` open when no `?room=` says. */
 const BROADCAST_PREFIX = "xmoq/broadcast/demo";
 /** The meeting the transcriber reads: that of the room `/meet` opens when no `?room=` says. */
@@ -225,6 +253,10 @@ const chat = existsSync(chatBinary)
 					certSha256Hex,
 					"--store",
 					chatStore,
+					"--text-bytes",
+					String(chatLimitsOfTheRun.textBytes),
+					"--lines-per-second",
+					String(chatLimitsOfTheRun.linesPerSecond),
 					...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
 				],
 				// Its lines, one for each thing it does, are not shown.
@@ -249,12 +281,13 @@ const whisperCache = join(
 	"xmoq",
 	"whisper",
 );
-// The transcriber's default model (`DEFAULT_MODEL` in crates/speech/src/model.rs)
-// and its model of voice activity.
-const transcriberModels = [
-	join(whisperCache, "ggml-small-q5_1.bin"),
-	join(whisperCache, "ggml-silero-v5.1.2.bin"),
-];
+// The model the transcriber reads with and its model of voice activity:
+// those `mise run speech-model` fetches, unless the flags name others.
+const speechModel =
+	options["speech-model"] ?? join(whisperCache, "ggml-small-q5_1.bin");
+const vadModel =
+	options["vad-model"] ?? join(whisperCache, "ggml-silero-v5.1.2.bin");
+const transcriberModels = [speechModel, vadModel];
 /** Why the watching page has no captions, where it has none. */
 const noCaptions = !existsSync(transcriberBinary)
 	? `no captions: ${transcriberBinary} is missing (cargo build --release -p xmoq-transcriber)`
@@ -280,6 +313,10 @@ const transcriber =
 					MEETING_PREFIX,
 					"--language",
 					options["transcribe-language"],
+					"--model",
+					speechModel,
+					"--vad-model",
+					vadModel,
 					...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
 				],
 				// Its lines, one for each thing it does, are not shown.
@@ -319,6 +356,8 @@ for (const [path, page] of Object.entries(PAGES)) {
 		define: {
 			XMOQ_DEMO: JSON.stringify({
 				roomsUrl,
+				chatLimits: chatLimitsOfTheRun,
+				mostWatched,
 				chatTracks: chat !== undefined,
 				transcript: transcriber !== undefined,
 				relayUrl: `https://127.0.0.1:${options["relay-port"]}/`,
