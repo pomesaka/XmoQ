@@ -705,7 +705,7 @@ fn requests_the_relay_does_not_serve_are_refused_and_the_session_goes_on() {
             []
         );
     }
-    // A namespace is accepted; see the FIXME on routing in the crate docs.
+    // A namespace is accepted.
     assert_eq!(
         relay.step(Event::RequestOpened {
             session: ALICE,

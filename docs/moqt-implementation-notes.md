@@ -107,7 +107,7 @@ Items marked **provisional** depend on an [open question](open-questions.md).
 
 ## Known gaps against the draft
 
-These are requirements of draft 18 that the implementations do not meet yet. Each has a `FIXME:` at the place in the code where it belongs.
+These are requirements of draft 18 that the implementations do not meet yet, and this list is the whole of them. A `FIXME:` in the code marks the place of some of them; one is not there for every entry, and nothing checks that the two agree.
 
 **The four that could do the most harm**, as they were found on 2026-10-12, and what is left of each after the limits of 2026-10-13; looked at against the code again on 2026-10-13, and against the changes of 2026-10-14 (NEW_GROUP_REQUEST, the relay's flags to give up older Groups taken out, DYNAMIC_GROUPS, a FETCH asked of the next publisher), which change none of the four. Three of them are limited for one session and open for a sender with several sessions; the second waits for the decision on authorization. Each is in the list below, or in the rows it names; the order is by who is hurt: other viewers first, then the relay, then the one session.
 

@@ -329,8 +329,9 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * §11.4.2 names a deadlock of that kind for control messages and asks
 	 * endpoints to "allocate connection flow control to the control streams
 	 * before allocating it to any data streams"; a page has no say in how the
-	 * browser's credit is given out. The Rust implementation has a related
-	 * FIXME at `read_uni_streams` in crates/moqt-io/src/streams.rs. Whether
+	 * browser's credit is given out. A Rust server keeps room for the request
+	 * streams by its windows (`read_uni_streams` and
+	 * `QuicLimits::leaves_room_for_control_streams` in crates/moqt-io). Whether
 	 * the client should end such a subscription itself is in
 	 * docs/open-questions.md.
 	 */
