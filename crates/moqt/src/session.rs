@@ -108,9 +108,9 @@ enum Request {
     Subscribe {
         full_track_name: FullTrackName,
         track_alias: Option<u64>,
-        /// `REQUEST_UPDATE`s this endpoint sent that have no answer yet
+        /// The `REQUEST_UPDATE`s this endpoint sent
         /// ([`Session::update_subscription`]).
-        updates: u32,
+        updates: SentUpdates,
     },
     Publish {
         full_track_name: FullTrackName,
@@ -265,6 +265,10 @@ pub enum RequestEvent {
     /// subscription is still there: its `PUBLISH_DONE` with `UPDATE_FAILED`
     /// follows (§10.9.1) and ends it as any other.
     UpdateFailed(RequestError),
+    /// The answer to a `REQUEST_UPDATE` this endpoint sent before the
+    /// publisher refused an earlier one ([`Self::UpdateFailed`]). There is
+    /// nothing to do: the subscription is ending.
+    UpdateAnsweredAfterRefusal,
     /// `REQUEST_UPDATE` from the subscriber of a track this endpoint
     /// publishes, with no parameter but delivery timeouts:
     /// as [`PeerRequestEvent::SubscriptionUpdated`], for a subscription
@@ -582,7 +586,7 @@ impl Session {
         let request_id = self.open(Request::Subscribe {
             full_track_name: full_track_name.clone(),
             track_alias: None,
-            updates: 0,
+            updates: SentUpdates::default(),
         })?;
         let message = ControlMessage::Subscribe(Subscribe {
             request_id: request_id.0,
@@ -623,14 +627,12 @@ impl Session {
         else {
             return Err(UsageError("not an established subscription of a SUBSCRIBE"));
         };
-        if *updates >= MAX_UNANSWERED_UPDATES {
-            return Err(UsageError("too many updates wait for their answer"));
-        }
+        updates.check_room()?;
         let request_id = self.next_request_id;
         self.next_request_id = request_id
             .checked_add(2)
             .ok_or(UsageError("request ids are exhausted"))?;
-        *updates += 1;
+        updates.sent();
         Ok(ControlMessage::RequestUpdate(RequestUpdate {
             request_id,
             parameters,
@@ -887,7 +889,7 @@ impl Session {
             (
                 Request::Subscribe { updates, .. },
                 answer @ (ControlMessage::RequestOk(_) | ControlMessage::RequestError(_)),
-            ) if established && *updates > 0 => update_answered(updates, answer),
+            ) if established && updates.unanswered > 0 => update_answered(updates, answer),
             (
                 Request::Subscribe {
                     track_alias: Some(track_alias),
@@ -1389,44 +1391,84 @@ fn answer_update_of_publish(state: &mut PublishState, update: &RequestUpdate) ->
     }
 }
 
+/// The `REQUEST_UPDATE`s this endpoint sent for one subscription, as their
+/// answers come ([`update_answered`]).
+#[derive(Debug, Default)]
+pub(crate) struct SentUpdates {
+    /// Those that have no answer yet.
+    unanswered: u32,
+    /// Whether the publisher refused one.
+    refused: bool,
+}
+
+impl SentUpdates {
+    /// Whether one more may be sent: [`MAX_UNANSWERED_UPDATES`] wait at most.
+    pub(crate) fn check_room(&self) -> Result<(), UsageError> {
+        if self.unanswered >= MAX_UNANSWERED_UPDATES {
+            return Err(UsageError("too many updates wait for their answer"));
+        }
+        Ok(())
+    }
+
+    /// One more was sent.
+    pub(crate) fn sent(&mut self) {
+        self.unanswered += 1;
+    }
+
+    /// Whether one waits for its answer.
+    pub(crate) fn waiting(&self) -> bool {
+        self.unanswered > 0
+    }
+}
+
 /// The answer to a `REQUEST_UPDATE` of a subscription. §10.9: "The receiver
 /// of a `REQUEST_UPDATE` MUST respond with exactly one `REQUEST_OK` or
 /// `REQUEST_ERROR`". Responses carry no Request ID, so they answer the
 /// updates in the order sent.
-fn update_answered(updates: &mut u32, answer: ControlMessage) -> Result<RequestEvent, Error> {
-    let ok = match answer {
-        ControlMessage::RequestOk(ok) => ok,
-        // §10.9.1: "When a REQUEST_UPDATE is unsuccessful, the publisher
-        // MUST also terminate the subscription by sending a PUBLISH_DONE
-        // with error code UPDATE_FAILED", which comes next and ends the
-        // request. WHY the count goes to 0: a receiver may answer several
-        // updates with a single REQUEST_ERROR (§10.9.1).
-        ControlMessage::RequestError(error) => {
-            *updates = 0;
-            return Ok(RequestEvent::UpdateFailed(error));
+///
+/// After a refusal the publisher ends the subscription (§10.9.1: it "MUST
+/// also terminate the subscription by sending a `PUBLISH_DONE` with error
+/// code `UPDATE_FAILED`"), and what answers the later updates is taken and
+/// dropped. WHY each answer counts one, where a refusal could be read as
+/// the answer to all that wait: a publisher that coalesces sends "only a
+/// single `REQUEST_ERROR`" (§10.9.1), but one that does not answers each, and
+/// both are followed by the `PUBLISH_DONE`, which ends the request whatever
+/// still waits. `fixtures/update-answers/` has the rows.
+fn update_answered(
+    updates: &mut SentUpdates,
+    answer: ControlMessage,
+) -> Result<RequestEvent, Error> {
+    let event = match answer {
+        ControlMessage::RequestError(error) => RequestEvent::UpdateFailed(error),
+        ControlMessage::RequestOk(ok) => {
+            // What a REQUEST_UPDATE_OK may carry: §10.2.10, §10.2.11.
+            let allowed = ok
+                .parameters
+                .iter()
+                .all(|each| matches!(each, Parameter::Expires(_) | Parameter::LargestObject(_)));
+            if !allowed {
+                return Err(Error::ProtocolViolation(
+                    "parameter not allowed in this message",
+                ));
+            }
+            // §10.5: Track Properties "are empty in ... `REQUEST_UPDATE_OK`".
+            if !ok.track_properties.is_empty() {
+                return Err(Error::ProtocolViolation(
+                    "track properties in a REQUEST_OK that must not carry them",
+                ));
+            }
+            RequestEvent::UpdateAccepted {
+                parameters: ok.parameters,
+            }
         }
         _ => return Err(Error::ProtocolViolation("no answer to a REQUEST_UPDATE")),
     };
-    // What a REQUEST_UPDATE_OK may carry: §10.2.10, §10.2.11.
-    let allowed = ok
-        .parameters
-        .iter()
-        .all(|each| matches!(each, Parameter::Expires(_) | Parameter::LargestObject(_)));
-    if !allowed {
-        return Err(Error::ProtocolViolation(
-            "parameter not allowed in this message",
-        ));
+    updates.unanswered = updates.unanswered.saturating_sub(1);
+    if updates.refused {
+        return Ok(RequestEvent::UpdateAnsweredAfterRefusal);
     }
-    // §10.5: Track Properties "are empty in ... `REQUEST_UPDATE_OK`".
-    if !ok.track_properties.is_empty() {
-        return Err(Error::ProtocolViolation(
-            "track properties in a REQUEST_OK that must not carry them",
-        ));
-    }
-    *updates = updates.saturating_sub(1);
-    Ok(RequestEvent::UpdateAccepted {
-        parameters: ok.parameters,
-    })
+    updates.refused = matches!(event, RequestEvent::UpdateFailed(_));
+    Ok(event)
 }
 
 /// The two MUSTs of §10.6.1 for a Redirect in `REQUEST_ERROR`.
@@ -1454,6 +1496,7 @@ mod tests {
     use super::*;
     use crate::message::Redirect;
     use crate::params::GroupOrder;
+    use crate::test_util::{closed, update_answer_steps};
 
     fn track(name: &[u8]) -> FullTrackName {
         FullTrackName::new(namespace(), name.to_vec()).unwrap()
@@ -2965,6 +3008,43 @@ mod tests {
             Ok(RequestEvent::UpdateFailed(request_error()))
         );
         assert!(session.feed(subscribe, request_ok(vec![])).is_err());
+    }
+
+    /// The contract `fixtures/update-answers/answers.tsv` pins for both
+    /// implementations, for the subscriber of a SUBSCRIBE.
+    #[test]
+    fn a_subscriber_reads_the_answers_to_its_updates_as_the_shared_table_says() {
+        for (name, steps, events) in update_answer_steps() {
+            let mut session = client();
+            let (subscribe, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+            session.feed(subscribe, subscribe_ok(7, vec![])).unwrap();
+            let mut done = Vec::new();
+            for step in steps.split(' ') {
+                let message = match step {
+                    "update" => {
+                        session.update_subscription(subscribe, vec![]).unwrap();
+                        done.push("-".to_string());
+                        continue;
+                    }
+                    "ok" => request_ok(vec![]),
+                    "error" => ControlMessage::RequestError(request_error()),
+                    "done" => ControlMessage::PublishDone(publish_done()),
+                    other => panic!("{name}: a step the test does not know: {other}"),
+                };
+                done.push(match session.feed(subscribe, message) {
+                    Ok(RequestEvent::UpdateAccepted { .. }) => "accepted".to_string(),
+                    Ok(RequestEvent::UpdateFailed(_)) => "failed".to_string(),
+                    Ok(RequestEvent::UpdateAnsweredAfterRefusal) => "after-refusal".to_string(),
+                    Ok(RequestEvent::SubscriptionDone(_)) => "done".to_string(),
+                    Err(error) => closed(&error),
+                    other => panic!("{name}: {step}: {other:?}"),
+                });
+                if done.last().is_some_and(|last| last.starts_with("closed")) {
+                    break;
+                }
+            }
+            assert_eq!(&done.join(" | "), &events, "{name}");
+        }
     }
 
     #[test]

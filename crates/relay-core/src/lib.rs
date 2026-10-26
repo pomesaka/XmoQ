@@ -3417,6 +3417,7 @@ impl Relay {
             // then.
             PeerRequestEvent::OwnUpdateAccepted { .. }
             | PeerRequestEvent::OwnUpdateFailed(_)
+            | PeerRequestEvent::OwnUpdateAnsweredAfterRefusal
             | PeerRequestEvent::UpdateAlreadyRefused
             | PeerRequestEvent::LateMessage
             | PeerRequestEvent::GoAway(_) => {}

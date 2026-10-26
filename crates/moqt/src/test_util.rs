@@ -102,3 +102,47 @@ fn every_file_written_by_hand_is_read_by_a_test() {
 
     assert_eq!(names_on_disk("moqt-18-by-hand"), read);
 }
+
+/// The rows of a shared table: its lines, each split at the tabs into
+/// `N` fields. The first field is the name of the row.
+pub(crate) fn table_rows<const N: usize>(path: &str) -> Vec<[String; N]> {
+    let path = format!("{}/../../fixtures/{path}", env!("CARGO_MANIFEST_DIR"));
+    let table = std::fs::read_to_string(&path).expect("the fixture is there");
+    let body = table
+        .strip_suffix('\n')
+        .unwrap_or_else(|| panic!("{path}: the last row does not end with a line feed"));
+    let mut rows: Vec<[String; N]> = Vec::new();
+    for line in body.split('\n') {
+        let fields: Vec<String> = line.split('\t').map(str::to_string).collect();
+        let row: [String; N] = fields
+            .try_into()
+            .unwrap_or_else(|_| panic!("{path}: not {N} fields: {line:?}"));
+        assert!(
+            rows.iter().all(|other| other[0] != row[0]),
+            "{path}: twice: {:?}",
+            row[0]
+        );
+        rows.push(row);
+    }
+    rows
+}
+
+/// What the session does for an error that closes it, as the shared
+/// tables write it.
+pub(crate) fn closed(error: &crate::Error) -> String {
+    match error.termination_code() {
+        Some(code) => format!("closed {:#x}", code.code()),
+        None => panic!("an error that closes no session: {error:?}"),
+    }
+}
+
+/// The rows of `fixtures/update-answers/answers.tsv`: the name, the steps
+/// and what comes of each, as its README has them.
+pub(crate) fn update_answer_steps() -> Vec<(String, String, String)> {
+    let rows = table_rows::<3>("update-answers/answers.tsv");
+    // As many as the README has.
+    assert_eq!(rows.len(), 10);
+    rows.into_iter()
+        .map(|[name, steps, events]| (name, steps, events))
+        .collect()
+}

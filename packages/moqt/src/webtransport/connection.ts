@@ -2439,7 +2439,8 @@ export async function connectOver(
 					?.resolve(event.parameters);
 				return undefined;
 			case "update-error": {
-				// One REQUEST_ERROR may answer every update that waits (§10.9.1).
+				// The updates that still wait get no event of their own: the
+				// subscription is ending (§10.9.1).
 				const error = new RequestFailedError({
 					errorCode: event.errorCode,
 					retryInterval: event.retryInterval,

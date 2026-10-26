@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createSession, type Session } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
 import { fromALibrary, hex, toHex, utf8 } from "../helpers.ts";
@@ -75,7 +77,7 @@ test.each<{
 	},
 	{
 		// REQUEST_ERROR NOT_SUPPORTED (0x3), then PUBLISH_DONE UPDATE_FAILED (0x8).
-		name: "a REQUEST_ERROR answers every update that waits, and PUBLISH_DONE ends the subscription (§10.9.1)",
+		name: "a REQUEST_ERROR that answers the updates together is followed by PUBLISH_DONE, which ends the subscription (§10.9.1)",
 		updates: 2,
 		answers: [
 			["05 00 03 03 00 00", ["update-error 3 retry 0"]],
@@ -121,6 +123,83 @@ test.each<{
 			expect(session.closed).toBe(false);
 		}
 	}
+});
+
+/** The rows of `fixtures/update-answers/answers.tsv`: name, steps, events. */
+const UPDATE_ANSWERS = readFileSync(
+	join(
+		import.meta.dir,
+		"..",
+		"..",
+		"..",
+		"..",
+		"fixtures",
+		"update-answers",
+		"answers.tsv",
+	),
+	"utf8",
+)
+	.split("\n")
+	.filter((line) => line.length > 0)
+	.map((line) => {
+		const [name, steps, events, ...rest] = line.split("\t");
+		if (
+			name === undefined ||
+			steps === undefined ||
+			events === undefined ||
+			rest.length > 0
+		) {
+			throw new Error(`a row of answers.tsv does not have 3 fields: ${line}`);
+		}
+		return { name, steps, events };
+	});
+
+test("answers.tsv has the 10 rows of its README", () => {
+	expect(UPDATE_ANSWERS.length).toBe(10);
+});
+
+// The contract the Rust session reads too
+// (`a_subscriber_reads_the_answers_to_its_updates_as_the_shared_table_says`).
+test.each(UPDATE_ANSWERS)("$name ($steps): $events", ({ steps, events }) => {
+	const session = subscribed();
+	const ANSWERS: Record<string, string> = {
+		ok: "07 00 01 00",
+		// NOT_SUPPORTED (0x3).
+		error: "05 00 03 03 00 00",
+		// PUBLISH_DONE UPDATE_FAILED (0x8).
+		done: "0b 00 03 08 00 00",
+	};
+	const got: string[] = [];
+	for (const step of steps.split(" ")) {
+		if (step === "update") {
+			session.updateSubscription(0n, {});
+			got.push("-");
+			continue;
+		}
+		const bytes = ANSWERS[step];
+		if (bytes === undefined)
+			throw new Error(`a step the test does not know: ${step}`);
+		const outputs = session.receiveRequestStreamData(1, hex(bytes), false);
+		const words = outputs.flatMap((output) => {
+			if (output.type === "close-session") {
+				return [`closed 0x${output.code.toString(16)}`];
+			}
+			if (output.type !== "event") return [];
+			switch (output.event.type) {
+				case "update-ok":
+					return ["accepted"];
+				case "update-error":
+					return ["failed"];
+				case "publish-done":
+					return ["done"];
+				default:
+					return [];
+			}
+		});
+		got.push(words.length === 0 ? "after-refusal" : words.join(" "));
+		if (session.closed) break;
+	}
+	expect(got.join(" | ")).toBe(events);
 });
 
 test.each<{ name: string; act: (session: Session) => unknown }>([
