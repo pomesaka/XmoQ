@@ -6,7 +6,9 @@
 //!
 //! The token travels as §10.2.2 of `draft-ietf-moq-transport-18` has it, in
 //! the AUTHORIZATION TOKEN parameter of a PUBLISH, a `PUBLISH_NAMESPACE`, a
-//! SUBSCRIBE or a FETCH: a Token structure with Alias Type `USE_VALUE`
+//! SUBSCRIBE, a `SUBSCRIBE_NAMESPACE`, a `TRACK_STATUS` or a FETCH (what the
+//! relay asks it on is `Relay::allowed` in `xmoq-relay-core`; the session
+//! with the parent relay is not asked): a Token structure with Alias Type `USE_VALUE`
 //! (0x3), Token Type 0 ("negotiated out-of-band"), and as its value the
 //! text
 //!
@@ -16,11 +18,21 @@
 //!
 //! where the mac is HMAC-SHA-256 with the shared key over the text before
 //! the last `|`. A token allows one operation (`pub`: PUBLISH and
-//! `PUBLISH_NAMESPACE`; `sub`: SUBSCRIBE and a Standalone FETCH) in that
-//! namespace, until its expiry: in exactly that namespace, or, where its
-//! last field is `*`, in those under the fields before it
-//! ([`namespace_fits`], decided on 2026-10-24, so that a room's chat can be
-//! allowed).
+//! `PUBLISH_NAMESPACE`; `sub`: SUBSCRIBE, `SUBSCRIBE_NAMESPACE`,
+//! `TRACK_STATUS` and FETCH) in that namespace, until its expiry: in exactly
+//! that namespace, or, where its last field is `*`, in those under the
+//! fields before it ([`namespace_fits`], decided on 2026-10-24, so that a
+//! room's chat can be allowed). A Joining FETCH names no namespace, and any
+//! `sub` token allows it: it joins a subscription that was allowed.
+//!
+//! A `SUBSCRIBE_NAMESPACE` is checked by its prefix alone, so a token of
+//! exactly `a/b` allows watching the prefix `a/b`, and the relay then names
+//! the namespaces under it (`a/b/x`) that were announced, though the token
+//! allows no SUBSCRIBE or FETCH there.
+//!
+//! FIXME: whether a token of exactly a namespace showing the names under it
+//! is meant, or watching a prefix is to need a `*` token, waits for the
+//! user's answer (2026-10-26).
 //!
 //! WHY a token on every request (decided on 2026-10-11): the room's
 //! namespace is the unit, and the relay keeps no state of it. WHY NOT on
