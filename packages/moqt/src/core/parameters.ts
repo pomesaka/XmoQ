@@ -110,6 +110,10 @@ export type ParameterScope =
 	| "TRACK_STATUS"
 	/** The REQUEST_OK answering TRACK_STATUS: LARGEST_OBJECT alone (§10.2.11). */
 	| "TRACK_STATUS_OK"
+	/** The REQUEST_OK answering SUBSCRIBE_NAMESPACE: no parameter of the draft names it. */
+	| "SUBSCRIBE_NAMESPACE_OK"
+	/** The REQUEST_OK answering a REQUEST_UPDATE: EXPIRES and LARGEST_OBJECT (§10.2.10, §10.2.11). */
+	| "REQUEST_UPDATE_OK"
 	| "REQUEST_OK"
 	/** REQUEST_UPDATE for a subscription (§10.9.1). */
 	| "REQUEST_UPDATE"
@@ -137,6 +141,8 @@ const REQUEST_OK_KINDS: readonly ParameterScope[] = [
 	"PUBLISH_OK",
 	"PUBLISH_NAMESPACE_OK",
 	"TRACK_STATUS_OK",
+	"SUBSCRIBE_NAMESPACE_OK",
+	"REQUEST_UPDATE_OK",
 ];
 
 type WriteValue = (writer: ByteWriter) => void;
@@ -286,6 +292,7 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 			"REQUEST_UPDATE",
 			"FETCH",
 			"REQUEST_UPDATE_OF_FETCH",
+			"REQUEST_UPDATE_OF_SUBSCRIBE_NAMESPACE",
 			"SUBSCRIBE_NAMESPACE",
 			"TRACK_STATUS",
 		],
@@ -342,7 +349,7 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 	{
 		name: "EXPIRES",
 		type: 0x08n,
-		scopes: ["SUBSCRIBE_OK", "PUBLISH", "PUBLISH_OK"],
+		scopes: ["SUBSCRIBE_OK", "PUBLISH", "PUBLISH_OK", "REQUEST_UPDATE_OK"],
 		repeatable: false,
 		read: (reader, parameters) => {
 			parameters.expires = reader.varint();
@@ -352,7 +359,7 @@ const PARAMETERS: readonly ParameterDefinition[] = [
 	{
 		name: "LARGEST_OBJECT",
 		type: 0x09n,
-		scopes: ["SUBSCRIBE_OK", "PUBLISH", "TRACK_STATUS_OK"],
+		scopes: ["SUBSCRIBE_OK", "PUBLISH", "TRACK_STATUS_OK", "REQUEST_UPDATE_OK"],
 		repeatable: false,
 		read: (reader, parameters) => {
 			parameters.largestObject = decodeLocation(reader);
@@ -500,6 +507,20 @@ function allows(
 		default:
 			return definition.scopes.includes(scope);
 	}
+}
+
+/**
+ * Whether the parameter of Parameter Type `type` may appear in `scope`
+ * (§10.2.1); false for a type that is none of them.
+ * `fixtures/parameter-scopes/scopes.tsv` pins it, as it does `allowed_in`
+ * of the Rust implementation.
+ */
+export function parameterAllowedIn(
+	type: bigint,
+	scope: ParameterScope,
+): boolean {
+	const definition = PARAMETERS_BY_TYPE.get(type);
+	return definition !== undefined && allows(definition, scope);
 }
 
 /**
