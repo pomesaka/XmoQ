@@ -37,9 +37,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use xmoq_again::AskAgain;
-use xmoq_moqt::RequestFault;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestEvent, RequestId, Session};
+use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
 
@@ -297,7 +297,32 @@ impl KeptTrack {
     pub fn cut(&mut self, session: &mut Session) -> Option<Said> {
         let subscription = self.subscription.as_ref()?;
         session.cancel(subscription.request);
-        Some(self.ended("cut".to_string()))
+        Some(self.ended("cut".to_string(), stream_reset_code::CANCELLED))
+    }
+
+    /// The session ended the SUBSCRIBE `request` for a malformed track
+    /// (`Session::cancel_malformed`): where it is this track's, its stream is
+    /// reset with `MALFORMED_TRACK` (§2.4.2), and the track is asked for
+    /// again after the pause, as after any end; `None` where it is another's.
+    ///
+    /// WHY asked again: what broke the object model may be one Group of a
+    /// publisher that goes on, and the pages ask for the track again after
+    /// it ends whatever ended it.
+    ///
+    /// FIXME: no interop run has a viewer find a track malformed; the relays
+    /// find it first and end the subscription with `PUBLISH_DONE`. One would
+    /// have `xmoq-quiet-peer` stand as the relay, serve a catalog and its
+    /// tracks, and send an Object after the End of a Group, and wait for
+    /// `TRACK_MALFORMED` and the track asked for again in the logs of
+    /// `xmoq-watch` and `xmoq-agent`.
+    pub fn malformed(&mut self, request: RequestId) -> Option<Said> {
+        if self.subscription.as_ref()?.request != request {
+            return None;
+        }
+        Some(self.ended(
+            "MALFORMED_TRACK".to_string(),
+            stream_reset_code::MALFORMED_TRACK,
+        ))
     }
 
     /// Gives the subscription up, where there is one.
@@ -382,16 +407,17 @@ impl KeptTrack {
         };
         Ok(Some(
             match answered(session, subscription.request, event)? {
-                Answered::Ended(how) => self.ended(how),
+                Answered::Ended(how) => self.ended(how, stream_reset_code::CANCELLED),
                 Answered::Other(other) => Said::Other(other),
             },
         ))
     }
 
     /// The subscription is over, `how`: asked for again after the pause.
-    fn ended(&mut self, how: String) -> Said {
+    /// Its streams are reset and stopped with `code`.
+    fn ended(&mut self, how: String, code: u32) -> Said {
         if let Some(subscription) = self.let_go() {
-            subscription.cancel();
+            subscription.cancel_with(code);
         }
         let pause_ms = self.again.after_end();
         self.ask_in(pause_ms);

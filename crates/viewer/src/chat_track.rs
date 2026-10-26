@@ -282,6 +282,19 @@ impl<T> Shown<T> {
             .collect()
     }
 
+    /// The FETCH was cancelled with its subscription, of a track found
+    /// malformed (§2.4.2): the live lines that waited are let go of, and the
+    /// last shown stays where it was, so that the FETCH of the next
+    /// subscription asks for the lines from there.
+    ///
+    /// WHY NOT shown as at [`Self::fetch_ended`]: the lines of the FETCH not
+    /// read yet come before them, and showing them would make the last pass
+    /// over those without a gap said.
+    pub fn fetch_given_up(&mut self) {
+        self.fetching = false;
+        self.held.clear();
+    }
+
     /// A line of the subscription. While the FETCH is open the latest
     /// [`RECENT_LINES`] wait.
     pub fn live(&mut self, number: u64, line: T) -> Option<(u64, T)> {
@@ -476,6 +489,33 @@ mod tests {
         shown.forget();
         assert_eq!(shown.last(), None);
         assert_eq!(shown.fetched(2, ()), Some((2, ())));
+    }
+
+    #[test]
+    fn a_fetch_given_up_shows_none_of_what_waited_and_the_next_goes_on_from_the_last() {
+        // (lines of the FETCH read before it was given up; live lines that
+        //  waited; the last shown after), after a session that showed 2
+        let cases: [(&[u64], &[u64], u64); 3] =
+            [(&[3, 4], &[9, 10], 4), (&[], &[9], 2), (&[3], &[], 3)];
+        for (fetched, waited, last) in cases {
+            let mut shown = Shown::fetching_after(Some(2));
+            for number in fetched {
+                shown.fetched(*number, ());
+            }
+            for number in waited {
+                assert_eq!(shown.live(*number, ()), None);
+            }
+            shown.fetch_given_up();
+            assert_eq!(shown.last(), Some(last), "{fetched:?} {waited:?}");
+            // The next subscription's FETCH brings what was left out.
+            shown.refetching();
+            assert_eq!(
+                shown.fetched(last + 1, ()),
+                Some((last + 1, ())),
+                "{fetched:?} {waited:?}"
+            );
+            assert_eq!(shown.fetch_ended(), [], "{fetched:?} {waited:?}");
+        }
     }
 
     #[test]

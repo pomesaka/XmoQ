@@ -31,7 +31,11 @@ use xmoq_chat_tracks::names::Person;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::name::TrackNamespace;
-use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, Role, Session, Transport};
+use xmoq_moqt::session::{
+    ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequestId, RequestEvent, Role, Session,
+    Transport,
+};
+use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::{self, WtConnection};
 use xmoq_moqt_io::{
     Connection, RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent,
@@ -480,7 +484,7 @@ struct Subscribed {
     /// The name of the sound's track, to ask for it again.
     audio_name: String,
     /// What keeps the catalog's requests open.
-    _catalog: Option<session::CatalogKept>,
+    catalog: Option<session::CatalogKept>,
     /// What the catalog had, as a line for the log; `None` where the tracks
     /// were named.
     found: Option<String>,
@@ -534,7 +538,7 @@ async fn subscriptions(
             .while_waiting(requests.subscribe(&audio, None))
             .await??,
         audio_name: audio,
-        _catalog: kept,
+        catalog: kept,
         found,
     })
 }
@@ -673,6 +677,21 @@ impl Played {
     }
 }
 
+/// Shows or writes what came of the chat on tracks.
+fn tell_chat(ui: &mut Ui, out: ChatOut) {
+    match out {
+        ChatOut::Line(line) => ui.chat(shown(line.number, &line.name, &line.text)),
+        ChatOut::Gap(gap) => {
+            ui.note(&format!(
+                "CHAT_GAP after={} before={}",
+                gap.after, gap.before
+            ));
+            ui.chat(shown_gap(gap));
+        }
+        ChatOut::Note(line) => ui.note(&line),
+    }
+}
+
 /// Writes what became of the sound kept on the session.
 fn tell_audio(ui: &mut Ui, said: Said) {
     let line = match said {
@@ -801,7 +820,7 @@ async fn play(
         mut video,
         audio,
         audio_name,
-        _catalog,
+        mut catalog,
         found,
     } = subscribed;
     // WHY the sound is asked for again on this session, and the picture
@@ -942,6 +961,7 @@ async fn play(
         output_lead_us: lead_us,
     };
     let mut ended = Ended::Again;
+    let mut video_malformed = false;
     let mut failed = None;
     played.why = loop {
         tokio::select! {
@@ -1041,14 +1061,7 @@ async fn play(
             } => {
                 let Some(tracks) = chat.as_mut() else { continue };
                 for out in tracks.on(&mut session, came).await? {
-                    match out {
-                        ChatOut::Line(line) => ui.chat(shown(line.number, &line.name, &line.text)),
-                        ChatOut::Gap(gap) => {
-                            ui.note(&format!("CHAT_GAP after={} before={}", gap.after, gap.before));
-                            ui.chat(shown_gap(gap));
-                        }
-                        ChatOut::Note(line) => ui.note(&line),
-                    }
+                    tell_chat(ui, out);
                 }
                 ui.chat_had = tracks.last_shown();
             }
@@ -1126,13 +1139,17 @@ async fn play(
                     if chat.as_ref().and_then(ChatTracks::fetch_request_id) == Some(header.request_id) =>
                 {
                     session.on_fetch_stream(header.request_id)?;
-                    if let Some(tracks) = chat.as_ref() {
+                    if let Some(tracks) = chat.as_mut() {
                         tracks.read_fetch(stream, header);
                     }
                 }
                 Some(UniEvent::FetchOpened { stream, header }) => {
-                    session.on_fetch_stream(header.request_id)?;
                     drop(stops.take_fetch_body(stream));
+                    // Its stream is let go of: the FETCH is over once
+                    // it was answered too.
+                    if let FetchStreamOpened::Fetch(request) = session.on_fetch_stream(header.request_id)? {
+                        session.on_fetch_stream_closed(request);
+                    }
                 }
                 Some(UniEvent::Failed(error)) => {
                     failed = Some(error.into());
@@ -1151,6 +1168,38 @@ async fn play(
                         break "the relay sent GOAWAY";
                     }
                 }
+                // §2.4.2: "it MUST cancel any corresponding subscription or
+                // fetches for that Track". WHY the session ends for the
+                // video alone, and a new one is made at the same place
+                // (`Ended::Broken`): the picture's clock and its first frame
+                // begin with a session, as after a GOAWAY for the video.
+                Some(UniEvent::TrackMalformed { header, error, .. }) => {
+                    ui.note(&format!("TRACK_MALFORMED track_alias={} error={error}", header.track_alias));
+                    events.stop_streams_of(header.track_alias, &stops);
+                    for cancelled in session.cancel_malformed(header.track_alias) {
+                        // The viewer takes no PUBLISH of the relay.
+                        let (MalformedRequest::Subscribe(request) | MalformedRequest::Fetch(request)) = cancelled else {
+                            continue;
+                        };
+                        if request == video.request {
+                            video_malformed = true;
+                        } else if let Some(said) = audio.malformed(request) {
+                            tell_audio(ui, said);
+                        } else if catalog.as_mut().is_some_and(|catalog| catalog.malformed(request)) {
+                            ui.note("CATALOG_MALFORMED");
+                        } else if let Some(outs) = chat.as_mut().and_then(|tracks| tracks.malformed(request)) {
+                            for out in outs {
+                                tell_chat(ui, out);
+                            }
+                        } else {
+                            ui.note(&format!("TRACK_MALFORMED_UNCLAIMED request_id={}", request.value()));
+                        }
+                    }
+                    if video_malformed {
+                        ended = Ended::Broken;
+                        break "the video track is malformed";
+                    }
+                }
                 Some(other) => bail!("not expected of the relay: {other:?}"),
                 None => {
                     failed = Some(anyhow!("the connection is gone"));
@@ -1159,6 +1208,9 @@ async fn play(
             },
         }
     };
+    if video_malformed {
+        video.cancel_with(stream_reset_code::MALFORMED_TRACK);
+    }
     sound.end();
     played.lasted = sound.began().elapsed();
     stop_picture.store(true, Ordering::Relaxed);

@@ -32,6 +32,14 @@ pub enum Ended {
         /// Whether anything came of the session.
         began: bool,
     },
+    /// A track the session could not do without broke (the terminal
+    /// viewer's video was malformed, §2.4.2): a new session at the same
+    /// place, after the usual wait.
+    ///
+    /// WHY NOT `Moved(None)`: that would hold the place as one left, and the
+    /// relay is not going away. WHY NOT `Failed`: a viewer without a room
+    /// would end, for one Group a publisher got wrong.
+    Broken,
     /// The viewer is to end.
     Quit,
 }
@@ -161,12 +169,13 @@ impl NextSession {
                 self.just_moved = true;
                 After::Connect
             }
-            Ended::Again if self.follows => After::Connect,
-            Ended::Again | Ended::Quit => After::End,
+            Ended::Quit => After::End,
+            Ended::Again if !self.follows => After::End,
             Ended::Failed { began } if !self.follows || (failure_ends && !began) => {
                 After::EndWithError
             }
-            Ended::Failed { .. } => After::Connect,
+            // A broken track connects again with a room or without.
+            Ended::Again | Ended::Broken | Ended::Failed { .. } => After::Connect,
         }
     }
 }
@@ -279,6 +288,8 @@ mod tests {
                 After::Connect,
             ),
             (false, vec![Ended::Moved(None)], After::Connect),
+            (false, vec![Ended::Broken], After::Connect),
+            (true, vec![Ended::Broken], After::Connect),
         ];
         for (follows, ends, expected) in cases {
             let mut rule = NextSession::new(1000, follows, true);

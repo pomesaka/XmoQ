@@ -18,7 +18,9 @@ use xmoq_moqt::data::{
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::name::FullTrackName;
 use xmoq_moqt::params::Parameter;
-use xmoq_moqt::session::{PeerRequest, PeerRequestId, PeerRequestOpened, RequestEvent, Session};
+use xmoq_moqt::session::{
+    PeerRequest, PeerRequestId, PeerRequestOpened, RequestEvent, RequestId, Session,
+};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream, StreamStops,
@@ -64,6 +66,16 @@ pub enum Out {
     Gap(LinesGap),
     /// A line for the program's log, about the chat on tracks itself.
     Note(String),
+}
+
+impl Out {
+    fn of(out: follow::Out<Line>) -> Self {
+        match out {
+            follow::Out::Item(line) => Self::Line(line),
+            follow::Out::Gap(gap) => Self::Gap(gap),
+            follow::Out::Note(note) => Self::Note(note),
+        }
+    }
 }
 
 /// The chat on tracks of one session.
@@ -205,18 +217,22 @@ impl ChatTracks {
             .on(session, came)
             .await?
             .into_iter()
-            .map(|out| match out {
-                follow::Out::Item(line) => Out::Line(line),
-                follow::Out::Gap(gap) => Out::Gap(gap),
-                follow::Out::Note(note) => Out::Note(note),
-            })
+            .map(Out::of)
             .collect())
     }
 
     /// Reads the stream of the FETCH on a task of its own; its lines come
     /// back by [`Self::next`].
-    pub fn read_fetch(&self, stream: u64, header: xmoq_moqt::fetch::FetchHeader) {
+    pub fn read_fetch(&mut self, stream: u64, header: xmoq_moqt::fetch::FetchHeader) {
         self.lines.read_fetch(stream, header);
+    }
+
+    /// The session ended `request` for a malformed track
+    /// (`Session::cancel_malformed`): what the loop is to do, where it is
+    /// of `lines` ([`Follower::malformed`]); `None` where it is not.
+    pub fn malformed(&mut self, request: RequestId) -> Option<Vec<Out>> {
+        let outs = self.lines.malformed(request)?;
+        Some(outs.into_iter().map(Out::of).collect())
     }
 
     /// An Object of `lines`, the Group `number`: the line to show, if it is

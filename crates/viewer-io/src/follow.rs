@@ -15,15 +15,15 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use tokio::sync::mpsc;
-use xmoq_moqt::RequestFault;
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::message::{ControlMessage, FetchRange};
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::{GroupOrder, Parameter};
 use xmoq_moqt::session::{RequestEvent, RequestId, Session};
+use xmoq_moqt::{RequestFault, stream_reset_code};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, FetchChunk, RequestReader, RequestStreamEvent, Trace, send_message,
+    Connection, FetchChunk, RequestReader, RequestStreamEvent, SendStream, Trace, send_message,
 };
 use xmoq_viewer::chat_track::{LinesGap, Shown, history_to_fetch};
 
@@ -91,7 +91,12 @@ pub struct Follower<T> {
     fetch: Option<(RequestId, RequestReader<Recv>)>,
     /// The request streams of each `FETCH`, which stay open while the
     /// session lasts.
-    held: Vec<Send>,
+    held: Vec<(RequestId, Send)>,
+    /// The Joining FETCH of the subscription, while its items may still
+    /// come.
+    joining: Option<RequestId>,
+    /// The stream of the Joining FETCH's items, while it is read.
+    fetch_stream: Option<(RequestId, u64)>,
     fetched: (mpsc::Sender<Came>, mpsc::Receiver<Came>),
 }
 
@@ -136,6 +141,8 @@ impl<T> Follower<T> {
             shown: Shown::fetching_after(had),
             fetch: None,
             held: Vec::new(),
+            joining: None,
+            fetch_stream: None,
             fetched: mpsc::channel(32),
         }
     }
@@ -183,7 +190,14 @@ impl<T> Follower<T> {
     ) -> Result<Vec<Out<T>>, RequestFault> {
         Ok(match came {
             Came::Fetched(number, payload) => self.fetched(number, &payload).into_iter().collect(),
-            Came::FetchEnded => self.fetch_ended(),
+            Came::FetchEnded => {
+                // Over in the session once it was answered too, so that
+                // `cancel_malformed` does not name it later.
+                if let Some((request, _)) = self.fetch_stream.take() {
+                    session.on_fetch_stream_closed(request);
+                }
+                self.fetch_ended()
+            }
             Came::FetchAnswer(answer) => match self.on_fetch_answer(session, answer) {
                 Ok(shown) => shown,
                 Err(error) => {
@@ -202,26 +216,74 @@ impl<T> Follower<T> {
         })
     }
 
+    /// The session ended the request `request` for a malformed track
+    /// (`Session::cancel_malformed`): where it is the subscription or a
+    /// FETCH of this track, its streams are reset and stopped with
+    /// `MALFORMED_TRACK` (§2.4.2), and the subscription is asked for again
+    /// ([`KeptTrack::malformed`]). The Joining FETCH that was still open is
+    /// given up ([`Shown::fetch_given_up`]): the next one asks for its lines
+    /// again. `None` where it is another's.
+    pub fn malformed(&mut self, request: RequestId) -> Option<Vec<Out<T>>> {
+        if let Some(said) = self.kept.malformed(request) {
+            return Some(self.note_of(said).into_iter().collect());
+        }
+        let at = self.held.iter().position(|(fetch, _)| *fetch == request)?;
+        let (_, send) = self.held.swap_remove(at);
+        send.reset(stream_reset_code::MALFORMED_TRACK);
+        // A Joining FETCH of a subscription before, whose stream the
+        // session did not see end.
+        if self.joining != Some(request) {
+            return Some(Vec::new());
+        }
+        if let Some((_, answers)) = self.fetch.take() {
+            answers.stop(stream_reset_code::MALFORMED_TRACK);
+        }
+        if let Some((_, stream)) = self.fetch_stream.take() {
+            self.kept
+                .asking_with()
+                .stops
+                .stop(stream, stream_reset_code::MALFORMED_TRACK);
+        }
+        // What its task read and did not hand over yet goes with it: the
+        // next FETCH brings it again.
+        self.fetched = mpsc::channel(32);
+        self.joining = None;
+        self.shown.fetch_given_up();
+        Some(vec![Out::Note(format!(
+            "{}_FETCH_ENDED MALFORMED_TRACK",
+            self.track.fetch_note
+        ))])
+    }
+
     /// What became of the subscription: on a new one, its Joining FETCH.
     async fn said(&mut self, session: &mut Session, said: Said) -> Vec<Out<T>> {
-        let note = self.track.note;
         match said {
             Said::Subscribed { .. } => self.subscribed(session).await,
-            Said::Ended { how, pause_ms } => vec![Out::Note(format!(
-                "{note}_ENDED {how}; asking again in {pause_ms} ms"
-            ))],
+            said => self.note_of(said).into_iter().collect(),
+        }
+    }
+
+    /// The line for what became of the subscription; none for a new one,
+    /// which [`Self::subscribed`] tells of.
+    fn note_of(&self, said: Said) -> Option<Out<T>> {
+        let note = self.track.note;
+        Some(match said {
+            Said::Subscribed { .. } => return None,
+            Said::Ended { how, pause_ms } => {
+                Out::Note(format!("{note}_ENDED {how}; asking again in {pause_ms} ms"))
+            }
             Said::Refused {
                 error_code,
                 pause_ms,
-            } => vec![Out::Note(format!(
+            } => Out::Note(format!(
                 "{note}_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"
-            ))],
-            Said::Failed { why, pause_ms } => vec![Out::Note(format!(
+            )),
+            Said::Failed { why, pause_ms } => Out::Note(format!(
                 "{note}_FAILED {why}; asking again in {pause_ms} ms"
-            ))],
-            Said::GivenUp(why) => vec![Out::Note(format!("{note}_GIVEN_UP {why}"))],
-            Said::Other(other) => vec![Out::Note(format!("{note}_SAID {other:?}"))],
-        }
+            )),
+            Said::GivenUp(why) => Out::Note(format!("{note}_GIVEN_UP {why}")),
+            Said::Other(other) => Out::Note(format!("{note}_SAID {other:?}")),
+        })
     }
 
     /// A subscription was made: the Joining FETCH of what was missed.
@@ -279,7 +341,8 @@ impl<T> Follower<T> {
         };
         match sent {
             Ok((fetch, request_send, answers)) => {
-                self.held.push(request_send);
+                self.held.push((fetch, request_send));
+                self.joining = Some(fetch);
                 self.fetch = Some((fetch, answers));
             }
             Err(error) => {
@@ -295,10 +358,16 @@ impl<T> Follower<T> {
 
     /// Reads the stream of the FETCH on a task of its own; its items come
     /// back by [`Self::next`].
-    pub fn read_fetch(&self, stream: u64, header: xmoq_moqt::fetch::FetchHeader) {
+    pub fn read_fetch(&mut self, stream: u64, header: xmoq_moqt::fetch::FetchHeader) {
         let Some(mut body) = self.kept.asking_with().stops.take_fetch_body(stream) else {
             return;
         };
+        if let Some(joining) = self
+            .joining
+            .filter(|joining| joining.value() == header.request_id)
+        {
+            self.fetch_stream = Some((joining, stream));
+        }
         let to = self.fetched.0.clone();
         let most = self.track.fetch_most;
         tokio::spawn(async move {
@@ -369,6 +438,7 @@ impl<T> Follower<T> {
     /// The FETCH is over: the items that waited.
     fn fetch_ended(&mut self) -> Vec<Out<T>> {
         self.fetch = None;
+        self.joining = None;
         self.shown
             .fetch_ended()
             .into_iter()

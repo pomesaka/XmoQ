@@ -50,6 +50,10 @@ pub struct Events {
     /// Objects read before the `SUBSCRIBE_OK` that gives their alias
     /// (`xmoq_moqt::early`).
     early: EarlyObjects<UniEvent>,
+    /// The Track Alias of each subgroup stream that is open, by its
+    /// stream; no more than the readers take at once
+    /// (`StreamConfig::max_uni_streams`).
+    open: HashMap<u64, u64>,
 }
 
 impl Events {
@@ -61,7 +65,21 @@ impl Events {
             ahead: VecDeque::new(),
             ended: false,
             early: EarlyObjects::default(),
+            open: HashMap::new(),
         }
+    }
+
+    /// Stops every subgroup stream of `track_alias` that is open, with
+    /// `CANCELLED`: what the session ended for a malformed track
+    /// (`Session::cancel_malformed`) leaves its other streams to the caller
+    /// (§10.11), and the readers stopped the one that broke alone.
+    pub fn stop_streams_of(&mut self, track_alias: u64, stops: &StreamStops) {
+        self.open.retain(|stream, alias| {
+            if *alias == track_alias {
+                stops.stop(*stream, stream_reset_code::CANCELLED);
+            }
+            *alias != track_alias
+        });
     }
 
     /// The next event, as [`Self::recv`], for a caller that looks at the
@@ -112,7 +130,12 @@ impl Events {
                     }
                 }
             }
+            UniEvent::SubgroupOpened { stream, ref header } => {
+                self.open.insert(stream, header.track_alias);
+                Some(event)
+            }
             UniEvent::SubgroupClosed { stream, end, .. } => {
+                self.open.remove(&stream);
                 self.early
                     .stream_closed(stream, !matches!(end, StreamEnd::Fin));
                 Some(event)
@@ -202,8 +225,14 @@ impl Subscription {
     /// `STOP_SENDING` for the other, with `CANCELLED` (§3.3.2). The session's
     /// half is `Session::cancel`.
     pub fn cancel(self) {
-        self.send.reset(stream_reset_code::CANCELLED);
-        self.reader.stop(stream_reset_code::CANCELLED);
+        self.cancel_with(stream_reset_code::CANCELLED);
+    }
+
+    /// [`Self::cancel`] with `code`: `MALFORMED_TRACK` for a track that
+    /// broke the object model (§2.4.2).
+    pub fn cancel_with(self, code: u32) {
+        self.send.reset(code);
+        self.reader.stop(code);
     }
 }
 
@@ -211,8 +240,39 @@ impl Subscription {
 /// read: the subscription to the catalog track and the request stream of
 /// the FETCH.
 pub struct CatalogKept {
-    _subscription: Subscription,
-    _fetch: Send,
+    subscription: Option<Subscription>,
+    fetch: Option<(RequestId, Send)>,
+}
+
+impl CatalogKept {
+    /// Resets the stream of `request` with `MALFORMED_TRACK`, where it is
+    /// the catalog's SUBSCRIBE or FETCH, which the session ended for a
+    /// malformed track (`Session::cancel_malformed`); whether it was. The
+    /// catalog is not asked for again: neither viewer follows a catalog that
+    /// changes during a session.
+    pub fn malformed(&mut self, request: RequestId) -> bool {
+        if self
+            .subscription
+            .as_ref()
+            .is_some_and(|subscription| subscription.request == request)
+        {
+            if let Some(subscription) = self.subscription.take() {
+                subscription.cancel_with(stream_reset_code::MALFORMED_TRACK);
+            }
+            return true;
+        }
+        if self
+            .fetch
+            .as_ref()
+            .is_some_and(|(fetch, _)| *fetch == request)
+        {
+            if let Some((_, send)) = self.fetch.take() {
+                send.reset(stream_reset_code::MALFORMED_TRACK);
+            }
+            return true;
+        }
+        false
+    }
 }
 
 /// What the requests of a session are sent with.
@@ -563,15 +623,19 @@ impl Requests<'_> {
                                     _ => break,
                                 }
                             }
+                            // Over once it was answered too: the session
+                            // holds it no more (`cancel_malformed`).
+                            session.on_fetch_stream_closed(fetch);
                             if let Some(payload) = latest {
                                 return Ok(payload);
                             }
                         }
                         // Of another track, it is kept with its Objects, in
                         // their order.
-                        UniEvent::SubgroupClosed { header, .. }
+                        UniEvent::SubgroupClosed { stream, header, .. }
                             if header.track_alias == subscription.track_alias =>
                         {
+                            events.open.remove(&stream);
                             session.on_data_stream_closed(header.track_alias);
                         }
                         UniEvent::Failed(error) => return Err(error.into()),
@@ -596,8 +660,8 @@ impl Requests<'_> {
         Ok((
             tracks,
             CatalogKept {
-                _subscription: subscription,
-                _fetch: send,
+                subscription: Some(subscription),
+                fetch: Some((fetch, send)),
             },
         ))
     }
