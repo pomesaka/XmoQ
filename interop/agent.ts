@@ -8,7 +8,7 @@
 // What has to be seen, written before the first run (2026-10-25):
 //
 //   - The page joined before the reader came: the reader's SUBSCRIBE_NAMESPACE
-//     for `xmoq/chat/r` is told of `xmoq/chat/r/p`, and it writes
+//     for `xmoq/chat/broadcast/r` is told of `xmoq/chat/broadcast/r/p`, and it writes
 //     {"type":"joined","name":"p"}; nothing joins for its own name `claude`.
 //   - The page says `hello from p`: the reader writes a `chat` line from p
 //     with that text and the number the gatherer gave it (0).
@@ -117,7 +117,7 @@ async function main(): Promise<void> {
 			page.evaluate(() => window.xmoqOwn.joinChat("r", "p")),
 			"the page to join",
 		);
-		await gatherer.waitForLine(/^SUBSCRIBED room="r" name="p"$/);
+		await gatherer.waitForLine(/^SUBSCRIBED room="broadcast\/r" name="p"$/);
 
 		const agent = spawnAgent(context, "agent:claude", [
 			"--namespace",
@@ -134,7 +134,9 @@ async function main(): Promise<void> {
 			"60",
 		]);
 		await waitForEvent(agent, '"type":"joined"');
-		await gatherer.waitForLine(/^SUBSCRIBED room="r" name="claude"$/);
+		await gatherer.waitForLine(
+			/^SUBSCRIBED room="broadcast\/r" name="claude"$/,
+		);
 
 		const said: unknown = JSON.parse(
 			await page.evaluate(() => window.xmoqOwn.chatSay("hello from p")),

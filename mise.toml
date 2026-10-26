@@ -62,7 +62,7 @@ description = "The gatherer of the chat: mise run chat -- --url https://host:por
 run = "cargo run --locked -p xmoq-chat --"
 
 [tasks.transcriber]
-description = "The transcriber: mise run transcriber -- --url https://host:port/ --cert-sha256 <hex> --namespace xmoq/demo"
+description = "The transcriber: mise run transcriber -- --url https://host:port/ --cert-sha256 <hex> --namespace xmoq/broadcast/demo"
 run = "cargo run --release --locked -p xmoq-transcriber --"
 
 [tasks.agent]

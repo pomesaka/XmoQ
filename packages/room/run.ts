@@ -13,16 +13,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Miniflare } from "miniflare";
-import { broadcastNamespaces, seatTimesOf } from "./src/core/rules.ts";
+import { seatTimesOf } from "./src/core/rules.ts";
 import { keyOfSetting } from "./src/token.ts";
 
 // Before anything is started: a key that is set and is none stops the
-// rooms, as it stops the relay (`keyOfSetting`), and so do namespaces of
-// broadcasts that are none (`broadcastNamespaces`), and times of a seat that
-// are none (`seatTimesOf`).
+// rooms, as it stops the relay (`keyOfSetting`), and so do times of a seat
+// that are none (`seatTimesOf`).
 try {
 	keyOfSetting(process.env.AUTH_KEY_HEX);
-	broadcastNamespaces(process.env.BROADCAST_NAMESPACES);
 	seatTimesOf(process.env.MEETING_SEAT_MS, process.env.MEETING_RENEW_MS);
 } catch (error) {
 	console.error(String(error));
@@ -62,18 +60,15 @@ const miniflare = new Miniflare({
 	modulesRoot: out,
 	compatibilityDate: "2026-07-01",
 	durableObjects: {
-		ROOMS: { className: "Room", useSQLite: true },
 		MEETINGS: { className: "MeetingRoom", useSQLite: true },
 	},
 	// The key the rooms share with the relay, for the tokens; none without.
-	// REACTION_BATCH_MS: a trial, the reactions of that long as one message.
-	// RELAY_URL and RELAY_CERT_SHA256_HEX: the relay the hello names, with a
-	// broadcast and without; none without them.
-	// BROADCAST_NAMESPACES: the namespaces of broadcasts tokens are given in,
-	// separated by ","; none where it is not set.
+	// RELAY_URL and RELAY_CERT_SHA256_HEX: the relay the rooms name; none
+	// without them.
 	// TRANSCRIPT_PREFIX and MEETING_TRANSCRIPT_PREFIX: the prefixes of the
-	// transcripts of a room's broadcast and of its meeting, with {room} put in
-	// its name (xmoq/demo, xmoq/meet/{room}); none without each.
+	// transcripts of the room of a broadcast and of a meeting, with {room}
+	// put in its name (xmoq/broadcast/{room}, xmoq/meet/{room}); none
+	// without each.
 	// MEETING_SEAT_MS and MEETING_RENEW_MS: how long a seat of a meeting
 	// holds, and how often it is renewed; 60,000 and 20,000 without them.
 	bindings: {
@@ -81,10 +76,6 @@ const miniflare = new Miniflare({
 		...(process.env.AUTH_KEY_HEX === undefined
 			? {}
 			: { AUTH_KEY_HEX: process.env.AUTH_KEY_HEX }),
-		...(process.env.BROADCAST_NAMESPACES === undefined
-			? {}
-			: { BROADCAST_NAMESPACES: process.env.BROADCAST_NAMESPACES }),
-		REACTION_BATCH_MS: process.env.REACTION_BATCH_MS ?? "0",
 		RELAY_URL: process.env.RELAY_URL ?? "",
 		RELAY_CERT_SHA256_HEX: process.env.RELAY_CERT_SHA256_HEX ?? "",
 		TRANSCRIPT_PREFIX: process.env.TRANSCRIPT_PREFIX ?? "",

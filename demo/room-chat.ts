@@ -1,8 +1,8 @@
-// The chat under the picture of both pages, over MoQ tracks alone
-// (decided on 2026-10-24; the room's WebSocket carries no chat).
+// The chat under the picture of the pages, over MoQ tracks alone
+// (decided on 2026-10-24).
 //
 // The page is a participant (`joinChat` of `@xmoq/chat`): it announces
-// `xmoq/chat/<room>/<name>`, says its lines on `said`, and reads the
+// `xmoq/chat/<kind>/<room>/<name>`, says its lines on `said`, and reads the
 // room's `lines` from the gatherer (`xmoq-chat`, which `serve.ts` starts),
 // with the newest 16 by a Joining FETCH when it comes, and the lines it
 // missed (200 at the most, `?chatCatchUpLines=N`) when it subscribes or
@@ -12,6 +12,7 @@ import {
 	type ChatConnection,
 	type ChatLimits,
 	type ChatParticipant,
+	type ChatRoom,
 	catchUpLines,
 	chatLimits,
 	type KeptBack,
@@ -93,7 +94,7 @@ const shownTime = (at: number): string =>
  * watching page changes its broadcast or connects again for it.
  */
 export function startChat(
-	room: string,
+	room: ChatRoom,
 	name: string,
 	connectForChat: (goAway?: GoAwayNotice) => Promise<ChatConnection>,
 	onLine?: (line: ReceivedLine) => void,

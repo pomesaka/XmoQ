@@ -21,7 +21,6 @@ import {
 	ENCODER_CODEC,
 	every,
 	HEIGHT,
-	HERE,
 	joinRoom,
 	MARK,
 	marked,
@@ -299,12 +298,16 @@ const LADDER = new URLSearchParams(location.search).has("ladder");
 const LOW = { name: "video-low", width: 320, height: 180, bitrate: 500_000 };
 
 async function main(): Promise<void> {
+	// The room names where this page publishes: its one broadcast's
+	// namespace, whether anybody watches yet or not.
+	const room = await joinRoom("publisher");
+	const fields = room.broadcast.namespace;
 	// MSF §6.1 has the time in milliseconds as one way to begin. One number
 	// for both versions: their Groups are counted alike.
 	const firstGroup = BigInt(Date.now());
 	const low = LADDER
 		? await createVideoTrackEncoder({
-				trackNamespace: namespace(),
+				trackNamespace: namespace(fields),
 				trackName: new TextEncoder().encode(LOW.name),
 				firstGroup,
 				codec: ENCODER_CODEC,
@@ -320,7 +323,7 @@ async function main(): Promise<void> {
 	/** What `onKeyChunksNotSent` said: key frames that were over what is sent. */
 	const keyChunksNotSent: unknown[] = [];
 	const encoder = await createVideoTrackEncoder({
-		trackNamespace: namespace(),
+		trackNamespace: namespace(fields),
 		trackName: trackName(),
 		firstGroup,
 		codec: `avc1.42E0${SIZE.level}`,
@@ -348,7 +351,7 @@ async function main(): Promise<void> {
 	let audio: AudioTrackEncoder | undefined;
 	if (audioSource !== "none") {
 		audio = await createAudioTrackEncoder({
-			trackNamespace: namespace(),
+			trackNamespace: namespace(fields),
 			trackName: audioTrackName(),
 			firstGroup: BigInt(Date.now()),
 			codec: "opus",
@@ -388,12 +391,11 @@ async function main(): Promise<void> {
 	// One session after the other (`keepPublishing` of @xmoq/media): the
 	// encoders go on, and when the session ends the page connects again
 	// after `AGAIN` and announces anew.
-	const room = joinRoom("publisher");
 	// The catalog of MSF says which tracks the broadcast has; a viewer finds
 	// them there and is told no name. It is made before a media Object is
 	// sent (MSF §5), and stays over the sessions, as the encoders do.
 	const catalog = createCatalogPublisher({
-		namespace: namespace(),
+		namespace: namespace(fields),
 		catalog: {
 			version: "draft-01",
 			tracks: [
@@ -449,8 +451,8 @@ async function main(): Promise<void> {
 	void keepPublishing({
 		// Where the rooms give tokens, the connection carries one.
 		connect: async () =>
-			connectToRelay(through(HERE), await room?.token("pub", HERE.namespace)),
-		trackNamespace: namespace(),
+			connectToRelay(through(room.broadcast), await room.token("pub", fields)),
+		trackNamespace: namespace(fields),
 		tracks: [
 			catalog,
 			encoder.publisher,
@@ -463,10 +465,6 @@ async function main(): Promise<void> {
 					link = "connecting";
 					return;
 				case "publishing":
-					// The room is told where this broadcast is, for viewers to
-					// find it; that holds as long as this page is connected to
-					// the room.
-					room?.publish(HERE);
 					link = `publishing (session ${state.session})`;
 					return;
 				case "session-ended":

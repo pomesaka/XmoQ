@@ -525,7 +525,8 @@ export type OwnPageExtras = {
 	/** What the two have seen so far. */
 	keptReport(): Promise<PageKeptReport>;
 	/**
-	 * Joins the room as a participant of the chat with `joinChat` of
+	 * Joins the chat of the room of the broadcast `room`
+	 * (`xmoq/chat/broadcast/<room>`) as a participant, with `joinChat` of
 	 * `@xmoq/chat`, on the connection of `connect`, whose `serve` handlers
 	 * it then names. Resolves once the namespace is announced. Again after
 	 * `chatLeave`, with a participant of its own, which hands on to the same
@@ -543,8 +544,8 @@ export type OwnPageExtras = {
 	/** Stops the participant (the `signal` of `joinChat`); the session stays open. */
 	chatLeave(): Promise<void>;
 	/**
-	 * Keeps a participant of the chat in the room with `keepInTheRoom` of
-	 * `@xmoq/chat`, on connections of its own to `relayUrl`, or to the URI of
+	 * Keeps a participant of the chat in the room of the broadcast `room`
+	 * with `keepInTheRoom` of `@xmoq/chat`, on connections of its own to `relayUrl`, or to the URI of
 	 * the GOAWAY that ended the session before, with the same certificate's
 	 * hash. Its states are in `keptReport().chat`; `chatSay` and `chatReport`
 	 * go to the participant of the session it is on.

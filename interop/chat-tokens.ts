@@ -1,7 +1,7 @@
 // Pages join the chat through the own relay when it asks for tokens
 // (`--auth-key-hex`), with the two tokens the demo's pages get from the room:
-// `sub` for `xmoq/chat/r` on the connection, and `pub` for
-// `xmoq/chat/r/<name>` on the PUBLISH_NAMESPACE alone (`publishNamespaceToken`
+// `sub` for `xmoq/chat/broadcast/r` on the connection, and `pub` for
+// `xmoq/chat/broadcast/r/<name>` on the PUBLISH_NAMESPACE alone (`publishNamespaceToken`
 // of `joinChat`). The gatherer (`xmoq-chat`) runs with the same key and makes
 // tokens of its own (`sub` and `pub` in `xmoq/chat/*`), as in the demo with
 // `--auth`. The pages' tokens are made here with the relay's key, in the form
@@ -15,7 +15,7 @@
 //
 //   - The gatherer with `--auth-key-hex` is told of `xmoq/chat`
 //     (`WATCHING`): the relay took its SETUP and its SUBSCRIBE_NAMESPACE.
-//   - Pages a and e connect with `sub` for `xmoq/chat/r` and join as `a` and
+//   - Pages a and e connect with `sub` for `xmoq/chat/broadcast/r` and join as `a` and
 //     `e` with `pub` for their own name: their PUBLISH_NAMESPACE is
 //     accepted, the gatherer subscribes to each `said` (`SUBSCRIBED`), and
 //     each follows the room's `lines`, which the gatherer publishes.
@@ -23,11 +23,11 @@
 //     pages have both, live.
 //   - Page f comes then with the same two tokens: its Joining FETCH, which
 //     the relay passes to the gatherer, brings 0 and 1 as history.
-//   - Page b, with `sub` and `pub` for `xmoq/chat/r/a`, is refused its
+//   - Page b, with `sub` and `pub` for `xmoq/chat/broadcast/r/a`, is refused its
 //     PUBLISH_NAMESPACE as `b` with REQUEST_ERROR 0x1 (UNAUTHORIZED).
 //   - Page c, with `sub` and no token of its own, is refused the same way:
 //     the connection's token allows no announcing.
-//   - Page d connects with `pub` for `xmoq/chat/r/d` and gives the same
+//   - Page d connects with `pub` for `xmoq/chat/broadcast/r/d` and gives the same
 //     token to `joinChat` (the library sends it once): its PUBLISH_NAMESPACE
 //     is accepted, and its SUBSCRIBE for `lines` refused with 0x1.
 //   - Nothing of b, c or d reaches the gatherer as a line.
@@ -142,15 +142,15 @@ async function participant(
 	const page = await connected(
 		context,
 		`page:${name}`,
-		token("sub", "xmoq/chat/r"),
+		token("sub", "xmoq/chat/broadcast/r"),
 	);
 	expect(
-		`page ${name} joining with pub for xmoq/chat/r/${name}`,
-		await join(page, name, token("pub", `xmoq/chat/r/${name}`)),
+		`page ${name} joining with pub for xmoq/chat/broadcast/r/${name}`,
+		await join(page, name, token("pub", `xmoq/chat/broadcast/r/${name}`)),
 		"joined",
 	);
 	await gatherer.waitForLine(
-		new RegExp(`^SUBSCRIBED room="r" name="${name}"$`),
+		new RegExp(`^SUBSCRIBED room="broadcast/r" name="${name}"$`),
 	);
 	await pollFor(async () => {
 		const { heard, following } = await report(page);
@@ -159,7 +159,7 @@ async function participant(
 	return page;
 }
 
-const taken = /^LINE room="r" number=(\d+) name="([^"]*)" /;
+const taken = /^LINE room="broadcast\/r" number=(\d+) name="([^"]*)" /;
 
 /** Has the page say a line, and waits for the gatherer to number it `number`. */
 async function sayOne(
@@ -264,22 +264,30 @@ async function main(): Promise<void> {
 		// Waited for: the page has its lines as soon as the gatherer's answer
 		// is written, which can be before the driver reads the gatherer's line.
 		const answered = await gatherer.waitForLine(
-			/^FETCH_ANSWERED room="r" (.*)$/,
+			/^FETCH_ANSWERED room="broadcast\/r" (.*)$/,
 		);
 
-		const b = await connected(pages, "page:b", token("sub", "xmoq/chat/r"));
+		const b = await connected(
+			pages,
+			"page:b",
+			token("sub", "xmoq/chat/broadcast/r"),
+		);
 		expect(
-			"page b joining as b with pub for xmoq/chat/r/a",
-			refusal(await join(b, "b", token("pub", "xmoq/chat/r/a"))),
+			"page b joining as b with pub for xmoq/chat/broadcast/r/a",
+			refusal(await join(b, "b", token("pub", "xmoq/chat/broadcast/r/a"))),
 			"refused 0x1",
 		);
-		const c = await connected(pages, "page:c", token("sub", "xmoq/chat/r"));
+		const c = await connected(
+			pages,
+			"page:c",
+			token("sub", "xmoq/chat/broadcast/r"),
+		);
 		expect(
 			"page c joining with no token of its own",
 			refusal(await join(c, "c", undefined)),
 			"refused 0x1",
 		);
-		const ofD = token("pub", "xmoq/chat/r/d");
+		const ofD = token("pub", "xmoq/chat/broadcast/r/d");
 		const d = await connected(pages, "page:d", ofD);
 		expect(
 			"page d joining with pub on the connection and the same on the request",
@@ -303,7 +311,7 @@ async function main(): Promise<void> {
 		const where = options["through-edge"]
 			? "with the pages at an own relay below the gatherer's, both"
 			: "through the own relay";
-		summary = `${where} with --auth-key-hex and the gatherer with the same key, pages a and e with sub for xmoq/chat/r on their connection and pub for their name on their PUBLISH_NAMESPACE joined, and each had both lines live (${live}); page f, which came later, had them by its Joining FETCH, which the gatherer answered (${answered[1]}); b with pub for another name and c with none were refused their PUBLISH_NAMESPACE with 0x1; d with pub alone announced and was refused its SUBSCRIBE with 0x1`;
+		summary = `${where} with --auth-key-hex and the gatherer with the same key, pages a and e with sub for xmoq/chat/broadcast/r on their connection and pub for their name on their PUBLISH_NAMESPACE joined, and each had both lines live (${live}); page f, which came later, had them by its Joining FETCH, which the gatherer answered (${answered[1]}); b with pub for another name and c with none were refused their PUBLISH_NAMESPACE with 0x1; d with pub alone announced and was refused its SUBSCRIBE with 0x1`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

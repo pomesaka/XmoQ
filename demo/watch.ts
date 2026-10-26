@@ -34,14 +34,11 @@ import { TRANSCRIPT_PREFIX } from "@xmoq/transcript";
 import { startCaptions } from "./captions.ts";
 import {
 	AGAIN,
-	type Broadcast,
 	connectToRelay,
 	every,
 	firstBytes,
-	HERE,
 	joinRoom,
 	MARK,
-	NAMESPACE,
 	namespace,
 	perSecond,
 	SAMPLE_RATE,
@@ -119,15 +116,15 @@ const VERSION_TIMEOUTS = (query.get("versionTimeouts") ?? "")
 	.filter((each) => each !== "")
 	.map(Number);
 /**
- * `?wait=1` (**a trial**): the page waits for the broadcast at the relay
- * and does not go by the room's word that one has begun. Its SUBSCRIBE for
- * the catalog carries a RENDEZVOUS_TIMEOUT of `WAIT_MS`, so the relay holds
- * it until a publisher is there (transport §10.2.6); when the relay says
- * that none came (`TIMEOUT`), and when what was played has ended, the page
- * asks again on the session it has. Where the room names no broadcast the
- * place is the demo's own (`HERE`).
+ * The page waits for the broadcast at the relay, as the room says nothing
+ * of who publishes (decided on 2026-10-26). Its SUBSCRIBE for the catalog
+ * carries a RENDEZVOUS_TIMEOUT of `WAIT_MS`, so the relay holds it until a
+ * publisher is there (transport §10.2.6); when the relay says that none
+ * came (`TIMEOUT`), and when what was played has ended, the page asks
+ * again on the session it has. `?wait=no` closes the session then, and
+ * connects again after `AGAIN`, for looking into the difference.
  */
-const WAIT = query.has("wait");
+const WAIT = query.get("wait") !== "no";
 /** **Provisional**: what the page asks the relay to hold its SUBSCRIBE for, which is also the most the own relay holds one. */
 const WAIT_MS = 30_000;
 const VIDEO_TIMEOUT_THEN = query.get("videoTimeoutThen");
@@ -238,22 +235,21 @@ async function main(): Promise<void> {
 	if (probe === null) throw new Error("no canvas to read a pixel with");
 	// Where rooms run, the room says where the broadcast is; else it is the
 	// relay this page was served with.
-	const room = joinRoom(`viewer-${Math.floor(Math.random() * 1000)}`);
-	if (room !== undefined) await room.broadcast;
-	// The transcriber listens under the prefix the room names (its hello),
-	// and the namespace the publishing page announces where no room runs
-	// (`serve.ts`); its transcript is of that prefix. After a GOAWAY the
-	// captions go to its URI with the same certificate's hash, as the
-	// broadcast and the chat do.
-	const listened = room?.transcript() ?? NAMESPACE;
-	startCaptions(listened, async (goAway) =>
-		connectToRelay(
-			goAway === undefined || goAway.newSessionUri === ""
-				? through(HERE)
-				: { ...HERE, relayUrl: goAway.newSessionUri },
-			await room?.token("sub", [...TRANSCRIPT_PREFIX, ...listened]),
-		),
-	);
+	const room = await joinRoom(`viewer-${Math.floor(Math.random() * 1000)}`);
+	// The transcriber listens under the prefix the room names; its
+	// transcript is of that prefix. After a GOAWAY the captions go to its
+	// URI with the same certificate's hash, as the broadcast and the chat do.
+	const listened = room.transcript;
+	if (listened !== null) {
+		startCaptions(listened, async (goAway) =>
+			connectToRelay(
+				goAway === undefined || goAway.newSessionUri === ""
+					? through(room.broadcast)
+					: { ...room.broadcast, relayUrl: goAway.newSessionUri },
+				await room.token("sub", [...TRANSCRIPT_PREFIX, ...listened]),
+			),
+		);
+	}
 	/** What the first line under the picture says of the session. */
 	let link = "connecting";
 	let sessions = 0;
@@ -296,7 +292,7 @@ async function main(): Promise<void> {
 	/** `?videoTimeoutThen`: what was asked for, when (`Date.now()`), and what the relay answered. */
 	let timeoutNow: { ms: number; at: number; answer: string } | undefined;
 	/** The namespace of the broadcast the page last connected to. */
-	let playingNamespace: Uint8Array[] = namespace();
+	let playingNamespace: Uint8Array[] = namespace(room.broadcast.namespace);
 	let audio: AudioPlayback | undefined;
 	/** How many times the sound was subscribed to, on all sessions, and how it stands (`keepTrackOnSession`). */
 	const soundTrack = { subscriptions: 0, state: "none" };
@@ -677,29 +673,14 @@ async function main(): Promise<void> {
 	});
 	// One session after the other (`keepPlaying` of @xmoq/media): when the
 	// session ends, or the tracks do (their publisher went), the page says
-	// so and connects again after `AGAIN`, asking the room anew where
-	// the broadcast is.
+	// so and connects again after `AGAIN`, at the place the room named.
 	await keepPlaying({
 		async connect(goAway) {
-			// Where the room names no broadcast, the page waits for the
-			// room's word that one has begun, which comes as it happens.
-			// WHY NOT ask again after the pause: the picture would begin up to
-			// the pause late.
-			let found: Broadcast;
-			if (room === undefined) found = HERE;
-			else if (WAIT) found = room.current() ?? HERE;
-			else {
-				if (room.current() === null) {
-					link = "nobody publishes in this room; waiting for the room's word";
-				}
-				found = await room.named();
-				link = "connecting";
-			}
 			// After a GOAWAY that named a place, the page goes there (transport
 			// §10.4: "The client MUST use this URI for the new session if
 			// provided"), as a relay that is full asks; the room still says
 			// what is played. The relay there has the same certificate.
-			const named = through(found);
+			const named = through(room.broadcast);
 			const broadcast =
 				goAway === undefined || goAway.newSessionUri === ""
 					? named
@@ -710,7 +691,7 @@ async function main(): Promise<void> {
 			connections += 1;
 			return connectToRelay(
 				broadcast,
-				await room?.token("sub", broadcast.namespace),
+				await room.token("sub", broadcast.namespace),
 			);
 		},
 		async play(connection) {

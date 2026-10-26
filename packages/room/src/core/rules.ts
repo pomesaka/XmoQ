@@ -25,36 +25,12 @@ export const participantId = (id: unknown): id is string =>
 const fieldOfANamespace = (name: string): boolean =>
 	!name.includes("/") && !name.includes("*");
 
-/**
- * The namespaces of broadcasts of the setting `BROADCAST_NAMESPACES`: each
- * its fields joined with `/`, the namespaces separated by `,`;
- * none where it is not set or is empty. WHY none and not the demo's:
- * the room is not the demo's, and one run without the setting would give
- * every room's asker `pub` in a namespace nobody chose for it. Throws a `RangeError` for a field that is empty or has a `*`, as
- * for a key that is set and is none (`keyOfSetting`).
- */
-export function broadcastNamespaces(setting: string | undefined): string[][] {
-	if (setting === undefined || setting === "") return [];
-	const text = setting;
-	const namespaces = text.split(",").map((namespace) => namespace.split("/"));
-	if (
-		namespaces.some((fields) =>
-			fields.some((field) => field === "" || field.includes("*")),
-		)
-	) {
-		throw new RangeError(
-			`BROADCAST_NAMESPACES is namespaces of fields with no * between /, separated by ",": ${text}`,
-		);
-	}
-	return namespaces;
-}
-
 /** What a room gives tokens in, besides the seats of its meeting. */
 export interface RoomNamespaces {
 	/** The room's chat: of a broadcast or of a meeting, by the room's name. */
 	chat: ChatRoom;
-	/** The namespaces of the broadcasts (`broadcastNamespaces`). */
-	broadcasts: readonly (readonly string[])[];
+	/** The namespace of the room's one broadcast; none for a meeting's room. */
+	broadcast?: readonly string[];
 	/** The prefixes of the room's transcripts (`transcriptPrefix`), those that are there. */
 	transcripts: readonly (readonly string[])[];
 }
@@ -69,16 +45,15 @@ const sameFields = (a: readonly string[], b: readonly string[]): boolean =>
  *
  * | Role | Namespace |
  * |---|---|
- * | `sub` | `xmoq/chat/<kind>/<room>`; `xmoq/transcript/<prefix>` of a transcript of the room; a broadcast's |
- * | `pub` | `xmoq/chat/<kind>/<room>/<one field>`; a broadcast's |
+ * | `sub` | `xmoq/chat/<kind>/<room>`; `xmoq/transcript/<prefix>` of a transcript of the room; the room's broadcast |
+ * | `pub` | `xmoq/chat/<kind>/<room>/<one field>`; the room's broadcast |
  *
  * WHY only these: a token for `sub` in `xmoq` allows a SUBSCRIBE_NAMESPACE
  * for that prefix (transport §10.18; the relay checks its prefix as a
  * namespace, `allowed` of `crates/relay-core/src/lib.rs`), which tells of every
- * room's meetings and the ids of their participants. WHY a broadcast's from
- * the setting and not the one a publisher registered: anybody registers
- * any namespace, `xmoq` among them. Never one for a field with a `*` or a
- * `/`, or for a meeting's namespace, which join-meeting's tokens are for.
+ * room's meetings and the ids of their participants. Never one for a
+ * field with a `*` or a `/`, or for a meeting's namespace, which the
+ * tokens of its seats are for.
  */
 export function tokenForNamespace(
 	role: "pub" | "sub",
@@ -91,7 +66,7 @@ export function tokenForNamespace(
 	if (!fieldOfANamespace(of.chat.name) || of.chat.name === "") return undefined;
 	const chat = roomFields(of.chat);
 	const ofTheRoom =
-		of.broadcasts.some((broadcast) => sameFields(namespace, broadcast)) ||
+		(of.broadcast !== undefined && sameFields(namespace, of.broadcast)) ||
 		(role === "sub"
 			? sameFields(namespace, chat) ||
 				of.transcripts.some((prefix) =>
