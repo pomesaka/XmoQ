@@ -576,27 +576,41 @@ pub struct Held {
     pub relay: xmoq_relay_core::Counts,
 }
 
-/// What the hub asks the task of a request stream the relay opened to do.
-/// `Finish` and `Cancel` end the task.
-enum OwnRequestCommand {
-    /// A message after the request: a `REQUEST_UPDATE` of a SUBSCRIBE.
-    Send(ControlMessage),
+/// How the hub ends the task of a request stream the relay opened.
+#[derive(Clone, Copy)]
+enum OwnRequestEnding {
+    /// With a FIN, after the messages that wait.
     Finish,
+    /// With a reset of the code, ahead of what waits.
     Cancel(u32),
+}
+
+/// The task of a request stream the relay opened, as the hub holds it.
+///
+/// WHY the ending apart from the messages: in one queue, a `Cancel` would
+/// wait behind updates the peer takes no credit for, and a `Finish` would
+/// get in only while the session keeps the updates that wait below the
+/// queue's room (`MAX_UNANSWERED_UPDATES`, which it does today); one that
+/// did not get in would turn into the reset of a session that is going.
+struct OwnRequestTask {
+    /// Messages after the request: the `REQUEST_UPDATE`s of a SUBSCRIBE.
+    updates: mpsc::Sender<ControlMessage>,
+    ending: oneshot::Sender<OwnRequestEnding>,
 }
 
 /// What the hub asks the writer of one request stream to do.
 enum RequestCommand {
     Send(ControlMessage),
     Finish,
-    Reset(u32),
 }
 
 /// The writer of the relay's half of a request stream the peer opened.
 struct RequestWriter {
     commands: mpsc::Sender<RequestCommand>,
-    /// Resets the stream with the code, ahead of what waits in `commands`:
-    /// for a stream whose queue is full.
+    /// Resets the stream with the code, ahead of what waits in `commands`
+    /// and of a message being written. WHY not in `commands`: a stream the
+    /// peer gives no credit for would hold the reset back until the session
+    /// ends, while the core has the request over (§3.3.2).
     reset: oneshot::Sender<u32>,
 }
 
@@ -612,7 +626,7 @@ struct SessionHandle<C: Connection> {
     /// The writers of the request streams the peer has open.
     requests: HashMap<StreamKey, RequestWriter>,
     /// The tasks of the request streams the relay has open on the session.
-    own_requests: HashMap<OwnRequestKey, mpsc::Sender<OwnRequestCommand>>,
+    own_requests: HashMap<OwnRequestKey, OwnRequestTask>,
     stops: StreamStops,
     /// What waits to be written to this session's subgroup streams.
     budget: Arc<SendBudget>,
@@ -2155,7 +2169,7 @@ impl<C: Connection> Hub<C> {
                 session,
                 stream,
                 code,
-            } => self.reset_request(session, stream, code, pending),
+            } => self.reset_request(session, stream, code),
             opening @ Action::OpenDataStream { .. } => self.open_data_stream(&opening, pending),
             Action::SetDeliveryTimeout {
                 out_stream,
@@ -2253,13 +2267,13 @@ impl<C: Connection> Hub<C> {
                 message,
             } => self.send_own_request(session, request, message),
             Action::FinishOwnRequest { session, request } => {
-                self.own_request(session, request, OwnRequestCommand::Finish);
+                self.own_request(session, request, OwnRequestEnding::Finish);
             }
             Action::CancelOwnRequest {
                 session,
                 request,
                 code,
-            } => self.own_request(session, request, OwnRequestCommand::Cancel(code)),
+            } => self.own_request(session, request, OwnRequestEnding::Cancel(code)),
             Action::PipeFetch {
                 from,
                 from_stream,
@@ -2608,16 +2622,12 @@ impl<C: Connection> Hub<C> {
 
     /// Resets a request stream of the peer in both directions, and forgets
     /// it.
-    fn reset_request(
-        &mut self,
-        session: SessionKey,
-        stream: StreamKey,
-        code: u32,
-        pending: &mut VecDeque<Event>,
-    ) {
-        self.request(session, stream, RequestCommand::Reset(code), pending);
+    fn reset_request(&mut self, session: SessionKey, stream: StreamKey, code: u32) {
         if let Some(handle) = self.sessions.get_mut(&session) {
-            handle.requests.remove(&stream);
+            if let Some(writer) = handle.requests.remove(&stream) {
+                // An error means the writer is gone, with the stream.
+                let _ = writer.reset.send(code);
+            }
             handle.stops.stop(stream.0, code);
         }
     }
@@ -2786,20 +2796,22 @@ impl<C: Connection> Hub<C> {
         let Some(handle) = self.sessions.get_mut(&session) else {
             return;
         };
-        // Room for the updates the session lets wait for their answer, and
-        // the one command that ends the task.
-        let room = usize::try_from(MAX_UNANSWERED_UPDATES).map_or(usize::MAX, |n| n + 1);
-        let (commands, command_inbox) = mpsc::channel(room);
+        // Room for the updates the session lets wait for their answer.
+        let room = usize::try_from(MAX_UNANSWERED_UPDATES).unwrap_or(usize::MAX);
+        let (updates, updates_inbox) = mpsc::channel(room);
+        let (ending, ending_inbox) = oneshot::channel();
         let task = tokio::spawn(run_own_request(
             session,
             request,
             Arc::clone(&handle.connection),
             message,
-            command_inbox,
+            (updates_inbox, ending_inbox),
             self.config.streams.trace.clone(),
             self.events.clone(),
         ));
-        handle.own_requests.insert(request, commands);
+        handle
+            .own_requests
+            .insert(request, OwnRequestTask { updates, ending });
         handle.tasks.retain(|task| !task.is_finished());
         handle.tasks.push(task);
     }
@@ -2811,7 +2823,7 @@ impl<C: Connection> Hub<C> {
         request: OwnRequestKey,
         message: ControlMessage,
     ) {
-        let Some(commands) = self
+        let Some(task) = self
             .sessions
             .get(&session)
             .and_then(|handle| handle.own_requests.get(&request))
@@ -2821,7 +2833,7 @@ impl<C: Connection> Hub<C> {
         // Full: the task is stuck writing what came before, and the session
         // lets no more updates wait than there is room for. Closed: the task
         // ended by itself, with the stream.
-        if commands.try_send(OwnRequestCommand::Send(message)).is_err() {
+        if task.updates.try_send(message).is_err() {
             self.log(|| {
                 format!(
                     "OWN_REQUEST_NOT_SENT session={} own={}",
@@ -2837,15 +2849,15 @@ impl<C: Connection> Hub<C> {
         &mut self,
         session: SessionKey,
         request: OwnRequestKey,
-        command: OwnRequestCommand,
+        ending: OwnRequestEnding,
     ) {
         self.timers.stop_upstream(session, request);
         let Some(handle) = self.sessions.get_mut(&session) else {
             return;
         };
-        if let Some(commands) = handle.own_requests.remove(&request) {
-            // Closed: the task ended by itself, with the stream.
-            let _ = commands.try_send(command);
+        if let Some(task) = handle.own_requests.remove(&request) {
+            // An error: the task ended by itself, with the stream.
+            let _ = task.ending.send(ending);
         }
     }
 
@@ -3220,41 +3232,58 @@ async fn write_control<C: Connection>(
             message = messages.recv() => message,
             stopped = control.stopped() => {
                 if let WriteError::Stopped(_) = stopped {
-                    // WHY wait and see: an endpoint that goes away lets go of
-                    // its streams, which QUIC stacks turn into STOP_SENDING,
-                    // and the close of its connection can arrive a moment
-                    // later. That is a peer leaving, and the session then
-                    // ends by itself, with what had arrived still read.
-                    let leaving = tokio::time::timeout(LEAVING_GRACE, connection.closed());
-                    if leaving.await.is_ok() {
-                        return;
-                    }
-                    // §3.3: closing a control stream is a PROTOCOL_VIOLATION,
-                    // and a STOP_SENDING closes this one.
-                    let broken = Envelope::Broken {
-                        session,
-                        code: TerminationCode::ProtocolViolation,
-                        reason: "the peer stopped the relay's control stream",
-                    };
-                    let _ = events.send(broken).await;
+                    control_stopped(session, &*connection, &events).await;
                 }
                 return;
             }
         };
         let Some(message) = message else { return };
-        if let Err(error) = send_message(&mut control, &message, &trace, "control").await {
-            let broken = Envelope::Broken {
-                session,
-                code: TerminationCode::InternalError,
-                reason: "the control stream could not be written",
-            };
-            // A lost connection is reported by the watcher of the session.
-            if !matches!(error, xmoq_moqt_io::SendError::Write(WriteError::Lost(_))) {
-                let _ = events.send(broken).await;
+        match send_message(&mut control, &message, &trace, "control").await {
+            Ok(()) => {}
+            // WHY as the stop between writes: when the STOP_SENDING comes is
+            // chance, and the peer's leaving and the code it is closed with
+            // are not to depend on it.
+            Err(xmoq_moqt_io::SendError::Write(WriteError::Stopped(_))) => {
+                control_stopped(session, &*connection, &events).await;
+                return;
             }
-            return;
+            // A lost connection is reported by the watcher of the session.
+            Err(xmoq_moqt_io::SendError::Write(WriteError::Lost(_))) => return,
+            Err(_) => {
+                let broken = Envelope::Broken {
+                    session,
+                    code: TerminationCode::InternalError,
+                    reason: "the control stream could not be written",
+                };
+                let _ = events.send(broken).await;
+                return;
+            }
         }
     }
+}
+
+/// The peer stopped the relay's control stream.
+async fn control_stopped<C: Connection>(
+    session: SessionKey,
+    connection: &C,
+    events: &mpsc::Sender<Envelope<C>>,
+) {
+    // WHY wait and see: an endpoint that goes away lets go of its streams,
+    // which QUIC stacks turn into STOP_SENDING, and the close of its
+    // connection can arrive a moment later. That is a peer leaving, and the
+    // session then ends by itself, with what had arrived still read.
+    let leaving = tokio::time::timeout(LEAVING_GRACE, connection.closed());
+    if leaving.await.is_ok() {
+        return;
+    }
+    // §3.3: closing a control stream is a PROTOCOL_VIOLATION, and a
+    // STOP_SENDING closes this one.
+    let broken = Envelope::Broken {
+        session,
+        code: TerminationCode::ProtocolViolation,
+        reason: "the peer stopped the relay's control stream",
+    };
+    let _ = events.send(broken).await;
 }
 
 /// Writes the relay's half of one request stream, and watches for the peer
@@ -3283,7 +3312,8 @@ async fn write_request<C: Connection>(
                     may_be_reset = false;
                     continue;
                 };
-                Some(RequestCommand::Reset(code))
+                send.reset(code);
+                return;
             }
             command = commands.recv() => command,
             stopped = send.stopped() => {
@@ -3316,8 +3346,30 @@ async fn write_request<C: Connection>(
                     ControlMessage::Namespace(_) | ControlMessage::NamespaceDone(_)
                 );
                 // An error means the peer stopped the stream or is gone, which
-                // the other arm of the select reports.
-                let written = send_message(&mut send, &message, &trace, &label).await;
+                // the other arm of the select reports. WHY the reset raced
+                // with the write: a peer that gives no credit would hold it
+                // back.
+                let written = {
+                    let write = send_message(&mut send, &message, &trace, &label);
+                    tokio::pin!(write);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            code = &mut reset, if may_be_reset => match code {
+                                Ok(code) => break Err(code),
+                                Err(_) => may_be_reset = false,
+                            },
+                            written = &mut write => break Ok(written),
+                        }
+                    }
+                };
+                let written = match written {
+                    Ok(written) => written,
+                    Err(code) => {
+                        send.reset(code);
+                        return;
+                    }
+                };
                 // The relay sends the next ones of the SUBSCRIBE_NAMESPACE as
                 // these are written.
                 if of_a_namespace_subscription && written.is_ok() {
@@ -3330,11 +3382,86 @@ async fn write_request<C: Connection>(
                 send.finish();
                 return;
             }
-            Some(RequestCommand::Reset(code)) => {
-                send.reset(code);
-                return;
+        }
+    }
+}
+
+/// Updates of a request the relay opened that came before the request was
+/// written; they are written after it, in their order. The session lets no
+/// more wait for their answer than `MAX_UNANSWERED_UPDATES`, which bounds
+/// them.
+struct Early {
+    updates: VecDeque<ControlMessage>,
+    /// Whether the hub still holds the sender of the updates.
+    open: bool,
+}
+
+/// What became of opening a request stream and writing the request.
+enum Opening<C: Connection> {
+    Written(C::Send, C::Recv),
+    /// The stream could not be opened, or the request not written.
+    Unsent,
+    /// The hub ended the request first: it was not sent, and the hub knows.
+    Ended,
+}
+
+/// Opens the stream of a request the relay opens and writes the request.
+/// Opening waits at the peer's stream limit, and writing while the peer
+/// gives no flow control credit; an ending of the hub must get through, and
+/// updates are kept for after the request. Before the request is written,
+/// any ending is a cancel.
+async fn open_and_send<C: Connection>(
+    connection: &C,
+    message: &ControlMessage,
+    (updates, ending): (
+        &mut mpsc::Receiver<ControlMessage>,
+        &mut oneshot::Receiver<OwnRequestEnding>,
+    ),
+    early: &mut Early,
+    (trace, label): (&Trace, &str),
+) -> Opening<C> {
+    let opened = {
+        let open = connection.open_bi();
+        tokio::pin!(open);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut *ending => return Opening::Ended,
+                update = updates.recv(), if early.open => match update {
+                    Some(update) => early.updates.push_back(update),
+                    None => early.open = false,
+                },
+                opened = &mut open => break opened,
             }
         }
+    };
+    let Ok((mut send, recv)) = opened else {
+        return Opening::Unsent;
+    };
+    let written = {
+        let write = send_message(&mut send, message, trace, label);
+        tokio::pin!(write);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut *ending => break None,
+                update = updates.recv(), if early.open => match update {
+                    Some(update) => early.updates.push_back(update),
+                    None => early.open = false,
+                },
+                written = &mut write => break Some(written.is_ok()),
+            }
+        }
+    };
+    if written == Some(true) {
+        return Opening::Written(send, recv);
+    }
+    send.reset(stream_reset_code::CANCELLED);
+    recv.stop(stream_reset_code::CANCELLED);
+    if written == Some(false) {
+        Opening::Unsent
+    } else {
+        Opening::Ended
     }
 }
 
@@ -3345,7 +3472,10 @@ async fn run_own_request<C: Connection>(
     request: OwnRequestKey,
     connection: Arc<C>,
     message: ControlMessage,
-    mut commands: mpsc::Receiver<OwnRequestCommand>,
+    (mut updates, mut ending): (
+        mpsc::Receiver<ControlMessage>,
+        oneshot::Receiver<OwnRequestEnding>,
+    ),
     trace: Trace,
     events: mpsc::Sender<Envelope<C>>,
 ) {
@@ -3357,45 +3487,58 @@ async fn run_own_request<C: Connection>(
             how,
         })
     };
-    // Opening waits at the peer's stream limit; a cancel must get through.
-    let opened = tokio::select! {
-        opened = connection.open_bi() => opened,
-        _ = commands.recv() => return,
+    let mut early = Early {
+        updates: VecDeque::new(),
+        open: true,
     };
-    let Ok((mut send, recv)) = opened else {
-        let _ = events.send(ended(OwnRequestEnd::Unsent)).await;
-        return;
-    };
-    // Writing waits while the peer gives no flow control credit; a cancel
-    // must get through here as well.
-    let written = tokio::select! {
-        written = send_message(&mut send, &message, &trace, &label) => Some(written.is_ok()),
-        _ = commands.recv() => None,
-    };
-    if written != Some(true) {
-        send.reset(stream_reset_code::CANCELLED);
-        recv.stop(stream_reset_code::CANCELLED);
-        if written == Some(false) {
+    let (mut send, recv) = match open_and_send(
+        &*connection,
+        &message,
+        (&mut updates, &mut ending),
+        &mut early,
+        (&trace, &label),
+    )
+    .await
+    {
+        Opening::Written(send, recv) => (send, recv),
+        Opening::Unsent => {
             let _ = events.send(ended(OwnRequestEnd::Unsent)).await;
+            return;
         }
-        return;
-    }
+        Opening::Ended => return,
+    };
     let mut reader = RequestReader::new(recv, &trace, &label);
+    let mut updates_written = true;
+    for update in early.updates {
+        if send_message(&mut send, &update, &trace, &label)
+            .await
+            .is_err()
+        {
+            updates_written = false;
+            break;
+        }
+    }
+    let mut updates_open = early.open;
     // Each direction is reported once; after that only the other one, and the
     // hub's word, are waited for. What an ending means is the relay's to say.
     let (mut reading, mut watching) = (true, true);
-    let command = loop {
+    let how = loop {
+        if !updates_written {
+            break None;
+        }
         tokio::select! {
-            command = commands.recv() => match command {
+            biased;
+            // An error: the session is going.
+            how = &mut ending => break how.ok(),
+            update = updates.recv(), if updates_open => match update {
                 // WHY waited for here, and the peer's messages not read
                 // meanwhile: a `REQUEST_UPDATE` is short, and a write in a
                 // task of its own would let a `Finish` overtake it.
-                Some(OwnRequestCommand::Send(message)) => {
-                    if send_message(&mut send, &message, &trace, &label).await.is_err() {
-                        break None;
-                    }
+                Some(update) => {
+                    updates_written =
+                        send_message(&mut send, &update, &trace, &label).await.is_ok();
                 }
-                command => break command,
+                None => updates_open = false,
             },
             event = reader.next_event(), if reading => match event {
                 Ok(RequestStreamEvent::Message(message)) => {
@@ -3428,15 +3571,37 @@ async fn run_own_request<C: Connection>(
             }
         }
     };
-    if let Some(OwnRequestCommand::Finish) = command {
-        send.finish();
-        reader.stop(stream_reset_code::CANCELLED);
-        return;
+    if matches!(how, Some(OwnRequestEnding::Finish)) {
+        // The updates the hub sent before it finished go first.
+        while let Ok(update) = updates.try_recv() {
+            if send_message(&mut send, &update, &trace, &label)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
     }
-    // `None`: the session is going; the stream is not left half open.
-    let code = match command {
-        Some(OwnRequestCommand::Cancel(code)) => code,
-        _ => stream_reset_code::CANCELLED,
+    end_own_request(send, reader, how);
+}
+
+/// Ends the stream of a request the relay opened as the hub said; `None`:
+/// the session is going, and the stream is not left half open.
+fn end_own_request<S: SendStream, R>(
+    send: S,
+    reader: RequestReader<R>,
+    how: Option<OwnRequestEnding>,
+) where
+    R: xmoq_moqt_io::RecvStream,
+{
+    let code = match how {
+        Some(OwnRequestEnding::Finish) => {
+            send.finish();
+            reader.stop(stream_reset_code::CANCELLED);
+            return;
+        }
+        Some(OwnRequestEnding::Cancel(code)) => code,
+        None => stream_reset_code::CANCELLED,
     };
     send.reset(code);
     reader.stop(code);
