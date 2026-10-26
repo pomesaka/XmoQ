@@ -4,9 +4,8 @@ Everything here is **proposed**, and undecided until the project owner decides i
 
 Decided on 2026-10-25, the inputs of this draft ([requirements](requirements.md)):
 
-- One relay serves 500 viewers of a broadcast, and relays are added to build a broadcast of 10,000.
-- Meetings, many to many, of 49 participants at most, after an agent can follow a broadcast.
-- An agent takes part through a CLI; it gets speech as text, transcribed with whisper.cpp on its machine, and speaks as chat lines.
+- The goals of a broadcast and the size of a meeting, rows "Latency, capacity" and "Meetings (many to many)" of the requirements.
+- An agent takes part through a CLI; it gets speech as text from a transcriber beside the relay, and speaks as chat lines.
 
 ## Part 1: a broadcast of 10,000
 

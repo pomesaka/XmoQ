@@ -2,7 +2,7 @@
 
 What the project owner has not decided. Do not infer answers: ask.
 
-When an item is decided, remove it here and write the decision where it takes effect, as WHY and WHY NOT comments in the code or in the document that covers the topic. Decisions are not collected in one place.
+When an item is decided, remove it here and write the decision where it takes effect, as WHY and WHY NOT comments in the code or in the document that covers the topic.
 
 ## Undecided
 

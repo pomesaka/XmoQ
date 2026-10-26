@@ -4,7 +4,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 
 ## 着手前に読む
 
-- `docs/agent-guide.md`: 実装エージェント向けの決まり。このファイルより優先する
+- `docs/agent-guide.md`: このファイルに無い、実装エージェント向けの決まり（英語）
 - `docs/open-questions.md`: 触ろうとしている範囲に未決事項が無いかを確かめる
 - `docs/architecture.md`: 構成要素の責務と境界。どこまでできているかは`docs/requirements.md`、次の作業は`docs/roadmap.md`
 - 触る部品のREADMEと、`docs/moqt-implementation-notes.md`の該当の行
@@ -21,17 +21,20 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | `mise run check:layers`、`check:workflows`、`check:docs` | 層の依存。actionlintとshellcheck。生成した記録の索引と照合のファイルの一覧が古くないか |
 | `mise run fmt` | 整形と安全な直し。記録の索引と照合のファイルの一覧も書き直す（記録か照合の台本を足したら走らせる） |
 | `mise run interop` | `moqtail`の相手とつなぐ照合。`check`には入っていない |
-| `mise run demo` | リレーとページを立て、Chromiumで配信と視聴のページを開く |
-| `mise run watch -- <旗>` | 端末の視聴者 |
-| `mise run agent -- --room <部屋のURL> --out <DIR>` | エージェントが部屋を読むCLI |
-| `mise run agent-demo -- start --out <DIR>`、`stop --out <DIR>` | デモとエージェントと配信のページをまとめて立てて止める。`--meeting N`で会議 |
-| `mise run transcriber -- <旗>`、`mise run speech-model` | 文字起こし役と、そのモデルの取得 |
+| `mise run demo` | Start the own relay, the gatherer of the chat, the transcriber and the pages of the demo: one publishes video, others watch |
+| `mise run watch -- <旗>` | The viewer for the terminal: mise run watch -- --room http://127.0.0.1:8787/rooms/demo |
+| `mise run chat -- <旗>` | The gatherer of the chat: mise run chat -- --url https://host:port/ --cert-sha256 <hex> --store chat.sqlite3 |
+| `mise run agent -- <旗>` | The reader of a room for an agent: mise run agent -- --room http://127.0.0.1:8787/rooms/demo --out /tmp/room |
+| `mise run agent-demo -- start`、`stop` | A demo of its own on other ports, the agent's reader in its room and the publishing page in a headless Chromium, in the background: mise run agent-demo -- start --out /tmp/room [--meeting N], then stop --out /tmp/room |
+| `mise run transcriber -- <旗>` | The transcriber: mise run transcriber -- --url https://host:port/ --cert-sha256 <hex> --namespace xmoq/demo |
+| `mise run speech-model` | Fetch a model of whisper.cpp for xmoq-speech into ~/.cache/xmoq/whisper: mise run speech-model -- [small-q5_1 (default)\|tiny\|large-v3-turbo-q5_0] [--dir <dir>] |
 
-旗と手順は各READMEと`README.md`のChecksにある。
+説明は`mise.toml`のdescriptionの写し（`mise tasks`が同じ文を出す）。旗と手順は各部品のREADMEにある。
 
 ## このプロジェクトの決まり
 
 - 未決事項を実装の都合で決めない。`docs/open-questions.md`に載っている項目に当たったら、選択肢と根拠をそろえてユーザーに聞く
+- 製品の要件、性能の目標、方針を作らない。認証、ログ、保存期間、デプロイ、ライセンスを黙って決めない
 - 未決事項が決まったら、同じ変更で`docs/open-questions.md`の該当行を消し、`docs/requirements.md`のStatusを直す
 - 決定の背景、却下した代替案、根拠は、その決定が効いている場所に書く。コードならWHYとWHY NOTのコメント、文書ならその話題を扱う文書（構成は`docs/architecture.md`、プロトコルと版は`docs/protocols.md`）に書く。ADRや決定一覧のように「意思決定」でまとめた置き場は作らない
 - 検証は`docs/experiments/`に記録する。走らせていない検証を「通った」と書かない。失敗と阻害要因も同じ形式で残す
@@ -85,7 +88,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | ファイル/ディレクトリ | 種別 | 目的 |
 |---|---|---|
 | README.md | 入り口 | 概要、文書と部品の一覧、検査 |
-| CLAUDE.md、docs/agent-guide.md | エージェントへの指示 | 作業の決まりとコマンド。agent-guideが優先する |
+| CLAUDE.md、docs/agent-guide.md | エージェントへの指示 | 作業の決まりとコマンド。agent-guideはこのファイルに無い分だけを持つ |
 | docs/vision.md | 仕様 | 目指す方向と範囲外 |
 | docs/requirements.md | 仕様 | 要件ごとの状態と、状態を表す語の定義 |
 | docs/architecture.md、docs/assets/ | 仕様 | 構成要素の責務と境界。図 |
@@ -118,6 +121,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | 部品（crate、パッケージ）や共有の固定値を足した | そのREADME、README.md の一覧 |
 | 新しい文書を足した | README.md の一覧、このDocumentation Map |
 | エージェントの進め方を変えた | docs/agent-guide.md、CLAUDE.md |
+| 既知の不足を直した（draftの要件を満たした、上限を足した） | docs/moqt-implementation-notes.md の既知の不足の項目と、それを指す`FIXME:`を消す。その挙動を表の行に書く。部品のREADMEの既知の不足とStatus |
 | draftの解釈や、本文に無い挙動を決めた・変えた | docs/moqt-implementation-notes.md。RustとTypeScriptの両方を同じPRで直す |
 | 受信の上限やタイムアウトの値を決めた・変えた | 値を置くコードの定数のコメント（provisionalの印を含む）、docs/moqt-implementation-notes.md |
 | moqtailから固定値を採った・採り直した | fixtures/moqt-18/README.md |

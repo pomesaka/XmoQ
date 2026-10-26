@@ -21,7 +21,7 @@ Decided on 2026-10-25:
 - Explore future live streaming for events on a separately developed SNS.
 
 ## Goals
-Goals of a broadcast, to aim at and not required (decided on 2026-10-25, in place of the 2026-10-24 goal of 100 viewers a room and 10 rooms): a delay of 500 ms at most from a frame being made to its being shown, at the 99th percentile of the viewers' frames (decided on 2026-10-24); one relay serves 500 viewers, and relays are added to build a broadcast of 10,000 ([requirements](requirements.md)). For a meeting, 49 participants at most (decided on 2026-10-25); its delay is undecided.
+The goals of a broadcast (its delay, and how many viewers a relay and a broadcast have) and the size of a meeting are in the [requirements](requirements.md), rows "Latency, capacity" and "Meetings (many to many)".
 
 ## Undecided
 What is not decided, for an agent, a meeting and the rest, is in the [open questions](open-questions.md).
