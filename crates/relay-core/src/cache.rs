@@ -3,8 +3,7 @@
 //!
 //! WHY the latest Group and no more: it is what a Joining FETCH with offset
 //! 0 asks for, the way a subscriber gets a catalog and a viewer that comes
-//! late its first picture. Everything else is asked of a publisher, as
-//! before.
+//! late its first picture. Everything else is asked of a publisher.
 //!
 //! WHY NOT keep the Group for 30 seconds after the track's last publisher
 //! has gone (decided on 2026-10-11, and left out the same day): no client
