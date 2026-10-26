@@ -103,11 +103,16 @@ pub fn read_line(number: u64, payload: &[u8]) -> Result<Line, Malformed> {
     })
 }
 
-fn object(payload: &[u8]) -> Result<serde_json::Map<String, Value>, Malformed> {
+/// The members of a payload that is a JSON object; `None` for any other.
+pub(crate) fn members(payload: &[u8]) -> Option<serde_json::Map<String, Value>> {
     match serde_json::from_slice::<Value>(payload) {
-        Ok(Value::Object(members)) => Ok(members),
-        _ => Err(Malformed::NotAnObject),
+        Ok(Value::Object(members)) => Some(members),
+        _ => None,
     }
+}
+
+fn object(payload: &[u8]) -> Result<serde_json::Map<String, Value>, Malformed> {
+    members(payload).ok_or(Malformed::NotAnObject)
 }
 
 fn string(
@@ -128,15 +133,16 @@ fn time(
     key: &str,
     wrong: Malformed,
 ) -> Result<u64, Malformed> {
-    members
-        .get(key)
-        .and_then(Value::as_u64)
-        .filter(|time| *time <= MAX_SENT_AT)
-        .ok_or(wrong)
+    members.get(key).and_then(whole).ok_or(wrong)
+}
+
+/// A whole number from 0 to [`MAX_SENT_AT`]; `None` for any other value.
+pub(crate) fn whole(value: &Value) -> Option<u64> {
+    value.as_u64().filter(|number| *number <= MAX_SENT_AT)
 }
 
 /// A string as JSON writes it, with its quotes.
-fn json_string(text: &str) -> String {
+pub(crate) fn json_string(text: &str) -> String {
     Value::String(text.to_string()).to_string()
 }
 

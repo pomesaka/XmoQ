@@ -1,0 +1,12 @@
+some	{"count":3,"at":1761300000000}	3	1761300000000	-	yes
+nobody	{"count":0,"at":5}	0	5	-	yes
+the largest count	{"count":9007199254740991,"at":5}	9007199254740991	5	-	yes
+a count too large	{"count":9007199254740992,"at":5}	-	-	count	-
+a count below 0	{"count":-1,"at":5}	-	-	count	-
+a count with a fraction	{"count":1.5,"at":5}	-	-	count	-
+a count as a string	{"count":"3","at":5}	-	-	count	-
+no count	{"at":5}	-	-	count	-
+no at	{"count":3}	-	-	at	-
+an at with an exponent	{"count":3,"at":5e0}	-	-	at	-
+names: a member more is passed over	{"count":1,"at":5,"names":["a"]}	1	5	-	no
+an array	[3,5]	-	-	not-an-object	-
