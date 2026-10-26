@@ -214,6 +214,8 @@
 
 import { parseArgs } from "node:util";
 import {
+	connectedNow,
+	type Fence,
 	log,
 	NAMESPACE,
 	openPage,
@@ -237,6 +239,12 @@ declare const window: {
 	readonly xmoq: XmoqPage;
 	readonly xmoqOwn: OwnPageExtras;
 };
+
+/** The peer's line for the session after the client's, which is 0. */
+const ONE_AFTER_THE_CLIENT: Fence = { line: /^SESSION session=1 / };
+
+/** The end of the client's session, as the peer prints it. */
+const SESSION_ENDED = /^SESSION_(ENDED|FAILED) session=0 /;
 
 const { values: options } = parseArgs({
 	options: {
@@ -562,8 +570,13 @@ async function noStream(
 			/^REQUEST /,
 		);
 		if (sent.length > 0) throw new Error("the client was to send no request");
-	} else if (context.relay.hasPrinted(/^REQUEST /)) {
-		throw new Error("the page was to send no request");
+	} else {
+		// The page stays, and the fence is a session after it.
+		const sent = await context.relay.linesBefore(
+			connectedNow(context, ONE_AFTER_THE_CLIENT),
+			/^REQUEST /,
+		);
+		if (sent.length > 0) throw new Error("the page was to send no request");
 	}
 	return `${client} could not send a SUBSCRIBE to a peer that allowed it no stream, and failed it as not sent after its wait (${WAIT_MS} ms); the peer read no request: ${said}`;
 }
@@ -602,7 +615,11 @@ async function noSubgroupStream(
 			if (!state.includes('"session":null')) {
 				throw new Error(`the page's session was to stay open: ${state}`);
 			}
-			if (context.relay.hasPrinted(/^SESSION_ENDED /)) {
+			const ended = await context.relay.linesBefore(
+				connectedNow(context, ONE_AFTER_THE_CLIENT),
+				SESSION_ENDED,
+			);
+			if (ended.length > 0) {
 				throw new Error("the peer was to see the session go on");
 			}
 			break;
@@ -741,6 +758,13 @@ async function goAway(
 			const code = await withTimeout(rust.exited, "own-rust to leave");
 			if (code !== 0)
 				throw new Error(`own-rust was to leave with 0, not ${code}`);
+			// It has left, and every line it printed has been read.
+			const connections = rust.matches(/^CONNECTED /).length;
+			if (connections !== 1) {
+				throw new Error(
+					`own-rust was to connect once, not ${connections} times`,
+				);
+			}
 			said = `${line}, and it left with 0`;
 			break;
 		}
@@ -761,9 +785,6 @@ async function goAway(
 		/^SESSION_ENDED session=0 ClosedByPeer \{ code: 0,/,
 	);
 	if (client === "own-rust") {
-		if (context.relay.hasPrinted(/^SESSION session=1 /)) {
-			throw new Error("own-rust was to connect once");
-		}
 		return `own-rust closed its session with NO_ERROR when the peer sent GOAWAY naming ${uri}: ${said}`;
 	}
 	return `${client} closed its session with NO_ERROR when the peer sent GOAWAY, and connected to the URI it named (${uri}) ${await moving} ms after the GOAWAY was sent: ${said}`;
@@ -1103,7 +1124,11 @@ async function silentSubgroup(
 	// The session goes on: a while later it is still open at both ends.
 	await new Promise((resolve) => setTimeout(resolve, IDLE_MS));
 	const there = await stillThere();
-	if (context.relay.hasPrinted(/^SESSION_ENDED /)) {
+	const ended = await context.relay.linesBefore(
+		connectedNow(context, ONE_AFTER_THE_CLIENT),
+		SESSION_ENDED,
+	);
+	if (ended.length > 0) {
 		throw new Error("the peer was to see the session go on");
 	}
 	return `${client} stopped a subgroup stream that sent nothing after its header ${after} ms after it (its idle time: ${IDLE_MS} ms), with STOP_SENDING 0x0, and its session went on: ${line}; ${said}; ${there}`;
@@ -1326,9 +1351,6 @@ async function relayManyAnnouncements(): Promise<string> {
 	await context.relay.waitForLine(
 		/^SEND session=2 stream=\d+ REQUEST_ERROR error_code=0x9\b/,
 	);
-	if (context.relay.hasPrinted(/^CLOSE_SESSION session=2\b/)) {
-		throw new Error("the relay was to refuse the requests, and close nothing");
-	}
 	if (client.matches(/^SESSION_ENDED /).length > 0) {
 		throw new Error("the session was to stay open to its own end");
 	}
@@ -1336,6 +1358,20 @@ async function relayManyAnnouncements(): Promise<string> {
 	const [, got = ""] = await subscriber.waitForLine(
 		/^OBJECT .*payload_hex=([0-9a-f]*)$/,
 	);
+	// The fence: the last answer the client read, before it left. WHY not a
+	// line after it: the client ends by closing its control stream, which
+	// the relay closes the session for (PROTOCOL_VIOLATION), and that is not
+	// what this run is about.
+	const closed = await context.relay.linesBefore(
+		{
+			line: /^SEND session=2 stream=\d+ (REQUEST_OK|REQUEST_ERROR)/,
+			nth: Number(ok) + Number(refused),
+		},
+		/^CLOSE_SESSION session=2\b/,
+	);
+	if (closed.length > 0) {
+		throw new Error("the relay was to refuse the requests, and close nothing");
+	}
 	if (got !== payload) {
 		throw new Error(
 			`the subscriber beside it was to get the Object, not ${got}`,

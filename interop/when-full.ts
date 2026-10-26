@@ -47,6 +47,7 @@
 import { parseArgs } from "node:util";
 import type { Page } from "playwright-core";
 import {
+	captureGroup,
 	log,
 	MOQLIVEMOCK_SIDE_PORT_OFFSET,
 	openPage,
@@ -176,20 +177,14 @@ async function main(): Promise<void> {
 		const second = await openPage(context, "viewer:second", "own-browser");
 		await play(second, context.relayUrl, context.certSha256Hex);
 		const sentTo = `${belowUrl}?sent-away=1`;
-		await withTimeout(
+		const [sentAway] = await withTimeout(
 			context.relay.waitForLines(
 				/^SESSION_SENT_AWAY session=\d+ uri=(\S+)$/,
 				1,
 			),
 			"the relay above to send the second viewer away",
 		);
-		if (
-			!context.relay.hasPrinted(
-				new RegExp(
-					`^SESSION_SENT_AWAY session=\\d+ uri=${sentTo.replaceAll(".", "\\.").replaceAll("?", "\\?")}$`,
-				),
-			)
-		) {
+		if (sentAway === undefined || captureGroup(sentAway, 1) !== sentTo) {
 			throw new Error(
 				`the relay above did not send the second viewer to ${sentTo}`,
 			);
@@ -317,7 +312,15 @@ async function main(): Promise<void> {
 			if (again) {
 				throw new Error("the relay above sent a second session away");
 			}
-			if (below.relay.hasPrinted(/^SESSION_SENT_AWAY /)) {
+			// The fence: the relay below's refusal of the session sent to it.
+			// For a session it is full for, it prints that it refuses it or
+			// that it sends it on, one of the two (`add_session` in
+			// crates/relay/src/hub.rs), and none was sent on before this one.
+			const sentOn = await below.relay.linesBefore(
+				{ line: /^SESSION_REFUSED session=\d+ too many sessions$/ },
+				/^SESSION_SENT_AWAY /,
+			);
+			if (sentOn.length > 0) {
 				throw new Error(
 					"the relay below sent the session that was sent to it on",
 				);

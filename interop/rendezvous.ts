@@ -80,6 +80,7 @@
 
 import { parseArgs } from "node:util";
 import {
+	connectedNow,
 	type LoggedProcess,
 	log,
 	MOQLIVEMOCK_SIDE_PORT_OFFSET,
@@ -285,11 +286,6 @@ async function publisherComes(
 	const asked = await subscribe(context, subscriber, 20_000);
 	const [, stream = ""] = await context.relay.waitForLine(HELD);
 	await wait(2000);
-	if (context.relay.hasPrinted(answered(stream))) {
-		throw new Error(
-			"the relay was to answer nothing while nobody published the track",
-		);
-	}
 	const publisher = spawnRustClient(
 		context,
 		"pub:own-rust",
@@ -298,6 +294,16 @@ async function publisherComes(
 		TRACK,
 		["--payload-hex", PAYLOAD_HEX, "--timeout-secs", "40"],
 	);
+	// The fence: the publisher's session, which comes after the wait.
+	const early = await context.relay.linesBefore(
+		{ line: /^SESSION_OPENED session=1$/ },
+		answered(stream),
+	);
+	if (early.length > 0) {
+		throw new Error(
+			"the relay was to answer nothing while nobody published the track",
+		);
+	}
 	await publisher.waitForLine(/^PUBLISHED /);
 	const answer = await withTimeout(
 		asked.answer,
@@ -353,7 +359,12 @@ async function publisherReturns(
 		);
 	}
 	await wait(4000 - heldAfter);
-	if (context.relay.hasPrinted(answered(stream, 1))) {
+	// The publisher's session is 0 and the subscriber's 1.
+	const away = await context.relay.linesBefore(
+		connectedNow(context, { line: /^SESSION_OPENED session=2$/ }),
+		answered(stream, 1),
+	);
+	if (away.length > 0) {
 		throw new Error(
 			"the relay was to answer nothing while the track's publisher was away",
 		);
@@ -422,7 +433,12 @@ async function nobodyComes(
 			`the subscriber was to be refused between 1.5 and 4 s, not "${answer}" ${after} ms after it began and ${afterTheHold} ms after the relay held its SUBSCRIBE`,
 		);
 	}
-	if (context.relay.hasPrinted(/^CLOSE_SESSION /)) {
+	// The subscriber's session is 0.
+	const closed = await context.relay.linesBefore(
+		connectedNow(context, { line: /^SESSION_OPENED session=1$/ }),
+		/^CLOSE_SESSION /,
+	);
+	if (closed.length > 0) {
 		throw new Error("the relay was to close no session over it");
 	}
 	return `${subscriber} subscribed to a track nobody publishes with a RENDEZVOUS_TIMEOUT of 1.5 s: the relay held the SUBSCRIBE and refused it with TIMEOUT (0x2) ${after} ms after the subscriber began: ${answer}`;
@@ -442,7 +458,13 @@ async function notAsked(
 			`the relay was to answer DOES_NOT_EXIST (0x10) at once, not ${sent}`,
 		);
 	}
-	if (context.relay.hasPrinted(/^HOLD_REQUEST /)) {
+	// The fence: the answer. A SUBSCRIBE the relay holds is held before it
+	// is answered.
+	const held = await context.relay.linesBefore(
+		{ line: /^SEND session=0 stream=\d+ (SUBSCRIBE_OK|REQUEST_ERROR)/ },
+		/^HOLD_REQUEST /,
+	);
+	if (held.length > 0) {
 		throw new Error("the relay was to hold nothing");
 	}
 	// To be asked again after a second: a Retry Interval of 1,001.
@@ -479,16 +501,21 @@ async function viewerBeforeTheBroadcast(context: RunContext): Promise<string> {
 	]);
 	await context.relay.waitForLine(HELD);
 	await wait(2000);
-	if (context.relay.hasPrinted(/^SEND session=0 stream=\d+ /)) {
-		throw new Error(
-			"the relay was to answer the viewer nothing before the broadcast",
-		);
-	}
 	const publisher = await openConnectedPage(
 		context,
 		"publisher",
 		"own-browser",
 	);
+	// The fence: the page's session, the second, which comes after the wait.
+	const early = await context.relay.linesBefore(
+		{ line: /^SESSION_OPENED session=\d+$/, nth: 2 },
+		/^SEND session=0 stream=\d+ /,
+	);
+	if (early.length > 0) {
+		throw new Error(
+			"the relay was to answer the viewer nothing before the broadcast",
+		);
+	}
 	await withTimeout(
 		publisher.evaluate(([name]) => window.xmoqOwn.publishBroadcast(name), [
 			namespace,
@@ -682,7 +709,13 @@ async function pagePublisherReturns(context: RunContext): Promise<string> {
 			`the viewer was to play twice on its first session: ${JSON.stringify(after.playing)}`,
 		);
 	}
-	const drained = context.relay.hasPrinted(/^DRAIN_TIMER /);
+	const drained =
+		(
+			await context.relay.linesBefore(
+				{ line: /^OPEN_REQUEST session=3 own=\d+ SUBSCRIBE$/ },
+				/^DRAIN_TIMER /,
+			)
+		).length > 0;
 	return `a page ended its broadcast with PUBLISH_DONE and stayed connected; the viewer, which waits as /watch?wait=1 does, was told that what it played ended (${before.shown.length} frames drawn by then), asked again on its session and was held, and drew ${after.shown.length - held.shown.length} frames more when another page published the broadcast 3 s later: one session, never told "not yet", no DOES_NOT_EXIST from the relay between the end and the new broadcast (the relay ${drained ? "waited" : "did not wait"} for late streams of the tracks that ended); its states: ${after.playing.join(", ")}`;
 }
 

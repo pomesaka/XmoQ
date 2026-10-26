@@ -160,8 +160,16 @@ async function run(context: RunContext, publisher: string): Promise<string> {
 			`the subscriber was to get the publisher's Object, not ${payload}`,
 		);
 	}
-	if (context.relay.hasPrinted(/^(CLOSE_SESSION|SESSION_FAILED) /)) {
-		throw new Error("the relay was to close no session");
+	// The fence: the stream that carried the Object to the subscriber, which
+	// the relay opened after it had read the publisher's REQUEST_OK.
+	const closed = await context.relay.linesBefore(
+		{ line: /^OPEN_DATA session=\d+ out=\d+ / },
+		/^CLOSE_SESSION /,
+	);
+	if (closed.length > 0) {
+		throw new Error(
+			`the relay was to close no session: ${closed.map(([line]) => line).join("; ")}`,
+		);
 	}
 	return `own-rust subscribed with NEW_GROUP_REQUEST = 0 to a track ${publisher} published with DYNAMIC_GROUPS = 1: the relay sent the publisher a REQUEST_UPDATE on the stream of its PUBLISH (${sent}), the publisher answered REQUEST_OK and reported the request with the value ${group}, and the Object it sent afterwards reached the subscriber`;
 }
