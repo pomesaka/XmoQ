@@ -33,7 +33,7 @@ use xmoq_moqt_io::wt;
 use xmoq_viewer::reconnect::BETWEEN_TRIES_MS;
 use xmoq_viewer::room::{self, Broadcast, Relay};
 use xmoq_viewer_io::ending::{self, UntilClosed};
-use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};
+use xmoq_viewer_io::room_socket::{ChatTokens, MeetingFull, ROOM_COMES_WITHIN, RoomSocket};
 
 use crate::attend::{Ended, attend};
 use crate::frames::Pictures;
@@ -398,27 +398,111 @@ async fn found_in(
 
 /// Where the broadcast is now, with the tokens of the room. `None` when
 /// the reader is to end before a room has one.
+///
+/// # Errors
+///
+/// A meeting that is full ([`MeetingFull`]); what else fails in a room
+/// has it joined again ([`place_in_room`]).
 async fn place(
     args: &Args,
     room: &mut Option<RoomSocket>,
     reader: &mut Reader,
 ) -> Result<Option<Place>> {
-    let (room, ask_token) = match (&args.source, room) {
-        (
-            Source::Relay {
-                url,
-                cert_sha256,
-                namespace,
-            },
-            _,
-        ) => return Ok(Some(at_relay(args, url, *cert_sha256, namespace))),
-        (Source::Room { address, ask_token }, room) => {
-            let Some(room) = the_room(args, address, room, reader).await? else {
-                return Ok(None);
-            };
-            (room, *ask_token)
+    match &args.source {
+        Source::Relay {
+            url,
+            cert_sha256,
+            namespace,
+        } => Ok(Some(at_relay(args, url, *cert_sha256, namespace))),
+        Source::Room { address, ask_token } => {
+            place_in_room(args, address, *ask_token, room, reader).await
         }
-    };
+    }
+}
+
+/// [`place`] in the room at `address`: `room`, joined first where it is not
+/// (it went away during a session, or this is the first), and joined anew
+/// where it fails before the session, by the rule of the next session
+/// (`BETWEEN_TRIES_MS` from the try before), with an `error` where the
+/// failure is not the one told last.
+///
+/// WHY on and on, where `xmoq-watch` ends: as for a first session that
+/// fails (`run`), nobody looks at the reader to start it again, and the room
+/// may be back (a Worker restarted, a room that answers late, a hello put
+/// right). WHY not at once: a failure other than a refusal (a 404, a room
+/// that does not begin with hello) comes back as fast as it is asked. WHY
+/// the same failure told once: an agent reads `events.jsonl` to its end,
+/// and a room that is wrong for hours would fill it with one line. WHY a
+/// full meeting ends the reader still: whether an agent waits for a seat
+/// that people of the meeting would take is nothing this decides.
+/// FIXME: decide with the owner whether an agent waits for a seat of a full
+/// meeting, and how long.
+async fn place_in_room(
+    args: &Args,
+    address: &str,
+    ask_token: bool,
+    room: &mut Option<RoomSocket>,
+    reader: &mut Reader,
+) -> Result<Option<Place>> {
+    let mut rule = NextSession::new(BETWEEN_TRIES_MS, true, false);
+    let began = Instant::now();
+    let mut told: Option<String> = None;
+    loop {
+        if !reader
+            .pause(rule.next(address, ms_since(began)).wait_ms)
+            .await?
+        {
+            return Ok(None);
+        }
+        let joined = if let Some(joined) = room.take() {
+            Ok(Some(joined))
+        } else {
+            let joining = RoomSocket::join_when_there(address, &args.name, ROOM_COMES_WITHIN);
+            // The last try may begin as the refusals' time ends.
+            let wait = ROOM_COMES_WITHIN + Duration::from_millis(args.room_wait_ms);
+            reader.unless_ended("the room", wait, joining).await
+        };
+        let placed = match joined {
+            Ok(Some(joined)) => place_in(args, room.insert(joined), ask_token, reader).await,
+            Ok(None) => return Ok(None),
+            Err(error) => Err(error),
+        };
+        match placed {
+            Ok(placed) => return Ok(placed),
+            Err(error) => {
+                let tell = after_room_failure(error, &mut told)?;
+                *room = None;
+                if let Some(message) = tell {
+                    reader.error(message);
+                }
+                rule.ended(Ended::Failed { began: false });
+            }
+        }
+    }
+}
+
+/// What a failure of the room comes to in [`place_in_room`]: the reader
+/// ends with a full meeting; it joins the room again after any other, with
+/// the line to tell where it is not the one told last (`told`).
+fn after_room_failure(error: anyhow::Error, told: &mut Option<String>) -> Result<Option<String>> {
+    if error.downcast_ref::<MeetingFull>().is_some() {
+        return Err(error);
+    }
+    let message = format!("the room: {error:#}; joining it again");
+    if told.as_ref() == Some(&message) {
+        return Ok(None);
+    }
+    *told = Some(message.clone());
+    Ok(Some(message))
+}
+
+/// [`place`] in the room joined, `room`.
+async fn place_in(
+    args: &Args,
+    room: &mut RoomSocket,
+    ask_token: bool,
+    reader: &mut Reader,
+) -> Result<Option<Place>> {
     let Some(found) = found_in(args, room, reader).await? else {
         return Ok(None);
     };
@@ -593,17 +677,12 @@ fn person_of(args: &Args) -> Person {
 
 async fn run(args: &Args, reader: &mut Reader, pictures: &mut Option<Pictures>) -> Result<()> {
     let mut room = None;
-    if let Source::Room { address, .. } = &args.source {
-        let Some(joined) = join_room(args, address, reader).await? else {
-            return Ok(());
-        };
-        room = Some(joined);
-    }
     // WHY a first failure does not end the reader where it follows a room
     // (where `xmoq-watch` ends): an agent starts it, often as the relay and
     // the room start (`scripts/agent-demo.sh`), and nobody looks at it to
     // start it again; it waits as for a broadcast that broke off.
-    let mut rule = NextSession::new(BETWEEN_TRIES_MS, room.is_some(), false);
+    let follows = matches!(args.source, Source::Room { .. });
+    let mut rule = NextSession::new(BETWEEN_TRIES_MS, follows, false);
     let began = Instant::now();
     loop {
         let Some(mut place) = place(args, &mut room, reader).await? else {
@@ -683,66 +762,6 @@ fn at_relay(args: &Args, url: &str, cert_sha256: [u8; 32], namespace: &[String])
     }
 }
 
-/// The room, joined again where it went away during a session (`attend`).
-/// `None` where the reader is to end first.
-///
-/// WHY joined again and not given up: the room may be back, and a reader
-/// in a meeting takes a new seat's token from it with each session.
-async fn the_room<'a>(
-    args: &Args,
-    address: &str,
-    room: &'a mut Option<RoomSocket>,
-    reader: &mut Reader,
-) -> Result<Option<&'a mut RoomSocket>> {
-    if room.is_none() {
-        let Some(joined) = join_room(args, address, reader).await? else {
-            return Ok(None);
-        };
-        *room = Some(joined);
-    }
-    Ok(room.as_mut())
-}
-
-/// Joins the room at `address`, which may begin listening only later
-/// (`ROOM_COMES_WITHIN`), and is asked again after that by the rule of the
-/// next session (`BETWEEN_TRIES_MS` from the try before), with an `error`
-/// where the failure is not the one told last; `None` where the reader is
-/// to end first.
-///
-/// WHY on and on, where `xmoq-watch` ends: as for a first session that
-/// fails (`run`), nobody looks at the reader to start it again. WHY not
-/// at once: a failure other than a refusal (a 404, a room that does not
-/// begin with hello) comes back as fast as it is asked. WHY the same
-/// failure told once: an agent reads `events.jsonl` to its end, and a
-/// room that is wrong for hours would fill it with one line.
-async fn join_room(args: &Args, address: &str, reader: &mut Reader) -> Result<Option<RoomSocket>> {
-    let mut rule = NextSession::new(BETWEEN_TRIES_MS, true, false);
-    let began = Instant::now();
-    let mut told: Option<String> = None;
-    loop {
-        if !reader
-            .pause(rule.next(address, ms_since(began)).wait_ms)
-            .await?
-        {
-            return Ok(None);
-        }
-        let joining = RoomSocket::join_when_there(address, &args.name, ROOM_COMES_WITHIN);
-        // The last try may begin as the refusals' time ends.
-        let wait = ROOM_COMES_WITHIN + Duration::from_millis(args.room_wait_ms);
-        match reader.unless_ended("the room", wait, joining).await {
-            Ok(joined) => return Ok(joined),
-            Err(error) => {
-                let message = format!("the room: {error:#}; asking again");
-                if told.as_ref() != Some(&message) {
-                    reader.error(message.clone());
-                    told = Some(message);
-                }
-                rule.ended(Ended::Failed { began: false });
-            }
-        }
-    }
-}
-
 async fn read(args: &Args) -> Result<()> {
     let stop = ending::on_signals();
     let mut reader = Reader {
@@ -798,6 +817,48 @@ async fn main() -> ExitCode {
         Err(error) => {
             eprintln!("Error: {error:#}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+    use xmoq_viewer_io::room_socket::MeetingFull;
+
+    use super::after_room_failure;
+
+    #[test]
+    fn a_room_that_fails_is_joined_again_and_told_once_for_the_same_failure_until_the_meeting_is_full()
+     {
+        // (the failure of the room, in the order they come; the line told,
+        //  or the error the reader ends with)
+        let failures: [(anyhow::Error, Result<Option<&str>, &str>); 5] = [
+            (
+                anyhow!("its WebSocket closed"),
+                Ok(Some("the room: its WebSocket closed; joining it again")),
+            ),
+            (anyhow!("its WebSocket closed"), Ok(None)),
+            (
+                anyhow!("nothing within 5000 ms"),
+                Ok(Some("the room: nothing within 5000 ms; joining it again")),
+            ),
+            (
+                anyhow!("its WebSocket closed"),
+                Ok(Some("the room: its WebSocket closed; joining it again")),
+            ),
+            (
+                MeetingFull(49).into(),
+                Err("the meeting is full: it takes 49"),
+            ),
+        ];
+        let mut told = None;
+        for (failure, expected) in failures {
+            let came = after_room_failure(failure, &mut told).map_err(|error| error.to_string());
+            assert_eq!(
+                came.as_ref().map(Option::as_deref).map_err(String::as_str),
+                expected
+            );
         }
     }
 }
