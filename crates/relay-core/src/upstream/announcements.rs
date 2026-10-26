@@ -37,12 +37,13 @@
 
 use std::collections::BTreeSet;
 
-use xmoq_moqt::message::ControlMessage;
+use xmoq_moqt::message::{ControlMessage, request_error_code};
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
 use super::Link;
+use crate::own::{Counted, OwnEnd};
 use crate::routing::RETRY_WHAT_IS_NOT_THERE_MS;
 use crate::{
     Action, Event, Operation, OwnRequestEnd, OwnRequestKey, Relay, SessionKey, internal_error,
@@ -198,19 +199,26 @@ impl Relay {
             .token_for(session, Operation::Publish)
             .into_iter()
             .collect();
-        let state = self.sessions.get_mut(&session)?;
-        let (id, message) = state
-            .moqt
-            .publish_namespace(namespace.clone(), parameters)
+        // The upstream's GOAWAY moves the link to the next session, which is
+        // sent what is announced (`Relay::forget_announcements_on`); the old
+        // one is not asked here, and `open_own_request` would refuse it.
+        let mut opened = None;
+        let request = self
+            .open_own_request(
+                session,
+                (Counted::No, false),
+                |moqt| {
+                    moqt.publish_namespace(namespace.clone(), parameters)
+                        .map_err(|_| request_error_code::INTERNAL_ERROR)
+                },
+                |_, _, id| opened = Some(id),
+                actions,
+            )
             .ok()?;
-        let request = OwnRequestKey(self.next_own_request);
-        self.next_own_request = self.next_own_request.saturating_add(1);
-        actions.push(Action::OpenRequest {
-            session,
-            request,
-            message,
-        });
-        if let Some(upstream) = self.upstream.as_mut() {
+        // Kept in `Upstream` and not in the session's state, so after the
+        // call; the callers found the upstream there.
+        debug_assert!(self.upstream.is_some(), "announced without an upstream");
+        if let (Some(upstream), Some(id)) = (self.upstream.as_mut(), opened) {
             upstream.announced.insert(
                 namespace,
                 Passed {
@@ -229,15 +237,11 @@ impl Relay {
         if passed.over {
             return;
         }
-        let Some(state) = self.sessions.get_mut(&passed.session) else {
-            return;
-        };
-        state.moqt.cancel(passed.id);
-        actions.push(Action::CancelOwnRequest {
-            session: passed.session,
-            request: passed.request,
+        let end = OwnEnd::GivenUp {
+            id: passed.id,
             code: stream_reset_code::CANCELLED,
-        });
+        };
+        self.close_own_request(passed.session, passed.request, end, actions);
     }
 
     /// What was announced on `session` is no longer: it went, or is going
@@ -315,16 +319,12 @@ impl Relay {
                     && let Some(passed) = self.passed_of(session, request)
                 {
                     passed.over = true;
-                    let id = passed.id;
-                    if let Some(state) = self.sessions.get_mut(&session) {
-                        state.moqt.cancel(id);
-                    }
                     // What is left open of the stream is the relay's direction.
-                    actions.push(Action::CancelOwnRequest {
-                        session,
-                        request,
+                    let end = OwnEnd::GivenUp {
+                        id: passed.id,
                         code: stream_reset_code::CANCELLED,
-                    });
+                    };
+                    self.close_own_request(session, request, end, actions);
                     self.answered_one_at_a_time(session, request, actions);
                 }
                 None
@@ -350,11 +350,11 @@ impl Relay {
             // The session ended the request with the answer; the stream is
             // still open until the relay finishes its direction.
             Ok(RequestEvent::Rejected(error)) if error.retry_interval > 0 => {
-                actions.push(Action::FinishOwnRequest { session, request });
+                self.close_own_request(session, request, OwnEnd::Answered, actions);
                 self.refused_for_now(session, request, error.retry_interval - 1, actions);
             }
             Ok(RequestEvent::Rejected(_)) => {
-                actions.push(Action::FinishOwnRequest { session, request });
+                self.close_own_request(session, request, OwnEnd::Answered, actions);
                 if let Some(passed) = self.passed_of(session, request) {
                     passed.over = true;
                 }

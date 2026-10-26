@@ -37,6 +37,7 @@ mod cache;
 mod discovery;
 mod events;
 mod fetch;
+mod own;
 mod requests;
 mod routing;
 #[cfg(test)]
@@ -55,6 +56,7 @@ pub use events::{
 pub use fetch::{
     MAX_BYTES_HELD_BEYOND_THE_CACHE, MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER, fetch_reset_passed_on,
 };
+use own::OwnEnd;
 use requests::{Requests, Subscribed};
 pub use routing::{
     ANNOUNCEMENT_EVERY_MS, LimitsOfASession, MAX_ANNOUNCEMENTS_AT_ONCE,
@@ -282,8 +284,9 @@ struct SessionState {
 }
 
 impl SessionState {
-    /// Requests the relay has open on this session: SUBSCRIBE and FETCH
-    /// together, which share [`MAX_OWN_REQUESTS_PER_SESSION`].
+    /// Requests the relay has open on this session that count towards
+    /// [`MAX_OWN_REQUESTS_PER_SESSION`]: SUBSCRIBE, FETCH and `TRACK_STATUS`
+    /// together; a `PUBLISH_NAMESPACE` upstream does not (`own::Counted`).
     fn own_requests(&self) -> usize {
         self.own.len() + self.own_fetches.len() + self.own_track_statuses.len()
     }
@@ -4533,24 +4536,23 @@ impl Relay {
             return;
         };
         let own = state.own.remove(&request);
-        match end {
-            TrackEnd::Done => actions.push(Action::FinishOwnRequest { session, request }),
+        let end = match (end, own) {
+            (TrackEnd::Done, _) => OwnEnd::Answered,
             // §3.3.2: the relay cancels its own request. For a malformed
             // track §2.4.2 asks for exactly that.
-            TrackEnd::TimedOut
-            | TrackEnd::Malformed { .. }
-            | TrackEnd::SourceGone
-            | TrackEnd::Unwanted => {
-                if let Some(own) = own {
-                    state.moqt.cancel(own.id);
-                }
-                actions.push(Action::CancelOwnRequest {
-                    session,
-                    request,
-                    code: reset_code,
-                });
-            }
-        }
+            (
+                TrackEnd::TimedOut
+                | TrackEnd::Malformed { .. }
+                | TrackEnd::SourceGone
+                | TrackEnd::Unwanted,
+                Some(own),
+            ) => OwnEnd::GivenUp {
+                id: own.id,
+                code: reset_code,
+            },
+            (_, None) => OwnEnd::Reset { code: reset_code },
+        };
+        self.close_own_request(session, request, end, actions);
     }
 
     /// A `REQUEST_UPDATE` set the `SUBGROUP_DELIVERY_TIMEOUT` of a

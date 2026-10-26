@@ -13,6 +13,7 @@ use xmoq_moqt::params::{ANSWER_WAIT_MS, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
+use crate::own::{Counted, OwnEnd};
 use crate::routing::OwnRequestKind;
 use crate::{
     Action, Event, OwnRequestEnd, OwnRequestKey, Refusal, Relay, RequestSlot, SessionKey, StreamKey,
@@ -217,39 +218,26 @@ impl Relay {
             .get(&publisher)
             .copied()
             .unwrap_or(0);
-        let for_one = self.requests_for_one;
-        let token = self.token_for(publisher, crate::Operation::Subscribe);
-        let own_requests_most = self.limits_of_a_session.own_requests;
-        let Some(state) = self.sessions.get_mut(&publisher) else {
-            return Err(request_error_code::DOES_NOT_EXIST);
-        };
-        // §10.4: no new request to a peer that sent GOAWAY.
-        if state.moqt.peer_going_away() {
-            return Err(request_error_code::DOES_NOT_EXIST);
-        }
-        if state.own_requests() >= own_requests_most || for_this_session >= for_one {
-            return Err(request_error_code::EXCESSIVE_LOAD);
-        }
+        let over_a_share = for_this_session >= self.requests_for_one;
         // The relay's own token alone, for the upstream relay.
-        let parameters = token.into_iter().collect();
-        let Ok((id, message)) = state.moqt.track_status(track.clone(), parameters) else {
-            return Err(request_error_code::INTERNAL_ERROR);
-        };
-        let own = OwnRequestKey(self.next_own_request);
-        self.next_own_request = self.next_own_request.saturating_add(1);
-        state
-            .own_track_statuses
-            .insert(own, OwnTrackStatus { id, subscriber });
-        actions.push(Action::OpenRequest {
-            session: publisher,
-            request: own,
-            message,
-        });
-        actions.push(Action::StartUpstreamTimer {
-            session: publisher,
-            request: own,
-        });
-        Ok(own)
+        let parameters = self
+            .token_for(publisher, crate::Operation::Subscribe)
+            .into_iter()
+            .collect();
+        self.open_own_request(
+            publisher,
+            (Counted::Yes { over_a_share }, true),
+            |moqt| {
+                moqt.track_status(track.clone(), parameters)
+                    .map_err(|_| request_error_code::INTERNAL_ERROR)
+            },
+            |state, own, id| {
+                state
+                    .own_track_statuses
+                    .insert(own, OwnTrackStatus { id, subscriber });
+            },
+            actions,
+        )
     }
 
     fn is_own_track_status(&self, session: SessionKey, own: OwnRequestKey) -> bool {
@@ -323,10 +311,7 @@ impl Relay {
                 track_properties,
             } => {
                 self.let_go_of_own_track_status(session, own, actions);
-                actions.push(Action::FinishOwnRequest {
-                    session,
-                    request: own,
-                });
+                self.close_own_request(session, own, OwnEnd::Answered, actions);
                 let Some(relayed) = self.track_statuses.0.remove(&subscriber) else {
                     return;
                 };
@@ -348,10 +333,7 @@ impl Relay {
             RequestEvent::Rejected(error) => {
                 // The session ended the request with the answer.
                 self.let_go_of_own_track_status(session, own, actions);
-                actions.push(Action::FinishOwnRequest {
-                    session,
-                    request: own,
-                });
+                self.close_own_request(session, own, OwnEnd::Answered, actions);
                 let refusal = Refusal::passed_on(&error, OwnRequestKind::Subscribe);
                 self.ask_again_or_refuse(subscriber, &refusal, actions);
             }
@@ -464,16 +446,15 @@ impl Relay {
             return;
         };
         if let Some(own_status) = state.own_track_statuses.remove(&own) {
-            state.moqt.cancel(own_status.id);
             actions.push(Action::StopUpstreamTimer {
                 session,
                 request: own,
             });
-            actions.push(Action::CancelOwnRequest {
-                session,
-                request: own,
+            let end = OwnEnd::GivenUp {
+                id: own_status.id,
                 code: stream_reset_code::CANCELLED,
-            });
+            };
+            self.close_own_request(session, own, end, actions);
         }
     }
 

@@ -353,29 +353,88 @@ fn a_publisher_that_sent_goaway_is_not_asked() {
         let mut relay = relay();
         announce(&mut relay, PUBLISHER, 0, fields);
         for session in &going {
-            for message in [
-                ControlMessage::Setup(Setup::default()),
-                ControlMessage::GoAway(xmoq_moqt::message::GoAway {
-                    new_session_uri: vec![],
-                    timeout_ms: 0,
-                    request_id: Some(1),
-                }),
-            ] {
-                assert_eq!(
-                    relay.step(Event::ControlMessage {
-                        session: *session,
-                        message,
-                    }),
-                    [],
-                    "{going:?}"
-                );
-            }
+            assert_eq!(goes_away(&mut relay, *session), [[], []], "{going:?}");
         }
         assert_eq!(
             subscribe_to(&mut relay, ALICE, 0, fields),
             expected,
             "{going:?}"
         );
+    }
+}
+
+/// `session` sends its SETUP and a GOAWAY; what the relay does on each.
+fn goes_away(relay: &mut Relay, session: SessionKey) -> [Vec<Action>; 2] {
+    [
+        ControlMessage::Setup(Setup::default()),
+        ControlMessage::GoAway(xmoq_moqt::message::GoAway {
+            new_session_uri: vec![],
+            timeout_ms: 0,
+            request_id: Some(1),
+        }),
+    ]
+    .map(|message| relay.step(Event::ControlMessage { session, message }))
+}
+
+/// A FETCH and a `TRACK_STATUS` of the relay are not sent to a publisher
+/// that sent GOAWAY either: the subscriber is refused with `DOES_NOT_EXIST`
+/// (0x10), as for a SUBSCRIBE, where the publisher's session would not
+/// open the request.
+#[test]
+fn a_fetch_or_track_status_is_not_asked_of_a_publisher_that_sent_goaway() {
+    let fields: &[&[u8]] = &[b"xmoq"];
+    let cases = [
+        (
+            "FETCH",
+            ControlMessage::Fetch(Fetch {
+                request_id: 0,
+                range: FetchRange::Standalone {
+                    full_track_name: track_in(fields),
+                    start: Location {
+                        group: 0,
+                        object: 0,
+                    },
+                    end: Location {
+                        group: 1,
+                        object: 0,
+                    },
+                },
+                parameters: vec![],
+            }),
+        ),
+        (
+            "TRACK_STATUS",
+            ControlMessage::TrackStatus(Subscribe {
+                request_id: 0,
+                full_track_name: track_in(fields),
+                parameters: vec![],
+            }),
+        ),
+    ];
+    for (name, first) in cases {
+        let mut relay = relay();
+        announce(&mut relay, PUBLISHER, 0, fields);
+        goes_away(&mut relay, PUBLISHER);
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: StreamKey(0),
+            first,
+        });
+        let opened = actions
+            .iter()
+            .any(|action| matches!(action, Action::OpenRequest { .. }));
+        let refused: Vec<u64> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::SendRequest {
+                    session: ALICE,
+                    message: ControlMessage::RequestError(error),
+                    ..
+                } => Some(error.error_code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!((opened, refused), (false, vec![0x10]), "{name}");
     }
 }
 

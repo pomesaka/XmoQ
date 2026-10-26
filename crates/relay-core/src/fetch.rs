@@ -25,6 +25,7 @@ use xmoq_moqt::{RequestFault, stream_reset_code};
 
 use crate::cache;
 use crate::events::{Event, FetchPiece, FetchPipeEnd};
+use crate::own::{Counted, OwnEnd};
 use crate::requests::{Joinable, Subscribed};
 use crate::routing::{OwnRequestKind, Refusal};
 use crate::{
@@ -1093,52 +1094,37 @@ impl Relay {
         // parameters it passes on (`upstream_parameters`), which leave the
         // subscriber's out.
         let token = self.token_for(publisher, crate::Operation::Subscribe);
-        let own_requests_most = self.limits_of_a_session.own_requests;
-        let Some(state) = self.sessions.get_mut(&publisher) else {
-            return Err(request_error_code::DOES_NOT_EXIST);
-        };
-        let for_this_session = state
-            .own_fetches
-            .values()
-            .filter(|own| own.subscriber.0 == subscriber.0)
-            .count();
-        // §10.4: no new request to a peer that sent GOAWAY, as for a
-        // SUBSCRIBE of the relay (`Relay::ask`).
-        if state.moqt.peer_going_away() {
-            return Err(request_error_code::DOES_NOT_EXIST);
-        }
         // The relay's FETCH and SUBSCRIBE requests share the publisher's
-        // session, and its patience.
-        if state.own_requests() >= own_requests_most
-            || state.own_fetches.len() >= MAX_OWN_FETCHES_PER_SESSION
-            || for_this_session >= fetches_for_one
-        {
-            return Err(request_error_code::EXCESSIVE_LOAD);
-        }
+        // session, and its patience; its FETCHes have a share of their own.
+        let over_a_share = self.sessions.get(&publisher).is_some_and(|state| {
+            let for_this_session = state
+                .own_fetches
+                .values()
+                .filter(|own| own.subscriber.0 == subscriber.0)
+                .count();
+            state.own_fetches.len() >= MAX_OWN_FETCHES_PER_SESSION
+                || for_this_session >= fetches_for_one
+        });
         let range = FetchRange::Standalone {
             full_track_name: track.clone(),
             start,
             end,
         };
         let parameters = parameters.iter().cloned().chain(token).collect();
-        let Ok((id, message)) = state.moqt.fetch(range, parameters) else {
-            // The range and the parameters passed the session's checks when
-            // they came in, or were made here.
-            return Err(request_error_code::INTERNAL_ERROR);
-        };
-        let own = OwnRequestKey(self.next_own_request);
-        self.next_own_request = self.next_own_request.saturating_add(1);
-        state.own_fetches.insert(own, OwnFetch { id, subscriber });
-        actions.push(Action::OpenRequest {
-            session: publisher,
-            request: own,
-            message,
-        });
-        actions.push(Action::StartUpstreamTimer {
-            session: publisher,
-            request: own,
-        });
-        Ok(own)
+        self.open_own_request(
+            publisher,
+            (Counted::Yes { over_a_share }, true),
+            |moqt| {
+                // The range and the parameters passed the session's checks
+                // when they came in, or were made here.
+                moqt.fetch(range, parameters)
+                    .map_err(|_| request_error_code::INTERNAL_ERROR)
+            },
+            |state, own, id| {
+                state.own_fetches.insert(own, OwnFetch { id, subscriber });
+            },
+            actions,
+        )
     }
 
     /// The publisher a FETCH was asked of refused it, went, or did not
@@ -2154,12 +2140,11 @@ impl Relay {
             return;
         };
         if let Some(own) = state.own_fetches.remove(&request) {
-            state.moqt.cancel(own.id);
-            actions.push(Action::CancelOwnRequest {
-                session,
-                request,
+            let end = OwnEnd::GivenUp {
+                id: own.id,
                 code: stream_reset_code::CANCELLED,
-            });
+            };
+            self.close_own_request(session, request, end, actions);
         }
     }
 
@@ -2242,10 +2227,7 @@ impl Relay {
             && state.own_fetches.remove(&fetch.own).is_some()
         {
             // The session let go of the request when both had come.
-            actions.push(Action::FinishOwnRequest {
-                session: fetch.publisher,
-                request: fetch.own,
-            });
+            self.close_own_request(fetch.publisher, fetch.own, OwnEnd::Answered, actions);
         }
         let served = AnswerEnd::Served;
         self.finish_fetch_request(subscriber.0, subscriber.1, fetch.request, served, actions);
@@ -2346,10 +2328,7 @@ impl Relay {
                 });
                 // The session has let go of the request.
                 state_forgets(self, session, own);
-                actions.push(Action::FinishOwnRequest {
-                    session,
-                    request: own,
-                });
+                self.close_own_request(session, own, OwnEnd::Answered, actions);
                 // §10.12.3: "If the upstream FETCH fails, the relay sends a
                 // REQUEST_ERROR and can reset the unidirectional stream."
                 let unknown = stream_reset_code::UNKNOWN_OBJECT_STATUS;
@@ -2405,11 +2384,7 @@ impl Relay {
                 stream_reset_code::UNKNOWN_OBJECT_STATUS,
             ),
         };
-        actions.push(Action::CancelOwnRequest {
-            session,
-            request: own,
-            code: cancel,
-        });
+        self.close_own_request(session, own, OwnEnd::Reset { code: cancel }, actions);
         self.fail_fetch(subscriber, &Refusal::code(refused), reset, actions);
     }
 
