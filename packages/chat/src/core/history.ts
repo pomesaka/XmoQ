@@ -45,7 +45,7 @@ export function catchUpLines(given: number = CATCH_UP_LINES): number {
 }
 
 /**
- * The first Group of the Absolute Joining FETCH (§10.12.2.2) for the newest
+ * The first Group of the Absolute Joining FETCH (§10.12.2.1) for the newest
  * `lines` lines, a line a Group, the largest Group that the SUBSCRIBE_OK
  * said (LARGEST_OBJECT) among them: that Group less `lines - 1`, and 0 where
  * there are fewer.

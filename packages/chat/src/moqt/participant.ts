@@ -353,7 +353,7 @@ export async function joinChat(
 			{
 				range: {
 					// An Absolute Joining FETCH from the Group that
-					// `historyToFetch` gives (§10.12.2.2), to the Joining
+					// `historyToFetch` gives (§10.12.2.1), to the Joining
 					// Location: why Absolute is at `historyStart`.
 					fetchType: "AbsoluteJoining",
 					joiningRequestId: subscription.requestId,
