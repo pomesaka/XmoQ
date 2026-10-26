@@ -17,13 +17,14 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
                  [--keep <n>] [--waiting <n>] [--readers <n>] [--tracks <n>]
                  [--auth-key-hex <hex>]
 
---namespace     a prefix whose broadcasts are listened to, its fields between slashes; up to 8,
-                none a prefix of another. Its transcript is the track speech of xmoq/transcript/<prefix>
+--namespace     a prefix whose broadcasts are listened to, its fields between slashes, 30 at the most;
+                up to 8, none the same as another or a prefix of it. Its transcript is the track speech of xmoq/transcript/<prefix>
 --engine        what reads the pieces: whisper.cpp with --model, or a program run for each piece (whisper)
 --engine-command      with --engine command: the program and its arguments, between spaces; the piece's
                       WAV file is its last argument, the language in XMOQ_LANGUAGE, and its stdout the words
---engine-timeout-ms   with --engine command: how long it may take for a piece, or it is killed (30000)
---engine-most-output  with --engine command: the most bytes of its stdout (65536)
+--engine-timeout-ms   with --engine command: how long it may take for a piece, or it is killed
+                      (30000; 1 to 600000)
+--engine-most-output  with --engine command: the most bytes of its stdout (65536; 1 to 1048576)
 --model         the file of a model of whisper.cpp (~/.cache/xmoq/whisper/ggml-small-q5_1.bin;
                 mise run speech-model fetches it)
 --language      a language code of whisper's, or auto (auto). A code is twice as fast as auto, and has
@@ -31,11 +32,11 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
 --voice         how a voice is told: by the model of voice activity (vad), or by loudness (vad)
 --vad-model     the file of the model of voice activity (~/.cache/xmoq/whisper/ggml-silero-v5.1.2.bin;
                 mise run speech-model -- silero-v5.1.2 fetches it)
---keep          the latest pieces of each transcript kept for FETCH (1000)
---waiting       pieces that wait to be read; one more is dropped and counted (16)
+--keep          the latest pieces of each transcript kept for FETCH (1000; 1 to 100000)
+--waiting       pieces that wait to be read; one more is dropped and counted (16; 1 to 256)
 --readers       threads that read pieces at once: of whisper, each a state of its own over the one model;
-                of command, each runs the program for a piece of its own (1)
---tracks        audio tracks listened to at once (16)
+                of command, each runs the program for a piece of its own (1; 1 to 8)
+--tracks        broadcasts listened to at once; one more is passed over (16; 1 to 100)
 --auth-key-hex  the relay's key, of which tokens are made: for the demo alone";
 
 /// The most `--namespace` flags: as many `SUBSCRIBE_NAMESPACE` requests as

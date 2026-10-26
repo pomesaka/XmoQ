@@ -49,6 +49,60 @@ const MAX_HANDSHAKES: usize = 64;
 /// read on 2026-10-24).
 const GOAWAY_TIMEOUT_MS: u64 = 10_000;
 
+/// The flags, and what each is without it. Every number is more than 0
+/// where the flag says it.
+const USAGE: &str = "\
+xmoq-relay --port <port> --cert-file <pem> --key-file <pem> [flags]
+  --congestion cubic|newreno|bbr        the congestion control of its connections (cubic)
+  --idle-timeout-ms <ms>                nothing from a peer for so long, and its connection is lost (6000)
+  --setup-timeout-ms <ms>               how long a client has for its SETUP (10000)
+  --idle-session-ms <ms>                how long a session past its SETUP may hold nothing (30000)
+  --max-sessions <n>                    the sessions it takes at once (1000)
+  --when-full <url>                     where a session that comes when it is full is sent: a GOAWAY
+                                        after its SETUP names this URL with sent-away=1 in its query,
+                                        and a session that came with that is closed; the relay there
+                                        has to have the same certificate (closed with INTERNAL_ERROR)
+  --subscription-send-bytes <n>, --subscription-send-objects <n>, --subscription-send-streams <n>
+                                        what may wait to be written to one subscription before it
+                                        ends with TOO_FAR_BEHIND (4 MiB, 4096, 1024)
+  --session-send-bytes <n>, --session-send-objects <n>, --session-send-streams <n>
+                                        what may wait to be written to one session, all its
+                                        subscriptions together, before the one with the most ends
+                                        (8 MiB, 16384, 4096)
+  --relay-send-bytes <n>                what may wait to be written to all sessions together (2 GiB)
+  --announce-at-once <n>                the PUBLISH_NAMESPACE requests a session may send at once (5)
+  --announce-every-ms <ms>              the time in which a session gets one of them back (1000)
+  --peer-requests-per-session <n>       the requests a session may have open at the relay (256)
+  --own-requests-per-session <n>        the requests the relay may have open on a session: SUBSCRIBE,
+                                        FETCH and TRACK_STATUS, not the namespaces it announces
+                                        upstream (64)
+  --namespaces-per-session <n>          the namespaces a session may have announced (64)
+  --requests-for-one-session <n>        the requests the relay has open on one publisher for one
+                                        subscriber's session (8)
+  --fetches-for-one-session <n>         how many of them are FETCH requests (4)
+  --cached-fetch-whole-ms <ms>          the least time a subscriber has for the whole of a fetch
+                                        stream the relay writes from its cache (30000)
+  --cached-fetch-least-kbps <n>         the least rate it has to take such a stream at; a larger
+                                        Group has as long as it takes at that rate (500)
+  --held-beyond-cache-bytes <n>         the bytes of Groups its cache has let go of that those fetch
+                                        streams may keep alive; a session has an eighth (256 MiB)
+  --auth-key-hex <hex>                  an experiment: the key tokens are checked with (no tokens)
+  --auth-setup on|off                   with a key, whether a SETUP is asked for a token (on)
+  --upstream <url>, --upstream-cert-sha256 <hex>
+                                        the relay above this one, asked for the tracks nobody
+                                        announced here; the two go together (none)
+  --upstream-namespace <a/b>            the namespace asked of it (every namespace)
+  --redirect-uri <uri>                  the New Session URI of the GOAWAY sent when the relay is told
+                                        to stop (empty: the URI the client used)
+  --goaway-timeout-ms <ms>              the Timeout of that GOAWAY, and the wait before the sessions
+                                        that are left are closed (10000)
+  --delivery-patience-ms <ms>           an experiment: what a subscriber gets that asked for no
+                                        delivery timeout (none)
+  --stats-every-ms <ms>                 for measuring: a STATS line for each session this often (none)
+  --log-arrivals on|off                 for measuring: an ARRIVED line on stderr for every Object (off)
+  --slow-open-ms <ms>                   a DATA_OPENED line for each subgroup stream towards a
+                                        subscriber that took this long to open; 0 for every one (10)";
+
 /// The QUIC limits that go with the limits of the relay. Provisional.
 ///
 /// Three limits act on the requests a peer opens, and this is the one place
@@ -136,32 +190,27 @@ struct Args {
     /// how long streams take to open; 0 logs every stream.
     slow_open: Option<Duration>,
     /// `--setup-timeout-ms`: [`HubConfig::setup_timeout`], how long a
-    /// client has for its SETUP; 10 seconds where it is not said.
+    /// client has for its SETUP.
     setup_timeout: Option<Duration>,
     /// `--idle-session-ms`: [`HubConfig::idle_session_timeout`], how long
-    /// a session that has sent its SETUP may hold nothing; 30 seconds
-    /// where it is not said.
+    /// a session that has sent its SETUP may hold nothing.
     idle_session: Option<Duration>,
     /// `--announce-every-ms`: [`HubConfig::announcement_every_ms`], the time
-    /// in which a session may send one `PUBLISH_NAMESPACE`; a second where
-    /// it is not said.
+    /// in which a session may send one `PUBLISH_NAMESPACE`.
     announce_every: Option<u64>,
     /// `--announce-at-once`: [`HubConfig::announcements_at_once`], how many
-    /// it may send at once; 5 where it is not said.
+    /// it may send at once.
     announce_at_once: Option<u32>,
     /// `--requests-for-one-session`, `--fetches-for-one-session`:
     /// [`HubConfig::requests_for_one_subscriber`] and
-    /// [`HubConfig::fetches_for_one_subscriber`]; 8 and 4 where it is not
-    /// said.
+    /// [`HubConfig::fetches_for_one_subscriber`].
     for_one_session: (Option<usize>, Option<usize>),
     /// `--cached-fetch-whole-ms`, `--cached-fetch-least-kbps`:
     /// [`HubConfig::cached_fetch_whole_ms`] and
-    /// [`HubConfig::cached_fetch_least_kbps`]; 30,000 and 500 where it is
-    /// not said.
+    /// [`HubConfig::cached_fetch_least_kbps`].
     cached_fetch: (Option<u64>, Option<u64>),
     /// `--held-beyond-cache-bytes`:
-    /// [`HubConfig::held_beyond_cache_bytes`]; 256 MiB where it is not
-    /// said.
+    /// [`HubConfig::held_beyond_cache_bytes`].
     held_beyond_cache: Option<usize>,
     /// `--delivery-patience-ms`: [`xmoq_moqt_io::SendLimits::delivery_patience`].
     /// An experiment: what a subscriber gets that set no
@@ -459,7 +508,13 @@ fn parse_args() -> Result<Args> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = parse_args()?;
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error:#}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
     let log = Log::stdout();
     let mut config = HubConfig {
         log: Some(log.clone()),
@@ -604,5 +659,30 @@ async fn accept_sessions(server: &WtServer, hub: &HubHandle<WtConnection>, log: 
                 Err(_) => log.print("HANDSHAKE_FAILED timed out".to_string()),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod usage {
+    use std::collections::BTreeSet;
+
+    /// Every flag the relay reads is in `USAGE`, the one place the flags
+    /// are written down.
+    #[test]
+    fn names_every_flag_the_relay_reads() {
+        let flags: BTreeSet<&str> = include_str!("main.rs")
+            .split('"')
+            .filter(|text| {
+                text.len() > 2
+                    && text.starts_with("--")
+                    && text[2..].bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            })
+            .collect();
+        for flag in &flags {
+            assert!(super::USAGE.contains(flag), "{flag} is not in USAGE");
+        }
+        assert_eq!(flags.len(), 37);
     }
 }

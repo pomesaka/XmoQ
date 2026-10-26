@@ -121,16 +121,5 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | both | `chatTextBytes=N`, `chatLinesPerSecond=N` | The limits of a line of the chat, which the page keeps to before it sends: 1 to 8,192 bytes, 1 to 1,000 lines a second | 512, 5: the gatherer's |
 | both | `chatCatchUpLines=N` | How many of the lines it missed the page fetches at the most when it subscribes or connects again: 1 to 1,000, the lines one FETCH of the gatherer gets; the page shows the newest 200 of them | 200: what the page shows |
 
-`bun demo/serve.ts`:
-
-| Flag | What it does | Without it |
-|---|---|---|
-| `--port`, `--relay-port`, `--rooms-port` | The ports of the pages, the relay and the rooms | 8080, 4443, 8787 |
-| `--auth` | Experiment: a key for this run; the relay refuses requests without a token of the rooms | No tokens |
-| `--congestion cubic\|newreno\|bbr` | The relay's congestion control | cubic |
-| `--delivery-patience-ms N` | Experiment of the relay: a Group is given up so long after its end, for viewers that asked for no timeout | Off |
-| `--relay-log FILE` | The relay's lines, to a file | Not kept |
-| `--relay-binary FILE` | Another relay than this tree's | `target/debug/xmoq-relay` |
-| `--chat-store FILE` | The gatherer's store; one gatherer holds a file alone | `demo/.chat/chat.sqlite3` |
-| `--transcribe-language CODE` | The language the transcriber reads in: a code of whisper's (`ja`, `en`), twice as fast as `auto`, with every voice read in that language (English read with `ja` came out in Japanese) | `auto`: each piece in its own language |
+`bun demo/serve.ts` (`mise run demo`): its flags, each with what it does and what it is without it, are the options of `parseArgs` at the top of `demo/serve.ts`.
 

@@ -32,22 +32,9 @@ The gatherer asks with one `SUBSCRIBE_NAMESPACE` for `xmoq/chat`, or, with `--ro
 
 ## Limits
 
-The limits of the chat (decided on 2026-10-24), which flags change:
+The flags, what each is without it and their ranges are `USAGE` in `src/args.rs`, which the gatherer prints when a flag is wrong. The limits of a line, the rate and a FETCH (`--text-bytes`, `--lines-per-second`, `--fetch-lines`) were decided on 2026-10-24; how a participant whose subscription ended is asked again (`--ask-again-times`, `--ask-again-ms`) is **provisional**. Against the own relay, which refuses a `said` nobody publishes with a Retry Interval of 1,001, the default times in a row come to about two minutes.
 
-| Flag | Default | What it bounds | The flag's range |
-|---|---|---|---|
-| `--text-bytes` | 512 | Bytes of UTF-8 in the text of one line | 1 to 8,192 |
-| `--lines-per-second` | 5 | Lines one person may say in any second; the line over it is dropped, and does not count | 1 to 1,000 |
-| `--fetch-lines` | 1,000 | Lines one FETCH gets: of a longer range, the latest | 1 to 100,000 |
-
-When a participant whose subscription ended is asked again, which flags change (**provisional**):
-
-| Flag | Default | What it sets | The flag's range |
-|---|---|---|---|
-| `--ask-again-times` | 30 | Times in a row a participant is asked again without a subscription that was established; against the own relay, which refuses a `said` nobody publishes with a Retry Interval of 1,001, about two minutes | 0 (never) to 10,000 |
-| `--ask-again-ms` | 1,000 | The pause after an end, and after a refusal that names no time or says 0 | 100 to 60,000 |
-
-`--room <room>` (repeatable, up to 8) has the gatherer take, publish and answer FETCH for those rooms alone (decided on 2026-10-24: a gatherer for each room). More than 8 are refused at the start: a session at the own relay may have 8 `SUBSCRIBE_NAMESPACE` requests (decided on 2026-10-24), and a ninth would be refused for good while the gatherer looked as if it ran.
+`--room <room>` has the gatherer take, publish and answer FETCH for those rooms alone (decided on 2026-10-24: a gatherer for each room). More than 8 are refused at the start: a session at the own relay may have 8 `SUBSCRIBE_NAMESPACE` requests (decided on 2026-10-24), and a ninth would be refused for good while the gatherer looked as if it ran.
 
 **Ten rooms of a hundred people** are reached with a gatherer for each room, each with `--room` and a store of its own: each follows 100 participants, within the requests the own relay lets one session have open (`MAX_PEER_REQUESTS` of `xmoq-moqt` unless `--peer-requests-per-session` says otherwise; the `SUBSCRIBE_NAMESPACE` and the PUBLISH among them). **Not measured.**
 

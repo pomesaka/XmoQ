@@ -8,11 +8,13 @@ xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file
 
 --store             the SQLite file of the history, this gatherer's alone; made where it is not there
 --room              a room to gather, up to 8; every room without it
---text-bytes        the most bytes of UTF-8 the text of a line may have (512)
---lines-per-second  the most lines one person may say in any second (5)
---fetch-lines       the most lines one FETCH gets (1000)
---ask-again-times   how many times in a row a participant whose subscription ended is asked again (30; 0 never)
---ask-again-ms      the pause before it is, after an end or a refusal that names no time (1000)
+--text-bytes        the most bytes of UTF-8 the text of a line may have (512; 1 to 8192)
+--lines-per-second  the most lines one person may say in any second; the line over it is dropped (5; 1 to 1000)
+--fetch-lines       the most lines one FETCH gets, the latest of a longer range (1000; 1 to 100000)
+--ask-again-times   how many times in a row a participant whose subscription ended is asked again
+                    without one that was established (30; 0 never; up to 10000)
+--ask-again-ms      the pause before it is, after an end or a refusal that names no time or 0
+                    (1000; 100 to 60000)
 --auth-key-hex      the key the relay checks tokens with; the gatherer makes its own tokens (the demo alone)";
 
 use crate::said_again::{PAUSE_MS_LEAST, PAUSE_MS_MOST, Settings, TIMES_MOST};

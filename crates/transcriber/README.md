@@ -32,22 +32,13 @@ A subscription to a broadcast's catalog or sound that ends or is refused while t
 
 ## Flags
 
-| Flag | Default | What it sets | The flag's range |
-|---|---|---|---|
-| `--namespace` | (needed) | A prefix to listen under, its fields between slashes | 1 to 8; none the same as another, a prefix of it, or under it; 30 fields at the most |
-| `--engine` | `whisper` | What reads the pieces (`Engine` of [`xmoq-speech`](../speech/README.md)): whisper.cpp, or a program run for each piece (`command`). How the sound is cut, and the track and the numbering of the words, are the same with every reader | `whisper`, `command` |
-| `--engine-command` | (needed with `--engine command`) | The program and its arguments, split at spaces (a program whose arguments have spaces is put in a script). Each piece is written as a WAV file (16 kHz, 16 bits, one channel) to a directory of the transcriber's own under the system's temporary directory, which goes when the transcriber ends (on SIGTERM and Ctrl-C too; not after SIGKILL), as does a program that runs then, and its path is the program's last argument; the language of `--language` is in `XMOQ_LANGUAGE`. Its standard output, trimmed, is the piece's words, and the file is removed after it. Only with `--engine command`, as are the two below, and `--model` is refused with it | |
-| `--engine-timeout-ms` | 30,000 | How long the program may take for a piece; it is killed then, with the processes it started (it runs in a process group of its own), and the piece is not read (`PIECE_NOT_READ`). An exit that is not 0 and output that is not UTF-8 are the same. **Provisional** | 1 to 600,000 |
-| `--engine-most-output` | 65,536 | The most bytes of the program's standard output; more is killed and not read. **Provisional** | 1 to 1,048,576 |
-| `--model` | `~/.cache/xmoq/whisper/ggml-small-q5_1.bin` | The file of the model (`large-v3-turbo-q5_0` reads with punctuation, and fewer voices at once: [`xmoq-speech`](../speech/README.md)) | |
-| `--language` | `auto` | A language code of whisper's (`ja`, `en`), or `auto`, with which whisper.cpp finds the language of each piece first (twice as slow, [`xmoq-speech`](../speech/README.md)). With a code, every voice is read in that language: an English voice read with `ja` came out in Japanese | |
-| `--voice` | `vad` | How a voice is told: by the model of voice activity, or by `loudness` (why the model: [`xmoq-speech`](../speech/README.md)) | `vad`, `loudness` |
-| `--vad-model` | `~/.cache/xmoq/whisper/ggml-silero-v5.1.2.bin` | The file of the model of voice activity. Loaded once at the start, so that a missing one stops the transcriber there, and once more for each broadcast | |
-| `--keep` | 1,000 | The latest pieces of each transcript kept for FETCH | 1 to 100,000 |
-| `--waiting` | 16 | Pieces that wait for the reader | 1 to 256 |
-| `--readers` | 1 | Threads that read pieces at once, each with a reader of `--engine` (`engine::open` of `xmoq-speech`); readers of whisper.cpp have a state of their own over the one model. With more than one, a later piece can be done before an earlier one, of the same voice as well, and is numbered first | 1 to 8 |
-| `--tracks` | 16 | Broadcasts listened to at once; one more is passed over (`BROADCAST_IGNORED`) | 1 to 100 |
-| `--auth-key-hex` | none | The relay's key, of which the transcriber makes its tokens: `sub` in `<prefix>/*` for its SETUP, its SUBSCRIBE_NAMESPACE, SUBSCRIBEs and FETCHes, and `pub` in `xmoq/transcript/<prefix>` for its PUBLISH. For the demo alone, as the gatherer's (provisional) | |
+The flags, what each is without it and their ranges are `USAGE` in `src/args.rs`, which the transcriber prints when a flag is wrong. What `USAGE` does not say:
+
+- **`--engine command`**: how the sound is cut, and the track and the numbering of the words, are the same with every reader (`Engine` of [`xmoq-speech`](../speech/README.md)). The program and its arguments are split at spaces (a program whose arguments have spaces is put in a script). Each piece is written as a WAV file (16 kHz, 16 bits, one channel) to a directory of the transcriber's own under the system's temporary directory, which goes when the transcriber ends (on SIGTERM and Ctrl-C too; not after SIGKILL), as does a program that runs then; the file is removed after the program. The words are its standard output, trimmed. A program that runs over `--engine-timeout-ms` is killed with the processes it started (it runs in a process group of its own), and the piece is not read (`PIECE_NOT_READ`); an exit that is not 0, output over `--engine-most-output` and output that is not UTF-8 are the same. Both values are **provisional**. `--model` is refused with it.
+- **The models**: `large-v3-turbo-q5_0` reads with punctuation, and fewer voices at once; a language code reads every voice in that language; why voice activity by a model ([`xmoq-speech`](../speech/README.md)). The model of voice activity is loaded once at the start, so that a missing one stops the transcriber there, and once more for each broadcast.
+- **`--readers`** more than one: a later piece can be done before an earlier one, of the same voice as well, and is numbered first.
+- **`--auth-key-hex`**: the transcriber makes `sub` in `<prefix>/*` for its SETUP, its SUBSCRIBE_NAMESPACE, SUBSCRIBEs and FETCHes, and `pub` in `xmoq/transcript/<prefix>` for its PUBLISH. For the demo alone, as the gatherer's (provisional).
+- **`--tracks`**: a broadcast over it is logged as `BROADCAST_IGNORED`.
 
 ## What it holds
 
