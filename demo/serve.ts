@@ -1,13 +1,17 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--auth] [--relay-binary FILE] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--stats-every-ms N] [--chat-store FILE] [--transcribe-language auto|ja|en|...]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--no-auth] [--relay-binary FILE] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--stats-every-ms N] [--chat-store FILE] [--transcribe-language auto|ja|en|...]
 //
-// `--auth` (an experiment; how the relay authorizes is undecided): a key
-// is made for this run and given to the relay and to the rooms. The relay
-// then refuses a request without a token of the rooms, and the pages ask
-// the room for one; `?token=no` on a page asks for none. The relay looks
-// at the token in SETUP, and closes a session without one before any
-// request.
+// Tokens are asked for unless `--no-auth` (decided on 2026-10-26; who may
+// get a token is undecided): a key is made for each run and given to the
+// relay and to the rooms. The relay refuses a request without a token of the
+// rooms, and the pages ask the room for one; `?token=no` on a page asks for
+// none. The relay looks at the token in SETUP, and closes a session without
+// one before any request. WHY by default: the relay listens on every
+// interface, and without tokens anybody who reaches the port could take the
+// camera and the microphone of `/publish` and publish in its place.
+// `--no-auth` is for debugging and experiments: no key, and the relay takes
+// every request.
 //
 // The rooms (a count, where the broadcast is, and reactions) are
 // packages/room, run locally with Miniflare. They start when the workspace
@@ -17,7 +21,7 @@
 // The gatherer of the chat (`xmoq-chat`) starts beside the relay, where it
 // is built, and keeps the lines in `--chat-store` (demo/.chat/chat.sqlite3,
 // which is not committed). The pages chat over its tracks, and have no chat
-// without it. With `--auth`, the gatherer is given the relay's key
+// without it. Unless `--no-auth`, the gatherer is given the relay's key
 // (`--auth-key-hex`) and makes its own tokens, and each page asks the room
 // for two whenever it connects for the chat (`demo/shared.ts`). WHY the key
 // for the gatherer, and not a token of the room: the room gives a token to
@@ -30,7 +34,7 @@
 // speech-model`, and `mise run speech-model -- silero-v5.1.2`). It listens
 // under the publishing page's namespace, and the watching page shows its
 // transcript as captions. Without it, or without the models, the demo runs
-// without captions and says how to have them. With `--auth` it is given the
+// without captions and says how to have them. Unless `--no-auth` it is given the
 // relay's key, as the gatherer is. The publishing page sends a tone unless
 // it is opened with `?audio=mic`; the transcriber tells that no voice is in
 // the tone, and writes nothing.
@@ -52,7 +56,9 @@ const { values: options } = parseArgs({
 	options: {
 		"relay-port": { type: "string", default: "4443" },
 		"rooms-port": { type: "string", default: "8787" },
-		auth: { type: "boolean", default: false },
+		// No key, and the relay takes every request: for debugging and
+		// experiments.
+		"no-auth": { type: "boolean", default: false },
 		// Another relay than the one of this tree, for trying one out.
 		"relay-binary": { type: "string" },
 		// The relay's congestion control: cubic (its default), newreno or bbr.
@@ -82,7 +88,7 @@ const MEETING_PREFIX = "xmoq/meet/demo";
 const relayBinary =
 	options["relay-binary"] ?? join(here, "..", "target", "debug", "xmoq-relay");
 /** The key of this run, where it is one with authorization: 32 random bytes. */
-const authKeyHex = options.auth
+const authKeyHex = !options["no-auth"]
 	? Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) =>
 			byte.toString(16).padStart(2, "0"),
 		).join("")
@@ -184,7 +190,7 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 			stdio: ["ignore", "ignore", "inherit"],
 			env: {
 				...process.env,
-				// Not set without --auth: the rooms then have no key (an empty one would stop them).
+				// Not set with --no-auth: the rooms then have no key (an empty one would stop them).
 				...(authKeyHex === undefined ? {} : { AUTH_KEY_HEX: authKeyHex }),
 				// The namespace of the demo's one broadcast, whatever the room:
 				// the room gives tokens for broadcasts in it alone.
@@ -204,8 +210,8 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 	: undefined;
 const roomsUrl =
 	rooms === undefined ? null : `http://127.0.0.1:${options["rooms-port"]}/`;
-// The gatherer of the chat, where it is built, with the relay's key under
-// `--auth`.
+// The gatherer of the chat, where it is built, with the relay's key unless
+// `--no-auth`.
 const chatBinary = join(here, "..", "target", "debug", "xmoq-chat");
 const chatStore = options["chat-store"] ?? join(here, ".chat", "chat.sqlite3");
 const chat =
@@ -411,4 +417,6 @@ if (authKeyHex !== undefined) {
 			? "auth:    the relay asks for tokens, and no rooms run to give them"
 			: "auth:    the relay asks for tokens, and the rooms give them",
 	);
+} else {
+	console.log("auth:    off (--no-auth): the relay takes every request");
 }

@@ -66,7 +66,7 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 **A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again after `DEFAULT_RECONNECT_DELAY_MS` of `@xmoq/moqt` (`keepPublishing` and `keepPlaying` of `@xmoq/media`).
 
-**With tokens** (an experiment; how the relay authorizes is undecided): `bun demo/serve.ts --auth` makes a key for the run and gives it to the relay and to the rooms. The relay then refuses a request without a token; the pages ask the room for one (`pub` to publish, `sub` to watch) and give it to their connection, which puts it into every request. The relay looks at the token in SETUP as well, and closes a session without one: `?token=no` on a page asks for none, and the page says that the relay closed the session as not authorized.
+**Tokens are asked for** (decided on 2026-10-26; who may get one is [undecided](../docs/open-questions.md)): `bun demo/serve.ts` makes a key for each run and gives it to the relay and to the rooms. The relay refuses a request without a token; the pages ask the room for one (`pub` to publish, `sub` to watch) and give it to their connection, which puts it into every request. The relay looks at the token in SETUP as well, and closes a session without one: `?token=no` on a page asks for none, and the page says that the relay closed the session as not authorized. `--no-auth` runs with no key, and the relay takes every request: for debugging and experiments.
 
 The times are compared on one machine, where the two pages have the same clock.
 
@@ -78,7 +78,7 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 |---|---|---|---|
 | both | `room=NAME` | The room | `demo` |
 | both | `via=PORT` | The relay through another port of this machine, where something stands in between (`spikes/lossy-link`) | The relay's own port |
-| both | `token=no` | Asks the room for no token, to see a relay with `--auth` refuse | A token where the rooms give one |
+| both | `token=no` | Asks the room for no token, to see the relay refuse | A token where the rooms give one |
 | both | `uni=N` | How many streams of the peer are read at once | The library's |
 | both | `timer=page`, `timer=slow` | The page's own timer, and that timer as a background tab has it | A worker's timer |
 | both | `diag=1` | More in the page's report, for looking into a run | |
