@@ -76,8 +76,9 @@ pub struct HubConfig {
     /// `max_request_streams` is not read: [`Self::stream_config`] has it
     /// follow [`Self::limits_of_a_session`].
     pub streams: StreamConfig,
-    /// Sessions served at once. One more is sent to [`Self::when_full`]
-    /// where there is one, and closed at once otherwise. **Provisional:
+    /// Sessions of clients served at once, the one with the parent relay
+    /// not counted. One more is sent to [`Self::when_full`] where there is
+    /// one, and closed at once otherwise. **Provisional:
     /// 1,000** (decided on 2026-10-25 that a full relay sends the next
     /// session to another; the number is the 500 viewers a relay is to
     /// serve, at two sessions a page).
@@ -1724,8 +1725,9 @@ impl<C: Connection> Hub<C> {
     }
 
     /// `role` is the relay's: [`Role::Client`] for its session with the
-    /// parent relay, which is not refused for [`HubConfig::max_sessions`],
-    /// since without it nobody of this relay gets the tracks it carries.
+    /// parent relay, which is neither refused for nor counted in
+    /// [`HubConfig::max_sessions`], since without it nobody of this relay
+    /// gets the tracks it carries.
     fn add_session(
         &mut self,
         session: SessionKey,
@@ -1738,8 +1740,12 @@ impl<C: Connection> Hub<C> {
             .values()
             .filter(|handle| handle.sent_away)
             .count();
-        let full = role == Role::Server
-            && self.sessions.len().saturating_sub(sending_away) >= self.config.max_sessions;
+        let served = self
+            .sessions
+            .values()
+            .filter(|handle| handle.role == Role::Server && !handle.sent_away)
+            .count();
+        let full = role == Role::Server && served >= self.config.max_sessions;
         let send_to = match &self.config.when_full {
             Some(url) if full && arrival == Arrival::First && sending_away < MAX_SENDING_AWAY => {
                 Some(sent_away_url(url))

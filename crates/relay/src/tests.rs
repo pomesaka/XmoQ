@@ -4480,6 +4480,13 @@ mod parent {
     /// An edge whose parent is `origin`: each session the edge asks for is
     /// a new connection to it, of which the edge is the client.
     fn edge_of(origin: &HubHandle<MemoryConnection>) -> HubHandle<MemoryConnection> {
+        edge_of_with(origin, HubConfig::default())
+    }
+
+    fn edge_of_with(
+        origin: &HubHandle<MemoryConnection>,
+        config: HubConfig,
+    ) -> HubHandle<MemoryConnection> {
         let origin = origin.clone();
         let connect: hub::Connect<MemoryConnection> = Arc::new(move |_| {
             let origin = origin.clone();
@@ -4493,7 +4500,7 @@ mod parent {
             namespace: TrackNamespace::new(vec![]).unwrap(),
             connect,
         };
-        hub::spawn_with_parent(HubConfig::default(), Some(parent)).0
+        hub::spawn_with_parent(config, Some(parent)).0
     }
 
     /// An edge whose parent is `first`, and `second` where a GOAWAY of
@@ -4562,6 +4569,34 @@ mod parent {
             .finish();
         assert_eq!(alice.receive_stream(track_alias).await, [0]);
         assert!(timeout(SOON, request.reader.next_event()).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_session_with_the_parent_does_not_take_a_place_of_a_subscriber() {
+        let (origin, _task) = hub::spawn(HubConfig::default());
+        let edge = edge_of_with(
+            &origin,
+            HubConfig {
+                max_sessions: 2,
+                ..HubConfig::default()
+            },
+        );
+        let mut publisher = Peer::connect(&origin, true).await;
+        let _namespace = publisher.publish_namespace().await;
+        let mut alice = Peer::connect(&edge, true).await;
+        let mut request = alice.start_subscribing().await;
+        let _upstream = publisher.accept_relay_subscribe().await;
+        let RequestEvent::SubscribeEstablished { .. } = alice.answer(&mut request).await else {
+            panic!("Alice was not accepted");
+        };
+        // Alice and the parent are two sessions of the edge; Bob is the
+        // second subscriber.
+        let bob = Peer::connect(&edge, true).await;
+        assert!(timeout(SOON, bob.connection.closed()).await.is_err());
+        let carol = Peer::connect(&edge, false).await;
+        timeout(SOON, carol.connection.closed())
+            .await
+            .expect("the third subscriber is refused");
     }
 
     #[tokio::test(start_paused = true)]
