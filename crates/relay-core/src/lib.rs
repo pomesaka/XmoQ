@@ -273,7 +273,7 @@ struct SessionState {
     /// SUBSCRIBE requests the relay opened on this session.
     own: HashMap<OwnRequestKey, OwnRequest>,
     /// FETCH requests the relay opened on this session.
-    own_fetches: HashMap<OwnRequestKey, fetch::OwnFetch>,
+    own_fetches: HashMap<OwnRequestKey, fetch::AskedFetch>,
     /// `TRACK_STATUS` requests the relay opened on this session.
     own_track_statuses: HashMap<OwnRequestKey, track_status::OwnTrackStatus>,
     /// `PUBLISH_NAMESPACE` requests the session may still send now
