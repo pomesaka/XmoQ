@@ -1,6 +1,15 @@
-//! Whether, and after how long, the gatherer asks again for the `said` of a
-//! participant whose subscription ended or was refused while its namespace
-//! stays announced.
+//! Whether, and after how long, the gatherer asks again for a track of a
+//! participant (`said`, `reacted`) whose subscription ended or was refused
+//! while its namespace stays announced: [`Settings::keeping`] and
+//! [`Settings::tries`], by which `kept::decide` of `xmoq-subscriber` decides,
+//! as it does for a track a viewer keeps (`fixtures/kept-track/`).
+//!
+//! WHY the decision of `xmoq-subscriber` alone, and not its `KeptTrack`: a
+//! `KeptTrack` is read by its caller's loop, one future for each track,
+//! which suits the few tracks of a viewer; the gatherer follows up to
+//! [`crate::gather::MAX_PEOPLE`] participants with two tracks each, whose
+//! streams are read by a task each that reports to one queue (`OwnRequests`
+//! of `xmoq-publisher`).
 //!
 //! The pauses are the rule of every client (`xmoq-again`), with the pause
 //! after an end set by `--ask-again-ms`. WHY asked again after a refusal
@@ -8,9 +17,11 @@
 //! terminal viewer and the watching page do: the namespace that is still
 //! announced says the participant is there, and a relay that gives every
 //! refusal a 0 (moqtail's 0.15.0 does) would otherwise have the gatherer
-//! leave its participants for good. WHY NOT after a track that is
-//! malformed: §2.4.2 has the subscriber cancel it, and the same track would
-//! be malformed again.
+//! leave its participants for good. WHY a `reacted` that does not exist is
+//! not asked again (decided on 2026-10-26): a participant need not publish
+//! it, and a viewer or an agent that publishes none would be asked
+//! `--ask-again-times` times each, as many requests as the room has people,
+//! for nothing.
 //!
 //! WHY a number of times, after which a participant is asked again only
 //! when its NAMESPACE comes again: the gatherer does not see a
@@ -24,7 +35,9 @@
 //! after the new subscription alone are taken, as after a session that
 //! connected anew.
 
-use xmoq_again::{AskAgain, Pauses};
+use xmoq_again::Pauses;
+use xmoq_chat_tracks::names::PersonTrack;
+use xmoq_subscriber::kept::{Keeping, Tries};
 
 /// How many times in a row a participant is asked again by default,
 /// without a subscription that was established between. **Provisional**:
@@ -65,150 +78,74 @@ impl Default for Settings {
     }
 }
 
-/// How a subscription to a track of a participant came to an end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubscriptionEnd {
-    /// It ended (`PUBLISH_DONE`, its stream), was not answered in time, or
-    /// could not be sent.
-    Ended,
-    /// It was refused, with the wait its Retry Interval names
-    /// (`RequestError::retry_wait_ms`; `None` for none).
-    Refused(Option<u64>),
-    /// It was cancelled for a malformed track.
-    Malformed,
-    /// It was refused with `DOES_NOT_EXIST`, for a track a participant need
-    /// not publish (`reacted`, decided on 2026-10-26). WHY not asked again:
-    /// a viewer or an agent that publishes none would be asked
-    /// `--ask-again-times` times each, as many requests as the room has
-    /// people, for nothing.
-    NotPublished,
-}
-
-/// When one participant is asked again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SaidAgain {
-    rule: AskAgain,
-    asked: u32,
-    times: u32,
-}
-
-impl SaidAgain {
-    /// A participant that is followed anew, or whose NAMESPACE came again.
+impl Settings {
+    /// How `track` of a participant is kept.
     #[must_use]
-    pub fn new(settings: Settings) -> Self {
-        Self {
-            rule: AskAgain::new(Pauses {
-                after_end_ms: settings.pause_ms,
-                ..Pauses::default()
-            }),
-            asked: 0,
-            times: settings.times,
+    pub fn keeping(self, track: PersonTrack) -> Keeping {
+        Keeping {
+            again_after_failure: true,
+            times: Some(self.times),
+            optional: track == PersonTrack::Reacted,
         }
     }
 
-    /// Its subscription was established.
-    pub fn subscribed(&mut self) {
-        self.rule.subscribed();
-        self.asked = 0;
-    }
-
-    /// Its subscription is over: the pause in milliseconds before it is
-    /// asked again, or `None` where it is not, until its NAMESPACE comes
-    /// again.
-    pub fn over(&mut self, over: SubscriptionEnd) -> Option<u64> {
-        if self.asked >= self.times {
-            return None;
-        }
-        let pause = match over {
-            SubscriptionEnd::Ended => self.rule.after_end(),
-            SubscriptionEnd::Refused(named) => self.rule.after_refusal(named),
-            SubscriptionEnd::Malformed | SubscriptionEnd::NotPublished => return None,
-        };
-        self.asked += 1;
-        Some(pause)
+    /// What is kept of a track of a participant that is followed anew, or
+    /// whose NAMESPACE came again.
+    #[must_use]
+    pub fn tries(self) -> Tries {
+        Tries::new(Pauses {
+            after_end_ms: self.pause_ms,
+            ..Pauses::default()
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use xmoq_subscriber::kept::{Becomes, Happened, decide};
+
     use super::*;
 
-    /// What happens to the subscription, in order, with the pause expected.
-    enum Step {
-        Over(SubscriptionEnd, Option<u64>),
-        Subscribed,
-    }
-
     #[test]
-    fn a_participant_is_asked_again_by_the_rule_up_to_the_times_set() {
-        use Step::Subscribed;
-        let ended = |pause| Step::Over(SubscriptionEnd::Ended, pause);
-        let refused = |named, pause| Step::Over(SubscriptionEnd::Refused(named), pause);
-        let settings = |times, pause_ms| Settings { times, pause_ms };
-        let cases: [(&str, Settings, Vec<Step>); 9] = [
-            ("an end", Settings::default(), vec![ended(Some(1000))]),
+    fn the_flags_set_the_times_and_the_pause_after_an_end_and_reacted_alone_is_optional() {
+        let refused = |error_code, named_ms| Happened::Refused {
+            error_code,
+            named_ms,
+        };
+        let not_there = xmoq_moqt::message::request_error_code::DOES_NOT_EXIST;
+        let cases = [
             (
-                "a refusal that says do not retry: after the pause of an end",
+                "said, by default",
                 Settings::default(),
-                vec![refused(None, Some(1000))],
+                PersonTrack::Said,
+                vec![Happened::Ended, refused(not_there, Some(1001))],
+                vec![Becomes::Again(1000), Becomes::Again(1001)],
             ),
             (
-                "the own relay's DOES_NOT_EXIST",
+                "reacted that does not exist",
                 Settings::default(),
-                vec![refused(Some(1000), Some(1000))],
+                PersonTrack::Reacted,
+                vec![refused(not_there, Some(1001))],
+                vec![Becomes::GivenUp],
             ),
             (
-                "a malformed track is not asked again",
-                Settings::default(),
-                vec![Step::Over(SubscriptionEnd::Malformed, None)],
-            ),
-            (
-                "a track a participant need not publish, which is not there, is not asked again",
-                Settings::default(),
-                vec![Step::Over(SubscriptionEnd::NotPublished, None)],
-            ),
-            (
-                "two times, then not again",
-                settings(2, 1000),
-                vec![ended(Some(1000)), ended(Some(1000)), ended(None)],
-            ),
-            (
-                "an established subscription counts again from none",
-                settings(2, 1000),
-                vec![
-                    ended(Some(1000)),
-                    ended(Some(1000)),
-                    Subscribed,
-                    ended(Some(1000)),
-                    ended(Some(1000)),
-                    ended(None),
-                ],
-            ),
-            (
-                "no times: never asked again",
-                settings(0, 1000),
-                vec![ended(None)],
-            ),
-            (
-                "another pause after an end and after a refusal without a time, not after one that names a time",
-                settings(30, 250),
-                vec![
-                    ended(Some(250)),
-                    refused(None, Some(250)),
-                    refused(Some(0), Some(100)),
-                ],
+                "--ask-again-ms 250 --ask-again-times 1",
+                Settings {
+                    times: 1,
+                    pause_ms: 250,
+                },
+                PersonTrack::Said,
+                vec![Happened::NotSent, Happened::Ended],
+                vec![Becomes::Again(250), Becomes::GivenUp],
             ),
         ];
-        for (name, settings, steps) in cases {
-            let mut again = SaidAgain::new(settings);
-            for (index, step) in steps.into_iter().enumerate() {
-                match step {
-                    Step::Over(over, pause) => {
-                        assert_eq!(again.over(over), pause, "{name}: step {index}");
-                    }
-                    Subscribed => again.subscribed(),
-                }
-            }
+        for (case, settings, track, happened, expected) in cases {
+            let mut tries = settings.tries();
+            let got: Vec<Becomes> = happened
+                .into_iter()
+                .map(|happened| decide(happened, settings.keeping(track), &mut tries))
+                .collect();
+            assert_eq!(got, expected, "{case}");
         }
     }
 }
