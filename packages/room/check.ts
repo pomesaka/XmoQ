@@ -1,12 +1,18 @@
 // Checks the room Worker that run.ts serves: the broadcast of a room, a
-// token, the count, that it carries no chat, and a meeting of 49.
+// token, the count, that it carries no chat, and the seats of a meeting
+// of 49.
 //
 // Usage: node check.ts [http://127.0.0.1:8787], with the AUTH_KEY_HEX,
 // RELAY_URL, RELAY_CERT_SHA256_HEX, TRANSCRIPT_PREFIX and
 // MEETING_TRANSCRIPT_PREFIX run.ts was given, if any.
 
-// A module, for the `await`s at its top level.
-export {};
+import {
+	leaveSeat,
+	meetingRoom,
+	renewSeat,
+	type Seat,
+	takeSeat,
+} from "@xmoq/room-client";
 
 const origin = process.argv[2] ?? "http://127.0.0.1:8787";
 const room = `check-${Date.now()}`;
@@ -222,133 +228,99 @@ a.socket.close();
 late.socket.close();
 await wait(200);
 
-// 5. A meeting: 49 who joined get the two namespaces, the 50th is told it
-// is full, and gets in when one of them has gone.
+// 5. A meeting, over HTTP with `@xmoq/room-client` (so that what the room
+// answers is what the client reads): 49 get a seat with its two namespaces,
+// the 50th is told it is full, and gets in when one leaves; refusals say why;
+// a seat is renewed with its lease, and not with another's.
 {
-	const meeting = `${room}-meeting`;
-	type Client = ReturnType<typeof join>;
-	const answers = (client: Client): unknown[] =>
-		ofType(client.got, "meeting", "meeting-full", "meeting-refused");
-	const ask = (client: Client, participant: unknown): void =>
-		client.socket.send(JSON.stringify({ type: "join-meeting", participant }));
-	const in49 = Array.from({ length: 49 }, () => join(meeting));
-	await Promise.all(in49.map((client) => client.opened));
-	in49.forEach((client, index) => {
-		ask(client, `p${index}`);
-	});
-	await wait(1000);
-	const [p0, p1, , p3] = in49;
-	if (p0 === undefined || p1 === undefined || p3 === undefined)
-		throw new Error("49 were not made");
-	const first = answers(p0)[0];
-	say("the first one's answer:", {
-		...(typeof first === "object" ? first : {}),
-		publish: {
-			namespace: at(first, "publish", "namespace"),
-			token: masked(at(first, "publish", "token")),
-		},
-		subscribe: {
-			namespace: at(first, "subscribe", "namespace"),
-			token: masked(at(first, "subscribe", "token")),
-		},
-	});
+	const meeting = { rooms: `${origin}/`, name: `${room}-meeting` };
+	const described = await meetingRoom(meeting);
+	say("the meeting:", described);
 	if (
-		in49.some((client, index) => {
-			const got = answers(client);
-			return (
-				got.length !== 1 ||
-				at(got[0], "type") !== "meeting" ||
-				at(got[0], "participant") !== `p${index}`
-			);
-		})
+		!same(described.namespace, ["xmoq", "meet", meeting.name]) ||
+		described.most !== 49
 	) {
-		fail("not each of 49 got its meeting");
+		fail("the meeting does not say its namespace and its 49 seats");
 	}
-	if (!same(at(first, "publish", "namespace"), ["xmoq", "meet", meeting, "p0"]))
-		fail("the publish namespace is not xmoq/meet/<room>/<id>");
-	if (
-		!same(at(first, "subscribe", "namespace"), ["xmoq", "meet", meeting, "*"])
-	)
-		fail("the subscribe namespace is not xmoq/meet/<room>/*");
-	const tokens = process.env.AUTH_KEY_HEX
-		? /^v1\|xmoq\/meet\/[^|]+\/p0\|pub\|\d+\|[0-9a-f]{64}$/.test(
-				textOf(at(first, "publish", "token")),
-			) &&
-			/^v1\|xmoq\/meet\/[^|]+\/\*\|sub\|\d+\|[0-9a-f]{64}$/.test(
-				textOf(at(first, "subscribe", "token")),
-			)
-		: at(first, "publish", "token") === null &&
-			at(first, "subscribe", "token") === null;
-	if (!tokens) fail("the meeting's tokens are not as the key says");
-
-	const fiftieth = join(meeting);
-	await fiftieth.opened;
-	ask(fiftieth, "p49");
-	await wait(300);
-	say("the 50th one's answer:", answers(fiftieth));
-	if (!same(answers(fiftieth), [{ type: "meeting-full", most: 49 }]))
+	const relayTold =
+		process.env.RELAY_URL && process.env.RELAY_CERT_SHA256_HEX
+			? {
+					url: process.env.RELAY_URL,
+					certSha256Hex: process.env.RELAY_CERT_SHA256_HEX,
+				}
+			: null;
+	if (!same(described.relay, relayTold)) {
+		fail("the meeting does not name the relay it was told");
+	}
+	const seats: Seat[] = [];
+	for (let index = 0; index < 49; index++) {
+		const answer = await takeSeat(meeting, `p${index}`);
+		if (answer.type === "seat") seats.push(answer.seat);
+	}
+	const [first] = seats;
+	if (seats.length !== 49 || first === undefined) {
+		fail("not each of 49 got its seat");
+	} else {
+		say("the first one's seat:", {
+			...first,
+			publishToken: masked(first.publishToken),
+			subscribeToken: masked(first.subscribeToken),
+			lease: "<lease>",
+		});
+		const tokens = process.env.AUTH_KEY_HEX
+			? /^v1\|xmoq\/meet\/[^|]+\/p0\|pub\|\d+\|[0-9a-f]{64}$/.test(
+					textOf(first.publishToken),
+				) &&
+				/^v1\|xmoq\/meet\/[^|]+\/\*\|sub\|\d+\|[0-9a-f]{64}$/.test(
+					textOf(first.subscribeToken),
+				)
+			: first.publishToken === null && first.subscribeToken === null;
+		if (!tokens) fail("the meeting's tokens are not as the key says");
+		if (first.renewMs !== 20_000 || first.expiresAt - Date.now() > 60_000) {
+			fail("a seat does not hold 60 s and is not renewed every 20 s");
+		}
+	}
+	const fiftieth = await takeSeat(meeting, "p49");
+	say("the 50th one's answer:", fiftieth);
+	if (!same(fiftieth, { type: "full", most: 49 })) {
 		fail("the 50th was not told the meeting is full");
-
-	// Refused, with why: what cannot be an id, and another id on a socket
-	// that joined.
-	const refused: [Client, unknown][] = [
-		[fiftieth, ""],
-		[fiftieth, "x".repeat(65)],
-		[fiftieth, "a/b"],
-		[fiftieth, "*"],
-		[fiftieth, 7],
-	];
-	for (const [client, participant] of refused) ask(client, participant);
-	ask(p1, "another");
-	await wait(500);
-	const whys = (client: Client): unknown[] =>
-		answers(client)
-			.filter((answer) => at(answer, "type") === "meeting-refused")
-			.map((answer) => at(answer, "why"));
-	if (
-		!same(whys(fiftieth), Array(5).fill("not-a-participant")) ||
-		!same(whys(p1), ["another-participant"])
-	)
-		fail("one of those to be refused was not refused, or not for its reason");
-
-	// One that joined, asking again while it is full: its meeting again.
-	ask(p3, "p3");
-	await wait(300);
-	if (
-		at(answers(p3).at(-1), "type") !== "meeting" ||
-		answers(p3).length !== 2
-	) {
-		fail("one in the meeting was not answered again while it was full");
 	}
-
-	// One goes: the 50th gets in, and its id with it.
-	p0.socket.close();
-	await wait(500);
-	// With room for it, an id another open socket has is still refused.
-	ask(fiftieth, "p2");
-	await wait(300);
-	if (!same(whys(fiftieth).at(-1), "taken"))
-		fail("an id another socket has was not refused as taken");
-	ask(fiftieth, "p49");
-	await wait(300);
-	const last = answers(fiftieth).at(-1);
-	say("the 50th one's answer after one went:", at(last, "type"));
-	if (at(last, "type") !== "meeting" || at(last, "participant") !== "p49")
-		fail("the 50th did not get in after one went");
-	for (const client of [...in49, fiftieth]) client.socket.close();
-
-	// A room whose name has a `/` makes no namespace of a meeting.
-	const slashed = join("a/b");
-	await slashed.opened;
-	ask(slashed, "p0");
-	await wait(300);
+	const refusals: [unknown, unknown][] = [];
+	for (const id of ["", "x".repeat(65), "a/b", "*", "p1"]) {
+		refusals.push([id, await takeSeat(meeting, id)]);
+	}
+	say("the refusals:", refusals);
 	if (
-		!same(answers(slashed), [
-			{ type: "meeting-refused", why: "not-a-meeting-room" },
-		])
-	)
-		fail("a room whose name has a / did not refuse join-meeting");
-	slashed.socket.close();
-	await wait(200);
+		!same(
+			refusals.map(([, answer]) => at(answer, "why")),
+			[
+				"not-a-participant",
+				"not-a-participant",
+				"not-a-participant",
+				"not-a-participant",
+				"taken",
+			],
+		)
+	) {
+		fail("one of those to be refused was not refused, or not for its reason");
+	}
+	if (first !== undefined) {
+		const renewed = await renewSeat(meeting, first);
+		if (renewed.type !== "seat" || renewed.seat.expiresAt <= first.expiresAt) {
+			fail("a seat was not renewed with its lease");
+		}
+		const stolen = await renewSeat(meeting, { ...first, lease: "another" });
+		if (stolen.type !== "gone") fail("a seat was renewed with another's lease");
+		// One goes: the 50th gets in.
+		await leaveSeat(meeting, first);
+		const after = await takeSeat(meeting, "p49");
+		say("the 50th one's answer after one left:", after.type);
+		if (after.type !== "seat") fail("the 50th did not get in after one left");
+	}
+	// A room whose name has a `*` makes no namespace of a meeting.
+	const starred = await takeSeat({ ...meeting, name: "a*b" }, "p0");
+	if (!same(starred, { type: "refused", why: "not-a-meeting-room" })) {
+		fail("a room whose name has a * did not refuse a seat");
+	}
 }
 console.log(process.exitCode ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED");

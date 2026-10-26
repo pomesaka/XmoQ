@@ -71,32 +71,34 @@
 // there: who may publish in a room, and who may watch, is what would be
 // decided here, and is not.
 
-// **A meeting** (decided on 2026-10-25): a participant sends
-// {type: "join-meeting", participant: "<id>"}, the id a random one the page
-// makes; within MOST_IN_A_MEETING the room answers {type: "meeting",
-// participant, publish: {namespace: ["xmoq", "meet", <room>, <id>], token},
-// subscribe: {namespace: ["xmoq", "meet", <room>, "*"], token}}, token null
-// without a key, and beyond it {type: "meeting-full", most}. Those counted
-// are the sockets that joined, until they close; the same socket asking
-// again with its id is answered again, with new tokens, full or not, since
-// it is counted already. Refused with {type: "meeting-refused", why}
-// (`SeatRefusal`): an id that is empty, longer than 64, or has a `/` or a
-// `*`; another id on a socket that joined; an id another open socket has; a
-// room whose name has a `/` or a `*`.
-// WHY here and not at the relay: the room hands out the tokens, and one it
-// does not give is a participant the relay never sees; the relay knows
-// namespaces and sessions, not meetings, and would have to be told which
-// prefix is one and how many it takes. WHY the sockets and not the
-// namespaces the relay announces: a token outlives the socket for its 600 s,
-// so a participant that left the room may stay at the relay that long; the
-// room counts who it would give a token to now.
+// **A meeting** (decided on 2026-10-25; over HTTP since 2026-10-26) is a
+// room of its own, `MeetingRoom`, under `/meetings/<name>`: GET for its
+// relay, the prefix of its participants' namespaces, the prefix of its
+// transcript and how many seats it has (MOST_IN_A_MEETING), POST
+// `tokens` for a token in its chat or its transcript, and the seats: POST
+// `seats` with {participant} gives a seat, {participant, publish: {namespace:
+// ["xmoq", "meet", <name>, <id>], token}, subscribe: {namespace: ["xmoq",
+// "meet", <name>, "*"], token}, lease, expiresAt, renewMs}, token null
+// without a key; beyond MOST_IN_A_MEETING 409 {full: {most}}, and 400, 404
+// or 409 {refused: {why}} (`SeatRefusal`). POST `seats/<id>/renew` with
+// {lease} renews it (404 {gone: true} where it ran out), DELETE
+// `seats/<id>` with {lease} frees it. The forms are
+// `fixtures/room-api/README.md`; why a seat holds by its lease, at
+// `seatFor`. WHY the room counts and not the relay: the room hands out the
+// tokens, and one it does not give is a participant the relay never sees;
+// the relay knows namespaces and sessions, not meetings, and would have to
+// be told which prefix is one and how many it takes. Who is in the meeting
+// is not the room's to say: the participants find each other by
+// SUBSCRIBE_NAMESPACE at the relay.
 
 import {
 	broadcastNamespaces,
+	type HeldSeat,
+	holdsSeat,
 	MOST_IN_A_MEETING,
-	participantId,
 	relayOf,
 	seatFor,
+	seatTimesOf,
 	tokenForNamespace,
 	transcriptPrefix,
 } from "./core/rules.ts";
@@ -105,6 +107,7 @@ import { keyOfSetting, type Role, TOKEN_SECONDS, tokenText } from "./token.ts";
 /** The settings of the Worker (`run.ts` has what each is). */
 interface Env {
 	ROOMS: DurableObjectNamespace;
+	MEETINGS: DurableObjectNamespace;
 	AUTH_KEY_HEX?: string;
 	BROADCAST_NAMESPACES?: string;
 	REACTION_BATCH_MS?: string;
@@ -112,6 +115,8 @@ interface Env {
 	RELAY_CERT_SHA256_HEX?: string;
 	TRANSCRIPT_PREFIX?: string;
 	MEETING_TRANSCRIPT_PREFIX?: string;
+	MEETING_SEAT_MS?: string;
+	MEETING_RENEW_MS?: string;
 }
 
 /** Where a publisher said its broadcast is, and since when. */
@@ -126,8 +131,6 @@ interface Broadcast {
 interface Attachment {
 	/** The room's name: an object woken for a message is not told the URL its socket came by. */
 	room: string;
-	/** The participant it joined the meeting as. */
-	meeting?: string;
 	broadcast?: Broadcast;
 }
 
@@ -139,7 +142,7 @@ const attachmentOf = (socket: WebSocket): Attachment => {
 // The pages of the demo are served from another origin.
 const CORS = {
 	"access-control-allow-origin": "*",
-	"access-control-allow-methods": "GET, PUT, DELETE, OPTIONS",
+	"access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
 	"access-control-allow-headers": "content-type",
 };
 const json = (value: unknown, status = 200): Response =>
@@ -152,13 +155,17 @@ export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		if (request.method === "OPTIONS")
 			return new Response(null, { headers: CORS });
-		const match = /^\/rooms\/([^/]{1,64})(\/.*)?$/.exec(
+		const match = /^\/(rooms|meetings)\/([^/]{1,64})(\/.*)?$/.exec(
 			new URL(request.url).pathname,
 		);
-		const name = match?.[1];
-		if (name === undefined) return json({ error: "no such path" }, 404);
+		const kind = match?.[1];
+		const name = match?.[2];
+		if (kind === undefined || name === undefined) {
+			return json({ error: "no such path" }, 404);
+		}
 		// One Durable Object for a room name, wherever the request comes in.
-		const room = env.ROOMS.get(env.ROOMS.idFromName(decodeURIComponent(name)));
+		const rooms = kind === "meetings" ? env.MEETINGS : env.ROOMS;
+		const room = rooms.get(rooms.idFromName(decodeURIComponent(name)));
 		return room.fetch(request);
 	},
 };
@@ -314,13 +321,6 @@ export class Room {
 			);
 			return;
 		}
-		if (said.type === "join-meeting") {
-			await this.joinMeeting(
-				socket,
-				"participant" in said ? said.participant : undefined,
-			);
-			return;
-		}
 		if (
 			said.type === "reaction" &&
 			"emoji" in said &&
@@ -359,52 +359,6 @@ export class Room {
 		}
 	}
 
-	/** Answers join-meeting from `socket` for the participant `id` (`seatFor`). */
-	async joinMeeting(socket: WebSocket, id: unknown): Promise<void> {
-		const attachment = attachmentOf(socket);
-		const others = this.ctx
-			.getWebSockets()
-			.filter((each) => each !== socket)
-			.map((each) => attachmentOf(each).meeting);
-		const answer = seatFor(id, attachment.room, attachment.meeting, others);
-		switch (answer.type) {
-			case "refused":
-				socket.send(
-					JSON.stringify({ type: "meeting-refused", why: answer.why }),
-				);
-				return;
-			case "full":
-				socket.send(
-					JSON.stringify({ type: "meeting-full", most: MOST_IN_A_MEETING }),
-				);
-				return;
-			case "seat": {
-				// WHY before the tokens are made: making one waits, and another
-				// join-meeting can be read meanwhile; it has to count this one.
-				if (answer.counted && participantId(id)) {
-					socket.serializeAttachment({
-						...attachment,
-						meeting: id,
-					} satisfies Attachment);
-				}
-				socket.send(
-					JSON.stringify({
-						type: "meeting",
-						participant: id,
-						publish: {
-							namespace: answer.publish,
-							token: await this.token("pub", answer.publish),
-						},
-						subscribe: {
-							namespace: answer.subscribe,
-							token: await this.token("sub", answer.subscribe),
-						},
-					}),
-				);
-			}
-		}
-	}
-
 	webSocketClose(socket: WebSocket): void {
 		socket.close();
 		// The socket that closes is still among them here.
@@ -435,5 +389,193 @@ export class Room {
 				// It has gone; its close is on its way.
 			}
 		}
+	}
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The body of a request, read as JSON; undefined for none, or for one that is no JSON. */
+async function bodyOf(request: Request): Promise<unknown> {
+	try {
+		return await request.json();
+	} catch {
+		return undefined;
+	}
+}
+
+/** A new lease: 16 random bytes in hex, which nobody can guess. */
+const newLease = (): string =>
+	Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+		byte.toString(16).padStart(2, "0"),
+	).join("");
+
+/** The text of a token for the role in the namespace, or null without a key. */
+async function tokenOf(
+	env: Env,
+	role: Role,
+	namespace: readonly string[],
+): Promise<string | null> {
+	const key = keyOfSetting(env.AUTH_KEY_HEX);
+	if (key === undefined) return null;
+	return tokenText(
+		key,
+		namespace,
+		role,
+		Math.floor(Date.now() / 1000) + TOKEN_SECONDS,
+	);
+}
+
+/** The status of each refusal of a seat. */
+const REFUSAL_STATUS = {
+	"not-a-participant": 400,
+	"not-a-meeting-room": 404,
+	taken: 409,
+} as const;
+
+/** The key of a seat in the storage of the object. */
+const SEAT_KEY = "seat:";
+
+/**
+ * The room of a meeting, asked over HTTP (the forms at the top of this
+ * file). WHY the seats in the object's storage and not in its memory: an
+ * object is put to sleep between requests that are seconds apart, its
+ * memory with it, and a seat holds for a minute across renewals 20 s
+ * apart (in Miniflare, every renewal of the meeting's pages was answered
+ * `gone` while the seats were in its memory). A write for every seat and every renewal is the price.
+ */
+export class MeetingRoom {
+	private readonly ctx: DurableObjectState;
+	private readonly env: Env;
+
+	constructor(ctx: DurableObjectState, env: Env) {
+		this.ctx = ctx;
+		this.env = env;
+	}
+
+	async fetch(request: Request): Promise<Response> {
+		const url = new URL(request.url);
+		const [name = "", ...rest] = url.pathname
+			.split("/")
+			.slice(2)
+			.map(decodeURIComponent);
+		const now = Date.now();
+		const seats = new Map<string, HeldSeat>();
+		const runOut: string[] = [];
+		for (const [key, seat] of await this.ctx.storage.list<HeldSeat>({
+			prefix: SEAT_KEY,
+		})) {
+			if (seat.expiresAt > now) seats.set(key.slice(SEAT_KEY.length), seat);
+			else runOut.push(key);
+		}
+		if (runOut.length > 0) await this.ctx.storage.delete(runOut);
+		const transcript = transcriptPrefix(
+			this.env.MEETING_TRANSCRIPT_PREFIX,
+			name,
+		);
+		const route = `${request.method} ${rest.length === 0 ? "" : rest[0]}${rest.length === 3 ? `/${rest[2]}` : ""}`;
+		if (route === "GET " && rest.length === 0) {
+			const relay = relayOf(this.env.RELAY_URL, this.env.RELAY_CERT_SHA256_HEX);
+			return json({
+				relay:
+					relay === null
+						? null
+						: { url: relay.relayUrl, certSha256Hex: relay.certSha256Hex },
+				namespace: ["xmoq", "meet", name],
+				transcript,
+				most: MOST_IN_A_MEETING,
+			});
+		}
+		const body = await bodyOf(request);
+		if (route === "POST tokens" && rest.length === 1) {
+			if (
+				!isObject(body) ||
+				(body.role !== "pub" && body.role !== "sub") ||
+				!Array.isArray(body.namespace)
+			) {
+				return json({ error: "a role and a namespace are expected" }, 400);
+			}
+			const namespace = tokenForNamespace(body.role, body.namespace, {
+				room: name,
+				broadcasts: [],
+				transcripts: transcript === null ? [] : [transcript],
+			});
+			return json({
+				token:
+					namespace === undefined
+						? null
+						: await tokenOf(this.env, body.role, namespace),
+			});
+		}
+		const times = seatTimesOf(
+			this.env.MEETING_SEAT_MS,
+			this.env.MEETING_RENEW_MS,
+		);
+		if (route === "POST seats" && rest.length === 1) {
+			const id = isObject(body) ? body.participant : undefined;
+			const answer = seatFor(id, name, seats, now);
+			if (answer.type === "refused") {
+				return json(
+					{ refused: { why: answer.why } },
+					REFUSAL_STATUS[answer.why],
+				);
+			}
+			if (answer.type === "full") {
+				return json({ full: { most: MOST_IN_A_MEETING } }, 409);
+			}
+			const seat = { lease: newLease(), expiresAt: now + times.seatMs };
+			// WHY before the tokens are made: making one waits, and another
+			// ask for a seat can be read meanwhile; it has to count this one.
+			await this.ctx.storage.put(`${SEAT_KEY}${answer.publish[3] ?? ""}`, seat);
+			return this.seatAnswer(
+				answer.publish,
+				answer.subscribe,
+				seat,
+				times.renewMs,
+			);
+		}
+		const id = rest[1] ?? "";
+		const lease = isObject(body) ? body.lease : undefined;
+		if (route === "POST seats/renew" && rest.length === 3) {
+			if (!holdsSeat(id, lease, seats, now)) return json({ gone: true }, 404);
+			const seat = { lease: String(lease), expiresAt: now + times.seatMs };
+			await this.ctx.storage.put(`${SEAT_KEY}${id}`, seat);
+			return this.seatAnswer(
+				["xmoq", "meet", name, id],
+				["xmoq", "meet", name, "*"],
+				seat,
+				times.renewMs,
+			);
+		}
+		if (route === "DELETE seats" && rest.length === 2) {
+			if (holdsSeat(id, lease, seats, now)) {
+				await this.ctx.storage.delete(`${SEAT_KEY}${id}`);
+			}
+			// WHY 204 also for a seat that is gone: leaving is done either way.
+			return new Response(null, { status: 204, headers: CORS });
+		}
+		return json({ error: "no such path" }, 404);
+	}
+
+	private async seatAnswer(
+		publish: string[],
+		subscribe: string[],
+		seat: HeldSeat,
+		renewMs: number,
+	): Promise<Response> {
+		return json({
+			participant: publish[3],
+			publish: {
+				namespace: publish,
+				token: await tokenOf(this.env, "pub", publish),
+			},
+			subscribe: {
+				namespace: subscribe,
+				token: await tokenOf(this.env, "sub", subscribe),
+			},
+			lease: seat.lease,
+			expiresAt: seat.expiresAt,
+			renewMs,
+		});
 	}
 }
