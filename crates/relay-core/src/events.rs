@@ -289,12 +289,12 @@ pub enum Event {
     /// keep up. The relay ends one subscription, by `over`.
     SendQueueFull {
         /// The stream whose Object, or whose opening, went over the limit;
-        /// for [`Over::Relay`], the one whose Object was queued last, which
+        /// for [`SendLimit::Relay`], the one whose Object was queued last, which
         /// plays no part in the choice.
         out_stream: OutStreamKey,
         /// Which limit.
-        over: Over,
-        /// What streams hold, by the measure of that limit ([`Over`]). The
+        limit: SendLimit,
+        /// What streams hold, by the measure of that limit ([`SendLimit`]). The
         /// relay sums them by subscription; a stream it no longer knows is
         /// passed over.
         held: Vec<(OutStreamKey, usize)>,
@@ -414,7 +414,7 @@ pub enum Event {
 /// Which limit of what waits to be written was reached
 /// ([`Event::SendQueueFull`]), and what the I/O side gives with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Over {
+pub enum SendLimit {
     /// That of the subscription of the stream. Nothing is given: that
     /// subscription ends.
     Subscription,

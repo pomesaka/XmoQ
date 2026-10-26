@@ -22,7 +22,7 @@ mod subgroups;
 mod track_status;
 
 use super::{
-    Action, Event, OutStreamKey, Over, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role,
+    Action, Event, OutStreamKey, OwnRequestEnd, OwnRequestKey, Relay, RequestEnd, Role, SendLimit,
     SessionKey, StreamEnd, StreamKey,
 };
 
@@ -955,7 +955,7 @@ fn a_subscriber_that_falls_behind_loses_its_subscription_alone() {
     assert_eq!(
         relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(0),
-            over: Over::Subscription,
+            limit: SendLimit::Subscription,
             held: vec![],
         }),
         expected
@@ -965,7 +965,7 @@ fn a_subscriber_that_falls_behind_loses_its_subscription_alone() {
     assert_eq!(
         relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(2),
-            over: Over::Subscription,
+            limit: SendLimit::Subscription,
             held: vec![],
         }),
         []
@@ -1002,7 +1002,7 @@ fn alice_with_a_sound_and_a_video() -> Relay {
 
 /// (case, the stream that went over, the limit, what each stream holds by
 /// its measure, what the relay does)
-type FullQueueCase = (&'static str, u64, Over, Vec<(u64, usize)>, Vec<Action>);
+type FullQueueCase = (&'static str, u64, SendLimit, Vec<(u64, usize)>, Vec<Action>);
 
 #[test]
 fn the_subscription_that_carries_the_most_is_the_one_that_falls_behind() {
@@ -1028,7 +1028,7 @@ fn the_subscription_that_carries_the_most_is_the_one_that_falls_behind() {
             "the sound goes over a limit of its own subscription: the sound \
              ends, whatever the video carries",
             0,
-            Over::Subscription,
+            SendLimit::Subscription,
             vec![],
             ended(StreamKey(0), 0),
         ),
@@ -1036,7 +1036,7 @@ fn the_subscription_that_carries_the_most_is_the_one_that_falls_behind() {
             "the sound goes over, the video carries more: the video ends, and \
              the sound's stream that went over is reset",
             0,
-            Over::Session,
+            SendLimit::Session,
             vec![(0, 2_000), (1, 900_000)],
             [
                 vec![Action::ResetDataStream {
@@ -1050,14 +1050,14 @@ fn the_subscription_that_carries_the_most_is_the_one_that_falls_behind() {
         (
             "the video goes over and carries more: the video ends",
             1,
-            Over::Session,
+            SendLimit::Session,
             vec![(0, 2_000), (1, 900_000)],
             ended(StreamKey(2), 1),
         ),
         (
             "the video goes over, the sound carries more: the sound ends",
             1,
-            Over::Session,
+            SendLimit::Session,
             vec![(0, 900_000), (1, 2_000)],
             [
                 vec![Action::ResetDataStream {
@@ -1071,12 +1071,12 @@ fn the_subscription_that_carries_the_most_is_the_one_that_falls_behind() {
         (
             "the two carry the same: the one that went over ends",
             0,
-            Over::Session,
+            SendLimit::Session,
             vec![(0, 5_000), (1, 5_000)],
             ended(StreamKey(0), 0),
         ),
     ];
-    for (name, full, over, held, expected) in cases {
+    for (name, full, limit, held, expected) in cases {
         let mut relay = alice_with_a_sound_and_a_video();
         let held = held
             .into_iter()
@@ -1084,7 +1084,7 @@ fn the_subscription_that_carries_the_most_is_the_one_that_falls_behind() {
             .collect();
         let actions = relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(full),
-            over,
+            limit,
             held,
         });
         assert_eq!(actions, expected, "{name}");
@@ -1130,7 +1130,7 @@ fn over_the_relay_s_limit_the_subscription_with_the_most_waiting_of_any_session_
         data_stream_opened(&mut relay, 7);
         let actions = relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(last),
-            over: Over::Relay,
+            limit: SendLimit::Relay,
             held: vec![(OutStreamKey(0), alice), (OutStreamKey(1), bob)],
         });
         assert_eq!(
@@ -1180,7 +1180,7 @@ fn over_the_relay_s_limit_what_waits_is_summed_by_subscription() {
             .collect();
         let actions = relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(1),
-            over: Over::Relay,
+            limit: SendLimit::Relay,
             held,
         });
         let done_on: Vec<StreamKey> = actions
@@ -1604,7 +1604,7 @@ fn events_for_what_the_relay_let_go_are_ignored() {
         },
         Event::SendQueueFull {
             out_stream: OutStreamKey(9),
-            over: Over::Subscription,
+            limit: SendLimit::Subscription,
             held: vec![],
         },
         Event::DrainTimeout {
@@ -1819,7 +1819,7 @@ fn a_stream_that_may_never_have_been_opened_makes_the_count_unknown() {
     assert_eq!(
         relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(0),
-            over: Over::Subscription,
+            limit: SendLimit::Subscription,
             held: vec![],
         }),
         expected
@@ -1853,7 +1853,7 @@ fn a_finished_stream_that_is_not_written_out_is_reset_with_its_subscription() {
     assert_eq!(
         relay.step(Event::SendQueueFull {
             out_stream: OutStreamKey(3),
-            over: Over::Subscription,
+            limit: SendLimit::Subscription,
             held: vec![],
         }),
         expected

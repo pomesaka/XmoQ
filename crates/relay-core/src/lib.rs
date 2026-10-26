@@ -50,8 +50,8 @@ use std::sync::Arc;
 
 pub use cache::CachedObject;
 pub use events::{
-    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, OutStreamKey, Over, OwnRequestEnd,
-    OwnRequestKey, RequestEnd, SessionKey, StreamEnd, StreamKey,
+    Action, Event, FetchPiece, FetchPipeEnd, GoingAway, OutStreamKey, OwnRequestEnd, OwnRequestKey,
+    RequestEnd, SendLimit, SessionKey, StreamEnd, StreamKey,
 };
 pub use fetch::{
     MAX_BYTES_HELD_BEYOND_THE_CACHE, MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER, fetch_reset_passed_on,
@@ -2193,9 +2193,9 @@ impl Relay {
             }
             Event::SendQueueFull {
                 out_stream,
-                over,
+                limit,
                 held,
-            } => self.on_send_queue_full(out_stream, over, &held, actions),
+            } => self.on_send_queue_full(out_stream, limit, &held, actions),
             other => return Some(other),
         }
         None
@@ -2207,15 +2207,15 @@ impl Relay {
         }
     }
 
-    /// What waits to be written for `out_stream` is over the limit `over`,
-    /// and `held` is what each stream holds by its measure ([`Over`]). One
+    /// What waits to be written for `out_stream` is over `limit`,
+    /// and `held` is what each stream holds by its measure ([`SendLimit`]). One
     /// subscription ends:
     ///
-    /// - [`Over::Subscription`]: that of `out_stream`.
-    /// - [`Over::Session`]: of the subscriber's session, the one whose
+    /// - [`SendLimit::Subscription`]: that of `out_stream`.
+    /// - [`SendLimit::Session`]: of the subscriber's session, the one whose
     ///   streams carried the most bytes; that of `out_stream` where none
     ///   carried more.
-    /// - [`Over::Relay`]: of any session, the one whose streams have the
+    /// - [`SendLimit::Relay`]: of any session, the one whose streams have the
     ///   most bytes waiting; the first in `held` where two have as much.
     ///   `out_stream` plays no part: it may be gone already, ended by a
     ///   limit of the session that the same Object reached first.
@@ -2245,7 +2245,7 @@ impl Relay {
     fn on_send_queue_full(
         &mut self,
         out_stream: OutStreamKey,
-        over: Over,
+        limit: SendLimit,
         held: &[(OutStreamKey, usize)],
         actions: &mut Vec<Action>,
     ) {
@@ -2253,12 +2253,12 @@ impl Relay {
             .out_streams
             .get(&out_stream)
             .map(|out| (out.session, out.track.clone()));
-        let ended = match over {
-            Over::Relay => self.most_held(held, |_| true).map(|(key, _)| key),
-            Over::Subscription => own,
+        let ended = match limit {
+            SendLimit::Relay => self.most_held(held, |_| true).map(|(key, _)| key),
+            SendLimit::Subscription => own,
             // The subscription of `out_stream` where none of the session
             // carried more.
-            Over::Session => own.map(|own| {
+            SendLimit::Session => own.map(|own| {
                 let session = own.0;
                 match self.most_held(held, |of| of == session) {
                     Some((key, bytes)) if bytes > self.held_by(held, &own) => key,
@@ -2269,7 +2269,7 @@ impl Relay {
         let Some(ended) = ended else {
             return;
         };
-        let own_stream_has_a_hole = over == Over::Session
+        let own_stream_has_a_hole = limit == SendLimit::Session
             && self
                 .out_streams
                 .get(&out_stream)
