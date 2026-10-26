@@ -53,7 +53,7 @@ const SAID_OPEN_WAIT: Duration = Duration::from_secs(2);
 
 /// What the loop is to do with what came. How a line is shown is the
 /// program's: the terminal and the agent's file show it differently.
-pub enum Out {
+pub enum ChatOutcome {
     /// A line of the room, each once, in the order of its number.
     Line(Line),
     /// Lines that were not fetched, told before the lines after them.
@@ -62,7 +62,7 @@ pub enum Out {
     Note(String),
 }
 
-impl Out {
+impl ChatOutcome {
     fn of(out: follow::Out<Line>) -> Self {
         match out {
             follow::Out::Item(line) => Self::Line(line),
@@ -215,13 +215,13 @@ impl ChatTracks {
         &mut self,
         session: &mut Session,
         came: Came,
-    ) -> Result<Vec<Out>, RequestFault> {
+    ) -> Result<Vec<ChatOutcome>, RequestFault> {
         Ok(self
             .lines
             .on(session, came)
             .await?
             .into_iter()
-            .map(Out::of)
+            .map(ChatOutcome::of)
             .collect())
     }
 
@@ -234,9 +234,9 @@ impl ChatTracks {
     /// The session ended `request` for a malformed track
     /// (`Session::cancel_malformed`): what the loop is to do, where it is
     /// of `lines` ([`Follower::malformed`]); `None` where it is not.
-    pub fn malformed(&mut self, request: RequestId) -> Option<Vec<Out>> {
+    pub fn malformed(&mut self, request: RequestId) -> Option<Vec<ChatOutcome>> {
         let outs = self.lines.malformed(request)?;
-        Some(outs.into_iter().map(Out::of).collect())
+        Some(outs.into_iter().map(ChatOutcome::of).collect())
     }
 
     /// An Object of `lines`, the Group `number`: the line to show, if it is

@@ -29,7 +29,7 @@ use crate::frames::{Job, Pictures};
 use crate::video::Video;
 
 /// What the meeting has to be told of, from the loop of the session.
-pub enum Came {
+pub enum MeetingInput {
     /// What came on the stream of the `SUBSCRIBE_NAMESPACE`.
     Watching(Result<RequestStreamEvent, RequestReadError>),
     /// The time to ask for the namespaces (again) has come.
@@ -49,13 +49,13 @@ pub enum Came {
 /// session the relay tells of everybody there again, and a meeting made
 /// anew would write each as joined once more, and never as left one who
 /// went meanwhile (`xmoq_viewer::meeting`, as `presence`).
-pub struct Kept {
+pub struct KeptMeeting {
     meeting: Meeting,
     /// What the meeting's clock counts from.
     began: tokio::time::Instant,
 }
 
-impl Kept {
+impl KeptMeeting {
     /// The meeting of `--meeting`; `None` without the flag.
     #[must_use]
     pub fn of(args: &xmoq_agent::args::Args) -> Option<Self> {
@@ -140,7 +140,7 @@ fn fields(namespace: &TrackNamespace) -> Option<Vec<String>> {
 impl InMeeting {
     /// The meeting of `--meeting` on a new session, which asks for its
     /// namespaces; `None` without the flag. Who is in it is the reader's
-    /// ([`Kept`]).
+    /// ([`KeptMeeting`]).
     ///
     /// # Errors
     ///
@@ -226,7 +226,7 @@ impl InMeeting {
     }
 
     /// What comes next.
-    pub async fn next(&mut self) -> Came {
+    pub async fn next(&mut self) -> MeetingInput {
         let Self {
             watching,
             kept,
@@ -236,11 +236,11 @@ impl InMeeting {
             ..
         } = self;
         tokio::select! {
-            event = on(watching.as_mut().map(|watching| watching.reader.next_event())) => Came::Watching(event),
-            () = on(kept.again_at().map(|at| tokio::time::sleep_until(at.into()))) => Came::WatchNow,
-            () = on(settle_at.map(tokio::time::sleep_until)) => Came::Settled,
-            () = on(linger_at.map(tokio::time::sleep_until)) => Came::Linger,
-            came = on(video.as_mut().map(Video::next)) => Came::Video(came),
+            event = on(watching.as_mut().map(|watching| watching.reader.next_event())) => MeetingInput::Watching(event),
+            () = on(kept.again_at().map(|at| tokio::time::sleep_until(at.into()))) => MeetingInput::WatchNow,
+            () = on(settle_at.map(tokio::time::sleep_until)) => MeetingInput::Settled,
+            () = on(linger_at.map(tokio::time::sleep_until)) => MeetingInput::Linger,
+            came = on(video.as_mut().map(Video::next)) => MeetingInput::Video(came),
         }
     }
 
@@ -254,12 +254,12 @@ impl InMeeting {
         &mut self,
         session: &mut Session,
         reader: &mut Reader,
-        came: Came,
+        came: MeetingInput,
     ) -> Result<Option<Ended>, RequestFault> {
         match came {
-            Came::Watching(event) => return Ok(self.on_watching(session, reader, event)),
-            Came::WatchNow => self.watch(session, reader).await,
-            Came::Settled => {
+            MeetingInput::Watching(event) => return Ok(self.on_watching(session, reader, event)),
+            MeetingInput::WatchNow => self.watch(session, reader).await,
+            MeetingInput::Settled => {
                 self.settle_at = None;
                 let changes = reader
                     .meeting
@@ -268,7 +268,7 @@ impl InMeeting {
                     .unwrap_or_default();
                 self.told(session, reader, changes);
             }
-            Came::Linger => {
+            MeetingInput::Linger => {
                 self.linger_at = None;
                 let over = reader.meeting.as_mut().and_then(|kept| {
                     let now_ms = kept.now_ms();
@@ -279,7 +279,7 @@ impl InMeeting {
                     self.let_go_of_video(session);
                 }
             }
-            Came::Video(came) => {
+            MeetingInput::Video(came) => {
                 if let Some(video) = self.video.as_mut()
                     && let Some(why) = video.on(session, came)?
                 {

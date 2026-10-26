@@ -158,7 +158,7 @@ pub fn room_address(address: &str) -> Result<RoomAddress, Invalid> {
 
 /// What a request asks a room for, which says how its answer is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Asked {
+pub enum RoomRequestKind {
     /// `GET /broadcasts/<name>` or `GET /meetings/<name>`.
     Room(RoomKind),
     /// `POST .../tokens`.
@@ -186,7 +186,7 @@ pub enum Method {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     /// What it asks for.
-    pub asked: Asked,
+    pub asked: RoomRequestKind,
     /// Its method.
     pub method: Method,
     /// Its path, relative to [`RoomAddress::base`].
@@ -227,7 +227,7 @@ impl RoomAddress {
     #[must_use]
     pub fn ask_for_the_room(&self) -> Request {
         Request {
-            asked: Asked::Room(self.kind),
+            asked: RoomRequestKind::Room(self.kind),
             method: Method::Get,
             path: self.path(),
             body: None,
@@ -239,7 +239,7 @@ impl RoomAddress {
     pub fn ask_for_a_token(&self, role: Role, namespace: &[String]) -> Request {
         let role = role.text();
         Request {
-            asked: Asked::Token,
+            asked: RoomRequestKind::Token,
             method: Method::Post,
             path: format!("{}/tokens", self.path()),
             body: Some(json!({"role": role, "namespace": namespace}).to_string()),
@@ -251,7 +251,7 @@ impl RoomAddress {
     #[must_use]
     pub fn ask_for_a_seat(&self, participant: &str) -> Request {
         Request {
-            asked: Asked::Seat,
+            asked: RoomRequestKind::Seat,
             method: Method::Post,
             path: format!("meetings/{}/seats", self.name),
             body: Some(json!({"participant": participant}).to_string()),
@@ -262,7 +262,7 @@ impl RoomAddress {
     #[must_use]
     pub fn renew_a_seat(&self, participant: &str, lease: &str) -> Request {
         Request {
-            asked: Asked::Renewal,
+            asked: RoomRequestKind::Renewal,
             method: Method::Post,
             path: format!("{}/renew", self.seat_path(participant)),
             body: Some(json!({"lease": lease}).to_string()),
@@ -273,7 +273,7 @@ impl RoomAddress {
     #[must_use]
     pub fn leave_a_seat(&self, participant: &str, lease: &str) -> Request {
         Request {
-            asked: Asked::Leaving,
+            asked: RoomRequestKind::Leaving,
             method: Method::Delete,
             path: self.seat_path(participant),
             body: Some(json!({"lease": lease}).to_string()),
@@ -363,16 +363,16 @@ pub enum NoSeat {
 
 /// What a room answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answer {
-    /// To [`Asked::Room`].
+pub enum RoomAnswer {
+    /// To [`RoomRequestKind::Room`].
     Room(Room),
-    /// To [`Asked::Token`]: the token, or none where the room makes none.
+    /// To [`RoomRequestKind::Token`]: the token, or none where the room makes none.
     Token(Option<String>),
-    /// To [`Asked::Seat`] and [`Asked::Renewal`].
+    /// To [`RoomRequestKind::Seat`] and [`RoomRequestKind::Renewal`].
     Seat(TakenSeat),
-    /// To [`Asked::Seat`] and [`Asked::Renewal`].
+    /// To [`RoomRequestKind::Seat`] and [`RoomRequestKind::Renewal`].
     NoSeat(NoSeat),
-    /// To [`Asked::Leaving`]: the seat is free.
+    /// To [`RoomRequestKind::Leaving`]: the seat is free.
     Left,
 }
 
@@ -486,16 +486,16 @@ fn gone_of(body: &Map<String, Value>) -> Option<NoSeat> {
 /// is not the one of that status: a field missing or of another type, a
 /// relay that is not reached by `https://` or whose hash is not 64 hex
 /// digits, or a namespace with no fields or an empty one.
-pub fn read_answer(asked: Asked, status: u16, body: &str) -> Result<Answer, Invalid> {
+pub fn read_answer(asked: RoomRequestKind, status: u16, body: &str) -> Result<RoomAnswer, Invalid> {
     let malformed = || {
         Invalid(format!(
             "the room answered {asked:?} with {status} and a body that is not the one of it: {}",
             clean(body, LINE_LIMIT)
         ))
     };
-    if asked == Asked::Leaving {
+    if asked == RoomRequestKind::Leaving {
         return if status == 204 {
-            Ok(Answer::Left)
+            Ok(RoomAnswer::Left)
         } else {
             Err(malformed())
         };
@@ -503,22 +503,24 @@ pub fn read_answer(asked: Asked, status: u16, body: &str) -> Result<Answer, Inva
     let value: Value = serde_json::from_str(body).map_err(|_| malformed())?;
     let body = value.as_object().ok_or_else(malformed)?;
     let answer = match (asked, status) {
-        (Asked::Room(RoomKind::Broadcast), 200) => {
-            broadcast_room_of(body).map(|room| Answer::Room(Room::Broadcast(room)))
+        (RoomRequestKind::Room(RoomKind::Broadcast), 200) => {
+            broadcast_room_of(body).map(|room| RoomAnswer::Room(Room::Broadcast(room)))
         }
-        (Asked::Room(RoomKind::Meeting), 200) => {
-            meeting_room_of(body).map(|room| Answer::Room(Room::Meeting(room)))
+        (RoomRequestKind::Room(RoomKind::Meeting), 200) => {
+            meeting_room_of(body).map(|room| RoomAnswer::Room(Room::Meeting(room)))
         }
-        (Asked::Token, 200) => body
+        (RoomRequestKind::Token, 200) => body
             .get("token")
             .and_then(|token| nullable(token, text_of).ok())
-            .map(Answer::Token),
-        (Asked::Seat | Asked::Renewal, 200) => taken_seat_of(body).map(Answer::Seat),
-        (Asked::Seat, 409) => full_of(body)
+            .map(RoomAnswer::Token),
+        (RoomRequestKind::Seat | RoomRequestKind::Renewal, 200) => {
+            taken_seat_of(body).map(RoomAnswer::Seat)
+        }
+        (RoomRequestKind::Seat, 409) => full_of(body)
             .or_else(|| refused_of(body))
-            .map(Answer::NoSeat),
-        (Asked::Seat, 400 | 404) => refused_of(body).map(Answer::NoSeat),
-        (Asked::Renewal, 404) => gone_of(body).map(Answer::NoSeat),
+            .map(RoomAnswer::NoSeat),
+        (RoomRequestKind::Seat, 400 | 404) => refused_of(body).map(RoomAnswer::NoSeat),
+        (RoomRequestKind::Renewal, 404) => gone_of(body).map(RoomAnswer::NoSeat),
         _ => None,
     };
     answer.ok_or_else(malformed)
@@ -701,7 +703,7 @@ mod tests {
     }
 
     /// An answer in the form of the fifth column of `answers.tsv`.
-    fn form_of(answer: &Result<Answer, Invalid>) -> String {
+    fn form_of(answer: &Result<RoomAnswer, Invalid>) -> String {
         let or_dash = |text: Option<&str>| text.unwrap_or("-").to_string();
         let relay_of = |relay: &Option<Relay>| {
             format!(
@@ -717,20 +719,20 @@ mod tests {
         };
         match answer {
             Err(_) => "malformed".to_string(),
-            Ok(Answer::Room(Room::Broadcast(room))) => format!(
+            Ok(RoomAnswer::Room(Room::Broadcast(room))) => format!(
                 "broadcast {} namespace={} transcript={}",
                 relay_of(&room.relay),
                 room.namespace.join("/"),
                 prefix_of(&room.transcript)
             ),
-            Ok(Answer::Room(Room::Meeting(room))) => format!(
+            Ok(RoomAnswer::Room(Room::Meeting(room))) => format!(
                 "meeting {} namespace={} transcript={} most={}",
                 relay_of(&room.relay),
                 room.namespace.join("/"),
                 prefix_of(&room.transcript),
                 room.most
             ),
-            Ok(Answer::Seat(seat)) => format!(
+            Ok(RoomAnswer::Seat(seat)) => format!(
                 "seat participant={} pub={} sub={} lease={} expires={} renew={}",
                 seat.participant,
                 or_dash(seat.publish_token.as_deref()),
@@ -739,8 +741,8 @@ mod tests {
                 seat.expires_at_ms,
                 seat.renew_ms
             ),
-            Ok(Answer::NoSeat(NoSeat::Full { most })) => format!("full {most}"),
-            Ok(Answer::NoSeat(NoSeat::Refused(why))) => format!(
+            Ok(RoomAnswer::NoSeat(NoSeat::Full { most })) => format!("full {most}"),
+            Ok(RoomAnswer::NoSeat(NoSeat::Refused(why))) => format!(
                 "refused {}",
                 match why {
                     Refusal::Taken => "taken",
@@ -748,9 +750,9 @@ mod tests {
                     Refusal::NotAMeetingRoom => "not-a-meeting-room",
                 }
             ),
-            Ok(Answer::NoSeat(NoSeat::Gone)) => "gone".to_string(),
-            Ok(Answer::Left) => "left".to_string(),
-            Ok(Answer::Token(token)) => format!("token {}", or_dash(token.as_deref())),
+            Ok(RoomAnswer::NoSeat(NoSeat::Gone)) => "gone".to_string(),
+            Ok(RoomAnswer::Left) => "left".to_string(),
+            Ok(RoomAnswer::Token(token)) => format!("token {}", or_dash(token.as_deref())),
         }
     }
 
@@ -862,20 +864,24 @@ mod tests {
         // (what was asked; the status; the body)
         let cases = [
             (
-                Asked::Room(RoomKind::Broadcast),
+                RoomRequestKind::Room(RoomKind::Broadcast),
                 404,
                 r#"{"error":"no such path"}"#,
             ),
-            (Asked::Token, 400, r#"{"token":null}"#),
-            (Asked::Seat, 201, seat),
-            (Asked::Seat, 400, r#"{"full":{"most":49}}"#),
-            (Asked::Renewal, 409, r#"{"refused":{"why":"taken"}}"#),
-            (Asked::Renewal, 404, r#"{"gone":false}"#),
-            (Asked::Leaving, 200, ""),
-            (Asked::Leaving, 404, r#"{"error":"no such path"}"#),
+            (RoomRequestKind::Token, 400, r#"{"token":null}"#),
+            (RoomRequestKind::Seat, 201, seat),
+            (RoomRequestKind::Seat, 400, r#"{"full":{"most":49}}"#),
+            (
+                RoomRequestKind::Renewal,
+                409,
+                r#"{"refused":{"why":"taken"}}"#,
+            ),
+            (RoomRequestKind::Renewal, 404, r#"{"gone":false}"#),
+            (RoomRequestKind::Leaving, 200, ""),
+            (RoomRequestKind::Leaving, 404, r#"{"error":"no such path"}"#),
             // A body that is no object.
-            (Asked::Token, 200, "[]"),
-            (Asked::Token, 200, ""),
+            (RoomRequestKind::Token, 200, "[]"),
+            (RoomRequestKind::Token, 200, ""),
         ];
         for (asked, status, body) in cases {
             assert!(
@@ -908,7 +914,7 @@ mod tests {
         for (relay, read) in cases {
             let body = format!(r#"{{"relay":{relay},"namespace":["a"],"transcript":null}}"#);
             assert_eq!(
-                read_answer(Asked::Room(RoomKind::Broadcast), 200, &body).is_ok(),
+                read_answer(RoomRequestKind::Room(RoomKind::Broadcast), 200, &body).is_ok(),
                 read,
                 "{relay}"
             );
@@ -930,7 +936,7 @@ mod tests {
                 r#"{{"participant":"{participant}","publish":{{"namespace":["xmoq","meet","blue","a1"],"token":null}},"subscribe":{{"namespace":["xmoq","meet","blue","*"],"token":null}},"lease":"0f","expiresAt":1,"renewMs":1}}"#
             );
             assert_eq!(
-                read_answer(Asked::Seat, 200, &body).is_ok(),
+                read_answer(RoomRequestKind::Seat, 200, &body).is_ok(),
                 read,
                 "{participant}"
             );

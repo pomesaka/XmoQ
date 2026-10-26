@@ -2,7 +2,7 @@
 
 /// What the viewer is asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Asked {
+pub enum KeyCommand {
     /// End.
     Quit,
     /// Send this line to the chat.
@@ -30,18 +30,18 @@ pub struct Keys {
 
 impl Keys {
     /// Takes one byte, and says what it asks for, if anything.
-    pub fn press(&mut self, byte: u8) -> Option<Asked> {
+    pub fn press(&mut self, byte: u8) -> Option<KeyCommand> {
         // Ctrl-C ends whatever is being typed: a terminal out of line mode
         // sends it as a byte, and nothing else would end the viewer then.
         if byte == 0x03 {
-            return Some(Asked::Quit);
+            return Some(KeyCommand::Quit);
         }
         let Some(line) = &mut self.typing else {
             return match byte {
-                b'q' => Some(Asked::Quit),
-                b'+' | b'=' => Some(Asked::Louder),
-                b'-' => Some(Asked::Quieter),
-                b'm' => Some(Asked::Mute),
+                b'q' => Some(KeyCommand::Quit),
+                b'+' | b'=' => Some(KeyCommand::Louder),
+                b'-' => Some(KeyCommand::Quieter),
+                b'm' => Some(KeyCommand::Mute),
                 b't' | b'\r' | b'\n' => {
                     self.typing = Some(Vec::new());
                     None
@@ -53,7 +53,7 @@ impl Keys {
             b'\r' | b'\n' => {
                 let text = String::from_utf8_lossy(line).trim().to_string();
                 self.typing = None;
-                (!text.is_empty()).then_some(Asked::Say(text))
+                (!text.is_empty()).then_some(KeyCommand::Say(text))
             }
             0x1b => {
                 self.typing = None;
@@ -90,7 +90,7 @@ impl Keys {
 mod tests {
     use super::*;
 
-    fn pressed(bytes: &[u8]) -> (Vec<Asked>, Option<String>) {
+    fn pressed(bytes: &[u8]) -> (Vec<KeyCommand>, Option<String>) {
         let mut keys = Keys::default();
         let asked = bytes.iter().filter_map(|byte| keys.press(*byte)).collect();
         (asked, keys.typing())
@@ -98,14 +98,19 @@ mod tests {
 
     #[test]
     fn keys_ask_for_what_they_stand_for() {
-        let say = |text: &str| Asked::Say(text.to_string());
+        let say = |text: &str| KeyCommand::Say(text.to_string());
         // (the bytes; what was asked for, in order; the line still being typed)
-        let cases: Vec<(&[u8], Vec<Asked>, Option<&str>)> = vec![
-            (b"q", vec![Asked::Quit], None),
-            (b"\x03", vec![Asked::Quit], None),
+        let cases: Vec<(&[u8], Vec<KeyCommand>, Option<&str>)> = vec![
+            (b"q", vec![KeyCommand::Quit], None),
+            (b"\x03", vec![KeyCommand::Quit], None),
             (
                 b"+=-m",
-                vec![Asked::Louder, Asked::Louder, Asked::Quieter, Asked::Mute],
+                vec![
+                    KeyCommand::Louder,
+                    KeyCommand::Louder,
+                    KeyCommand::Quieter,
+                    KeyCommand::Mute,
+                ],
                 None,
             ),
             // Keys that stand for nothing.
@@ -121,12 +126,12 @@ mod tests {
             (b"ta\x7f\x7f\x7f", vec![], Some("")),
             (b"tabc\x1b", vec![], None),
             // Esc gives the line up, and the next keys are keys again.
-            (b"tabc\x1bq", vec![Asked::Quit], None),
+            (b"tabc\x1bq", vec![KeyCommand::Quit], None),
             // A line of nothing but blanks is not sent.
             (b"t   \r", vec![], None),
             (b"t  a b  \r", vec![say("a b")], None),
             // Ctrl-C ends, also in the middle of a line.
-            (b"tab\x03", vec![Asked::Quit], Some("ab")),
+            (b"tab\x03", vec![KeyCommand::Quit], Some("ab")),
             // Control characters do not get into a line.
             (b"ta\x01\x09b", vec![], Some("ab")),
         ];
