@@ -29,7 +29,7 @@ use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, GoAway, ReasonPhrase, RequestError, RequestOk,
-    publish_done_status, request_error_code,
+    publish_done_status, request_error_code, retry_interval,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
@@ -2825,6 +2825,7 @@ impl Client<'_> {
         } else {
             Err(request_error_code::EXCESSIVE_LOAD)
         };
+        let answer = answer.and_then(|answer| self.answers.admit(answer));
         match answer {
             Ok(answer) => Ok((answer, group_order)),
             Err(code) => {
@@ -2925,9 +2926,12 @@ impl Client<'_> {
             },
             None => refusal_code(serves, &peer_request),
         };
+        // EXCESSIVE_LOAD with a Retry Interval: room comes back once other
+        // answers are written.
+        let retry = retry_interval::made_up(error_code);
         let response = self
             .session
-            .reject(request, error_code, 0, ReasonPhrase::default())?;
+            .reject(request, error_code, retry, ReasonPhrase::default())?;
         self.answer_later(send, response, label);
         // The session keeps a request that was rejected until its
         // stream is gone: what still arrives on it is given to the

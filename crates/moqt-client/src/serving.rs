@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder};
-use xmoq_moqt::message::ControlMessage;
+use xmoq_moqt::message::{ControlMessage, request_error_code};
 use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::session::PeerRequestId;
 use xmoq_moqt::stream_reset_code;
@@ -25,8 +25,8 @@ use xmoq_moqt_io::{
     Connection, PeerRequestClose, SendStream, Trace, WriteError, open_fetch_stream, send_message,
 };
 
-use crate::report;
-use xmoq_track_serving::fetch::Piece;
+use crate::{published, report};
+use xmoq_track_serving::fetch::{Held, Piece, payload_bytes};
 
 /// FETCH requests of the peer that are answered at once; one more is
 /// refused with `EXCESSIVE_LOAD`. As many as `@xmoq/moqt` answers.
@@ -38,6 +38,14 @@ use xmoq_track_serving::fetch::Piece;
 /// relay's next FETCH comes on a stream of its own and can be read first;
 /// with 16 here it would be the 17th.
 pub const MAX_ANSWERED_AT_ONCE: usize = 32;
+
+/// The bytes of payload the answers being written hold together (`Held` of
+/// `xmoq-track-serving`, as the gatherer and the transcriber hold theirs);
+/// a FETCH whose answer does not fit is refused with `EXCESSIVE_LOAD`.
+/// **Provisional.** WHY: each answer is a copy of what the client keeps,
+/// up to `MAX_KEPT_BYTES` (4 MiB), and [`MAX_ANSWERED_AT_ONCE`] of them would
+/// be 128 MiB. WHY 32 MiB: eight answers of all the client keeps.
+pub const MAX_BYTES_HELD: usize = 32 * 1024 * 1024;
 
 /// FETCH requests that are over whose request streams the client still
 /// waits on ([`PEER_END_WAIT`]). WHY a bound of its own: they are no longer
@@ -202,6 +210,8 @@ struct Answered {
     /// Dropped when the subscriber's direction of the request stream is
     /// over: the task of the stream waits for that before it finishes.
     peer_ends: oneshot::Sender<()>,
+    /// The bytes its answer holds ([`MAX_BYTES_HELD`]).
+    bytes: usize,
 }
 
 /// A FETCH that is over, for the client to tell its session.
@@ -249,6 +259,7 @@ pub struct Answers {
     notes: mpsc::Receiver<Note>,
     queue: mpsc::Sender<Note>,
     pace: Pace,
+    held: Held,
 }
 
 impl Answers {
@@ -260,12 +271,30 @@ impl Answers {
             notes,
             queue,
             pace,
+            held: Held::new(MAX_BYTES_HELD),
         }
     }
 
     /// Whether one more FETCH can be accepted.
     pub fn has_room(&self) -> bool {
         self.open.len() < MAX_ANSWERED_AT_ONCE
+    }
+
+    /// Whether an answer of `pieces` fits in what the answers may hold
+    /// ([`MAX_BYTES_HELD`]).
+    pub fn fits(&self, pieces: &[Piece]) -> bool {
+        payload_bytes(pieces) <= self.held.room()
+    }
+
+    /// `answer`, where it fits ([`Self::fits`]); `EXCESSIVE_LOAD` where it
+    /// does not (§10.6.2: "The responder is overloaded and cannot process
+    /// the request at this time").
+    pub fn admit(&self, answer: published::Answer) -> Result<published::Answer, u64> {
+        if self.fits(&answer.pieces) {
+            Ok(answer)
+        } else {
+            Err(request_error_code::EXCESSIVE_LOAD)
+        }
     }
 
     /// The request of the FETCH on `stream`, while it is answered.
@@ -287,6 +316,12 @@ impl Answers {
         S: SendStream + Send + 'static,
         C: Connection + Send + Sync + 'static,
     {
+        // The caller asked `fits` first; an answer that does not fit holds
+        // nothing, rather than more than there is.
+        let bytes = payload_bytes(&answer.pieces);
+        let taken = self.held.take(bytes);
+        debug_assert!(taken, "an answer started that did not fit");
+        let bytes = if taken { bytes } else { 0 };
         let (says, said) = mpsc::channel(SAY_QUEUE);
         let (end, ended) = oneshot::channel();
         let (peer_ends, peer_ended) = oneshot::channel();
@@ -332,6 +367,7 @@ impl Answers {
                 printed,
                 peer_finished: false,
                 peer_ends,
+                bytes,
             },
         );
     }
@@ -391,6 +427,7 @@ impl Answers {
             return None;
         };
         let answered = self.open.remove(&stream)?;
+        self.held.give_back(answered.bytes);
         {
             let mut lines = printed(&answered.printed);
             lines.ended = true;
@@ -715,6 +752,7 @@ mod tests {
                     printed: Arc::new(Mutex::new(Printed::default())),
                     peer_finished: false,
                     peer_ends,
+                    bytes: 0,
                 },
             );
         }
@@ -1517,6 +1555,64 @@ mod tests {
         let (mut answers, _ends) = answering(32);
         assert!(answers.happened(3, Happened::Written).is_some());
         assert!(answers.has_room());
+    }
+
+    #[tokio::test]
+    async fn the_answers_hold_no_more_bytes_than_the_bound_together() {
+        let sized = |bytes| {
+            vec![Piece::Object(FetchObject {
+                payload: vec![0; bytes],
+                ..fetch_object(2)
+            })]
+        };
+        let (publisher, _subscriber) = memory::pair();
+        let publisher = Arc::new(publisher);
+        let mut session = Session::new(Role::Client, Transport::WebTransport);
+        // A wait after each Object that outlasts the test.
+        let mut answers = Answers::new(Pace {
+            write_every: Duration::from_secs(600),
+            ..Pace::default()
+        });
+        // (the bytes of an answer; whether it fits)
+        for (bytes, fits) in [(MAX_BYTES_HELD, true), (MAX_BYTES_HELD + 1, false)] {
+            assert_eq!(answers.fits(&sized(bytes)), fits, "{bytes}");
+        }
+        // An answer of all but a byte: one more of a byte fits, of two not.
+        let answer = Answer {
+            messages: vec![],
+            header: FetchHeader { request_id: 1 },
+            group_order: GroupOrder::Ascending,
+            pieces: sized(MAX_BYTES_HELD - 1),
+        };
+        let request = asked(&mut session, 1);
+        answers.start(
+            0,
+            request,
+            Recorded(Done::default()),
+            answer,
+            &publisher,
+            &Trace::default(),
+        );
+        assert!(answers.fits(&sized(1)));
+        assert!(!answers.fits(&sized(2)));
+        // A FETCH is admitted by that, or refused with EXCESSIVE_LOAD (0x9).
+        // (the bytes of its answer; what comes of it)
+        for (bytes, admitted) in [(1, Ok(1)), (2, Err(0x9))] {
+            let answer = published::Answer {
+                end_location: Location {
+                    group: 3,
+                    object: 0,
+                },
+                pieces: sized(bytes),
+            };
+            let got = answers
+                .admit(answer)
+                .map(|answer| payload_bytes(&answer.pieces));
+            assert_eq!(got, admitted, "{bytes}");
+        }
+        // What it held comes back when it is over.
+        assert!(answers.happened(0, Happened::Left).is_some());
+        assert!(answers.fits(&sized(MAX_BYTES_HELD)));
     }
 
     #[tokio::test]
