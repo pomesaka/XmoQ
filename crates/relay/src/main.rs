@@ -1,12 +1,15 @@
 //! The `XmoQ` relay: `MoQ` Transport draft 18 over WebTransport.
 //!
 //! It takes PUBLISH from publishers and SUBSCRIBE from subscribers and forwards
-//! the Objects of each track to its subscribers. It keeps no Objects: a
-//! subscriber gets what arrives after it subscribed, from the Start Location
-//! of its Subscription Filter on.
+//! the Objects of each track to its subscribers. A subscriber gets what
+//! arrives after it subscribed, from the Start Location of its Subscription
+//! Filter on; of what came before, the relay keeps the latest Group of each
+//! track to answer a FETCH with (the cache of `xmoq-relay-core`), and asks
+//! the publisher for the rest.
 //!
-//! Provisional, for testing only: there is no authentication or authorization,
-//! so anyone who can reach the port can publish and subscribe.
+//! Authorization is off unless the relay is given a key (`--auth-key-hex`,
+//! the module `auth`): without one, anyone who can reach the port can
+//! publish and subscribe.
 //!
 //! What is decided where: `xmoq-relay-core` decides who gets what and who is
 //! cut off, `xmoq-moqt-io` reads and writes the streams, and this crate

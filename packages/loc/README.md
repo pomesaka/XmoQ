@@ -11,7 +11,7 @@
 
 What is of that revision is in `src/draft-04/`, and one line of `src/index.ts` chooses it ("Following another revision", below).
 
-Status: partly implemented. What is here was run against bytes of `moqlivemock`'s publisher and, for the video payload, against the H.264 decoder of Chromium 156. Nothing encodes or plays media yet.
+Status: partly implemented. What is here was run against bytes of `moqlivemock`'s publisher and, for the video payload, against the H.264 decoder of Chromium 156. `@xmoq/media` uses it to send and play video and sound.
 
 ## Scope
 
