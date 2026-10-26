@@ -362,6 +362,25 @@ pub struct SubgroupStreamDecoder {
     reports_begun: bool,
     /// [`SubgroupEvent::ObjectBegun`] was yielded for the Object being read.
     begun: bool,
+    /// The fields before the payload of the Object being read, once they are
+    /// whole and checked. WHY kept: a peer that sends the payload a byte at a
+    /// time would otherwise have its Properties decoded and checked once a
+    /// byte.
+    head: Option<ObjectHead>,
+    /// How many times the fields before a payload were decoded.
+    #[cfg(test)]
+    heads_decoded: usize,
+}
+
+/// The fields of an Object before its payload, as
+/// [`SubgroupStreamDecoder`] keeps them until the payload is whole.
+#[derive(Debug)]
+struct ObjectHead {
+    object_id: u64,
+    properties: Vec<KeyValuePair>,
+    payload_len: usize,
+    /// The bytes these fields take on the stream.
+    len: usize,
 }
 
 impl SubgroupStreamDecoder {
@@ -379,6 +398,9 @@ impl SubgroupStreamDecoder {
             ended: false,
             reports_begun: false,
             begun: false,
+            head: None,
+            #[cfg(test)]
+            heads_decoded: 0,
         }
     }
 
@@ -460,19 +482,21 @@ impl SubgroupStreamDecoder {
                 ))
             };
         }
-        let mut reader = Reader::new(self.buffer.unread());
         let parsed = match self.header {
-            None => SubgroupHeader::decode(&mut reader).map(SubgroupEvent::Header),
+            None => {
+                let mut reader = Reader::new(self.buffer.unread());
+                SubgroupHeader::decode(&mut reader)
+                    .map(|header| (SubgroupEvent::Header(header), reader.position()))
+            }
             Some(header) => self
-                .decode_object(&mut reader, &header)
-                .map(SubgroupEvent::Object),
+                .decode_object(&header)
+                .map(|(object, used)| (SubgroupEvent::Object(object), used)),
         };
-        let event = match parsed {
-            Ok(event) => event,
+        let (event, used) = match parsed {
+            Ok(parsed) => parsed,
             Err(ReadError::Short) => return Ok(self.begun_object()),
             Err(ReadError::Invalid(error)) => return Err(error),
         };
-        let used = reader.position();
         self.buffer.consume(used);
         match &event {
             SubgroupEvent::Header(header) => self.header = Some(*header),
@@ -489,26 +513,21 @@ impl SubgroupStreamDecoder {
     /// [`SubgroupEvent::ObjectBegun`] for the Object the buffer holds the
     /// start of, where it is asked for and was not yielded yet, and the fields
     /// before the payload are whole. Nothing is consumed: the Object is
-    /// decoded again from its first byte once its payload is whole.
-    ///
-    /// WHY no error here: the whole decode, which ran first, reads the same
-    /// fields in the same order and found them short, not invalid.
+    /// consumed whole once its payload is.
     fn begun_object(&mut self) -> Option<SubgroupEvent> {
         if !self.reports_begun || self.begun {
             return None;
         }
-        let header = self.header?;
-        let mut reader = Reader::new(self.buffer.unread());
-        let (object_id, _, payload_len) = self.decode_object_head(&mut reader, &header).ok()?;
+        let head = self.head.as_ref()?;
         // An Object without a payload has its status after the length, a
         // field or two that are whole an instant later; it is not begun.
-        if payload_len == 0 {
+        if head.payload_len == 0 {
             return None;
         }
         self.begun = true;
         Some(SubgroupEvent::ObjectBegun {
-            object_id,
-            payload_len,
+            object_id: head.object_id,
+            payload_len: head.payload_len,
         })
     }
 
@@ -530,32 +549,64 @@ impl SubgroupStreamDecoder {
         }
     }
 
-    fn decode_object(
-        &self,
-        reader: &mut Reader<'_>,
-        header: &SubgroupHeader,
-    ) -> ReadResult<SubgroupObject> {
-        let (object_id, properties, payload_len) = self.decode_object_head(reader, header)?;
-        // The Object Status field exists only when the payload is empty.
-        let (status, payload) = if payload_len == 0 {
-            let status = ObjectStatus::from_code(reader.varint()?)
-                .ok_or(Error::ProtocolViolation("unknown object status"))?;
-            (status, Vec::new())
+    /// The next Object and the bytes it takes, where it is whole. The fields
+    /// before its payload are decoded once ([`Self::head`]).
+    fn decode_object(&mut self, header: &SubgroupHeader) -> ReadResult<(SubgroupObject, usize)> {
+        let head = if let Some(head) = self.head.take() {
+            head
         } else {
-            (ObjectStatus::Normal, reader.bytes(payload_len)?.to_vec())
+            let mut reader = Reader::new(self.buffer.unread());
+            let (object_id, properties, payload_len) =
+                self.decode_object_head(&mut reader, header)?;
+            #[cfg(test)]
+            {
+                self.heads_decoded += 1;
+            }
+            ObjectHead {
+                object_id,
+                properties,
+                payload_len,
+                len: reader.position(),
+            }
+        };
+        let unread = self.buffer.unread();
+        let mut reader = Reader::new(unread.get(head.len..).unwrap_or_default());
+        // The Object Status field exists only when the payload is empty.
+        let rest = if head.payload_len == 0 {
+            reader.varint().and_then(|code| {
+                let status = ObjectStatus::from_code(code)
+                    .ok_or(Error::ProtocolViolation("unknown object status"))?;
+                Ok((status, Vec::new()))
+            })
+        } else {
+            reader
+                .bytes(head.payload_len)
+                .map(|payload| (ObjectStatus::Normal, payload.to_vec()))
+        };
+        let used = head.len + reader.position();
+        let (status, payload) = match rest {
+            Ok(rest) => rest,
+            Err(ReadError::Short) => {
+                self.head = Some(head);
+                return Err(ReadError::Short);
+            }
+            Err(error) => return Err(error),
         };
 
-        if status != ObjectStatus::Normal && !properties.is_empty() {
+        if status != ObjectStatus::Normal && !head.properties.is_empty() {
             return Err(
                 Error::ProtocolViolation("properties on an object that is not Normal").into(),
             );
         }
-        Ok(SubgroupObject {
-            object_id,
-            properties,
-            status,
-            payload,
-        })
+        Ok((
+            SubgroupObject {
+                object_id: head.object_id,
+                properties: head.properties,
+                status,
+                payload,
+            },
+            used,
+        ))
     }
 
     /// The fields of an Object before its payload: its Object ID, its
@@ -1116,6 +1167,39 @@ pub(crate) mod tests {
                 }
             }
             assert_eq!(seen, expected, "{chunk_len} {asked}");
+        }
+    }
+
+    #[test]
+    fn the_fields_before_a_payload_are_decoded_once_however_the_bytes_arrive() {
+        let moqlivemock = fixture("subgroup-stream-two-objects-from-moqlivemock");
+        // (the bytes pushed at once, whether ObjectBegun is asked for)
+        let cases: [(usize, bool); 4] = [
+            (1, false),
+            (1, true),
+            (7, false),
+            (moqlivemock.len(), false),
+        ];
+        for (chunk_len, asked) in cases {
+            let mut decoder = SubgroupStreamDecoder::new(LIMIT);
+            if asked {
+                decoder.report_begun();
+            }
+            let mut objects = 0;
+            for chunk in moqlivemock.chunks(chunk_len) {
+                decoder.push(chunk).unwrap();
+                while let Some(event) = decoder.next_event().unwrap() {
+                    if let SubgroupEvent::Object(object) = event {
+                        assert!(!object.properties.is_empty(), "{chunk_len} {asked}");
+                        objects += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                (objects, decoder.heads_decoded),
+                (2, 2),
+                "{chunk_len} {asked}"
+            );
         }
     }
 
