@@ -73,13 +73,14 @@ use xmoq_moqt_io::{
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 
 use xmoq_again::next_session::new_url;
-use xmoq_track_serving::answers::{self, FETCHES_AT_ONCE, Fetches};
+use xmoq_track_serving::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
 use xmoq_track_serving::backoff::Backoff;
 use xmoq_track_serving::fetch::{pieces_of, plan};
 use xmoq_track_serving::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
 use xmoq_track_serving::requests::{AskedFetch, FetchAnswer, PeerRequests};
 use xmoq_track_serving::streams::{
-    Answered, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request, send_group,
+    COMMAND_QUEUE, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request,
+    send_group,
 };
 use xmoq_track_serving::{shown, sleep_until};
 
@@ -280,8 +281,6 @@ pub async fn gather(
     );
     kept.readers.extend([uni_readers, request_readers]);
     let (heard, mut heard_by_loop) = mpsc::channel(HEARD_QUEUE);
-    // Each FETCH says two things to the loop, and waits when it is full.
-    let (fetch_done, mut fetches_done) = mpsc::channel(FETCHES_AT_ONCE);
     let (drained, mut drained_rooms) = mpsc::channel(PEER_REQUEST_QUEUE);
     let mut gathering = Gathering {
         connection,
@@ -298,7 +297,11 @@ pub async fn gather(
         asking_again: HashMap::new(),
         ask_again,
         early: EarlyObjects::default(),
-        requests: PeerRequests::new(Fetches::new(FETCHES_AT_ONCE, MAX_BYTES_HELD), fetch_done),
+        requests: PeerRequests::new(Bounds {
+            at_once: MAX_ANSWERED_AT_ONCE,
+            bytes: MAX_BYTES_HELD,
+            say_queue: COMMAND_QUEUE,
+        }),
         ending: HashMap::new(),
         drained,
         watches: prefixes(rooms_taken)?
@@ -344,6 +347,9 @@ pub async fn gather(
     }
 
     let ended = loop {
+        // WHY taken before the select: its arms borrow parts of the state
+        // mutably, the task notes of the FETCH answers among them.
+        let (next_watch, next_said) = (gathering.next_watch(), gathering.next_said());
         tokio::select! {
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
@@ -365,12 +371,11 @@ pub async fn gather(
                     break ended;
                 }
             }
-            Some((stream, answered)) = fetches_done.recv() => gathering.fetch_over(stream, answered),
+            note = gathering.requests.next_note() => gathering.fetch_noted(note),
             Some(token) = drained_rooms.recv() => gathering.publish_done(token)?,
-            () = sleep_until(gathering.next_watch()) => gathering.watch_again()?,
-            () = sleep_until(gathering.next_said()) => gathering.said_again()?,
+            () = sleep_until(next_watch) => gathering.watch_again()?,
+            () = sleep_until(next_said) => gathering.said_again()?,
             Some(_) = gathering.sends.join_next() => {}
-            Some(_) = gathering.requests.replies().join_next() => {}
         }
     };
     Ok(ended)
@@ -1308,7 +1313,7 @@ impl Gathering<'_> {
         );
         drop(lines);
         // The store gave no more than there is room for.
-        if !self.requests.hold(&pieces) {
+        if !self.requests.fits(&pieces) {
             return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);
         }
         let answer = FetchAnswer {
@@ -1338,8 +1343,7 @@ impl Gathering<'_> {
     }
 
     /// What the task of a FETCH said.
-    fn fetch_over(&mut self, stream: u64, answered: Answered) {
-        self.requests
-            .over(&mut self.session, &self.stops, stream, answered);
+    fn fetch_noted(&mut self, note: Note) {
+        self.requests.on_note(&mut self.session, &self.stops, note);
     }
 }

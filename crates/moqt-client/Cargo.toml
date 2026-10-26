@@ -16,8 +16,3 @@ xmoq-moqt-io = { path = "../moqt-io" }
 xmoq-track-serving = { path = "../track-serving" }
 anyhow = "=1.0.100"
 tokio = { version = "=1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
-
-[dev-dependencies]
-# WHY test-util: the waits of a served FETCH are seconds, which the tests run
-# on tokio's paused clock.
-tokio = { version = "=1.49.0", features = ["test-util"] }

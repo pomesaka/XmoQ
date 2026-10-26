@@ -1,7 +1,7 @@
 //! The streams of a session of a client that serves tracks, each written by
-//! a task of its own: the request streams the client opens, the subgroup
-//! stream of each Group it publishes, and the answer to each FETCH the
-//! relay sends it.
+//! a task of its own: the request streams the client opens, and the
+//! subgroup stream of each Group it publishes. The answer to each FETCH the
+//! relay sends it is [`crate::answers`].
 //!
 //! WHY tasks: a relay that takes nothing on one stream must not hold up the
 //! client, which goes on with every other track. The session
@@ -16,17 +16,15 @@ use tokio::sync::{mpsc, oneshot};
 use xmoq_moqt::data::{
     ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
 };
-use xmoq_moqt::fetch::{FetchHeader, FetchStreamEncoder};
 use xmoq_moqt::message::ControlMessage;
-
-use crate::fetch::Piece;
-use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendStream,
-    Trace, WriteError, open_fetch_stream, send_message,
+    Trace, WriteError, send_message,
 };
+
+use crate::answers::PEER_END_WAIT;
 
 type Send = <WtConnection as Connection>::Send;
 
@@ -39,12 +37,6 @@ type Send = <WtConnection as Connection>::Send;
 /// (`MAX_HELD_FETCH_UPDATES`), before it ends that FETCH the same way.
 /// **Provisional.**
 pub const COMMAND_QUEUE: usize = 64;
-
-/// How long the relay gets to end its direction of a request stream after
-/// the client finished its own, before it is stopped. The time the Rust
-/// client and the relay wait (`PEER_END_WAIT` of
-/// `crates/moqt-client/src/serving.rs`). Provisional.
-pub const PEER_END_WAIT: Duration = Duration::from_secs(3);
 
 /// How long the Object on a subgroup stream may wait for the relay to take
 /// its bytes; then the stream is reset with `CANCELLED`. WHY a limit: the
@@ -113,7 +105,11 @@ pub struct RequestTask {
 /// Opens a request stream, writes `message` on it, and keeps reading it and
 /// writing what it is told, until the stream is over. What happens is sent
 /// to `heard` with `token`. The stream is cancelled when what this returns
-/// is dropped.
+/// is dropped. After the client finished its direction, the relay gets
+/// [`PEER_END_WAIT`] to end its own before it is stopped.
+// FIXME: generic over `Connection`, as `crate::answers` is, with
+// `send_group` and `PeerRequests`, so that tests on `MemoryConnection`
+// reach them.
 pub fn open_request(
     connection: &Arc<WtConnection>,
     token: u64,
@@ -381,203 +377,5 @@ impl Sending {
 impl Drop for Sending {
     fn drop(&mut self) {
         self.0.send_modify(|count| *count = count.saturating_sub(1));
-    }
-}
-
-/// A FETCH that was accepted, to be answered on its streams.
-pub struct Answer {
-    /// `FETCH_OK`, and a `REQUEST_OK` for every `REQUEST_UPDATE` that came
-    /// before it.
-    pub messages: Vec<ControlMessage>,
-    /// The Request ID of the FETCH, for the header of the fetch stream.
-    pub request_id: u64,
-    /// The order the pieces are in.
-    pub group_order: GroupOrder,
-    /// What the fetch stream carries.
-    pub pieces: Vec<Piece>,
-}
-
-/// How the answer to a FETCH ended, for the loop and the log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Answered {
-    /// Its fetch stream was written to its FIN.
-    Written,
-    /// The relay stopped the fetch stream or the request stream.
-    Stopped,
-    /// The fetch stream could not be opened or written.
-    Failed,
-    /// After [`Self::Written`]: the client's direction of the request
-    /// stream is over, finished or, where the relay stopped it meanwhile,
-    /// reset; `peer_ended` says whether the relay's direction had ended by
-    /// then.
-    RequestOver {
-        /// Whether the relay's direction had ended.
-        peer_ended: bool,
-    },
-}
-
-/// What the loop keeps of a FETCH that is answered.
-pub struct Answering {
-    /// Messages for the request stream: the `REQUEST_OK` of a
-    /// `REQUEST_UPDATE` (§10.9). Where one does not fit, the loop cancels
-    /// the FETCH ([`COMMAND_QUEUE`]).
-    pub says: mpsc::Sender<ControlMessage>,
-    /// Sent when the relay's direction of the request stream is over: the
-    /// task finishes its own then, or after [`PEER_END_WAIT`].
-    pub peer_ended: Option<oneshot::Sender<()>>,
-    /// Ends the answer, both streams reset with this code (§5.2: "It MUST
-    /// reset the bidi request stream and unidirectional data stream
-    /// associated with the FETCH"). Dropped, the same with `CANCELLED`.
-    pub cancel: Option<oneshot::Sender<u32>>,
-}
-
-/// Answers a FETCH on the request stream `send` and a fetch stream of its
-/// own: the messages, then the pieces, then the FIN of the fetch stream,
-/// then that of the request stream once the relay has ended its direction
-/// or [`PEER_END_WAIT`] is over. What happened goes to `done` with `stream`:
-/// [`Answered::Written`] and then [`Answered::RequestOver`], or one of the
-/// others.
-///
-/// WHY the request stream waits for the relay: §5.2 has a FETCH end with
-/// its fetch stream, and says nothing of a FIN on the request stream; the
-/// two arrive apart, and a subscriber may take a finished request stream for
-/// the end of the FETCH before it has read the fetch stream. The Rust
-/// client answers the same way (`crates/moqt-client/src/serving.rs`), and the
-/// row on the request stream of a FETCH that was served to its end in
-/// `docs/moqt-implementation-notes.md` has the rest.
-#[expect(
-    clippy::too_many_lines,
-    reason = "both streams of one FETCH in one task, in the order they are written and ended"
-)]
-pub fn answer_fetch(
-    connection: &Arc<WtConnection>,
-    stream: u64,
-    mut send: Send,
-    answer: Answer,
-    done: mpsc::Sender<(u64, Answered)>,
-) -> Answering {
-    let (says, mut said) = mpsc::channel::<ControlMessage>(COMMAND_QUEUE);
-    let (peer_ended, mut peer_end) = oneshot::channel();
-    let (cancel, mut cancelled) = oneshot::channel::<u32>();
-    let connection = Arc::clone(connection);
-    tokio::spawn(async move {
-        let label = format!("bi#{stream}");
-        let trace = Trace::default();
-        let Answer {
-            messages,
-            request_id,
-            group_order,
-            pieces,
-        } = answer;
-        let work = async {
-            for message in &messages {
-                if send_message(&mut send, message, &trace, &label)
-                    .await
-                    .is_err()
-                {
-                    return Answered::Stopped;
-                }
-            }
-            let header = FetchHeader { request_id };
-            let fetch_label = format!("fetch#{request_id}");
-            let Ok(mut writer) = open_fetch_stream(
-                &*connection,
-                header,
-                &trace,
-                &fetch_label,
-                stream_reset_code::CANCELLED,
-            )
-            .await
-            else {
-                return Answered::Failed;
-            };
-            let mut encoder = FetchStreamEncoder::new(header, group_order);
-            // The header, which `open_fetch_stream` has written.
-            encoder.take_bytes();
-            // Taken one by one: what was written is let go of, and the bytes
-            // the loop counts for the answer are gone when it is written.
-            for piece in pieces {
-                match piece {
-                    Piece::Object(object) => {
-                        if encoder.object(&object).is_err() {
-                            // An Object that cannot be encoded is the
-                            // client's mistake: the stream cannot go on.
-                            writer.reset(stream_reset_code::INTERNAL_ERROR);
-                            return Answered::Failed;
-                        }
-                    }
-                    Piece::EndOfRange(kind, location) => encoder.end_of_range(kind, location),
-                }
-                match writer.write(&encoder.take_bytes()).await {
-                    Ok(()) => {}
-                    Err(WriteError::Stopped(_)) => return Answered::Stopped,
-                    Err(WriteError::Lost(_)) => return Answered::Failed,
-                }
-            }
-            writer.finish();
-            Answered::Written
-        };
-        let answered = tokio::select! {
-            answered = work => answered,
-            code = &mut cancelled => {
-                send.reset(code.unwrap_or(stream_reset_code::CANCELLED));
-                return;
-            }
-        };
-        // The loop is gone when this fails.
-        let _ = done.send((stream, answered)).await;
-        if answered != Answered::Written {
-            send.reset(stream_reset_code::CANCELLED);
-            return;
-        }
-        let waited = tokio::time::sleep(PEER_END_WAIT);
-        tokio::pin!(waited);
-        let (mut peer_ended, mut stopped, mut said_more) = (false, false, true);
-        loop {
-            tokio::select! {
-                biased;
-                code = &mut cancelled, if !cancelled.is_terminated() => {
-                    if let Ok(code) = code {
-                        send.reset(code);
-                        return;
-                    }
-                }
-                // A REQUEST_OK that came while the answer was written goes
-                // out before the FIN.
-                message = said.recv(), if said_more => match message {
-                    Some(message) => {
-                        let _ = send_message(&mut send, &message, &trace, &label).await;
-                    }
-                    None => said_more = false,
-                },
-                ended = &mut peer_end, if !peer_end.is_terminated() => {
-                    peer_ended = ended.is_ok();
-                    if peer_ended {
-                        break;
-                    }
-                }
-                // The row of the notes: a STOP_SENDING during the wait has
-                // this direction reset with CANCELLED.
-                gone = send.stopped() => {
-                    // Lost: the connection is gone, and the stream with it.
-                    stopped = matches!(gone, WriteError::Stopped(_));
-                    break;
-                }
-                () = &mut waited => break,
-            }
-        }
-        if stopped {
-            send.reset(stream_reset_code::CANCELLED);
-        } else {
-            send.finish();
-        }
-        let _ = done
-            .send((stream, Answered::RequestOver { peer_ended }))
-            .await;
-    });
-    Answering {
-        says,
-        peer_ended: Some(peer_ended),
-        cancel: Some(cancel),
     }
 }
