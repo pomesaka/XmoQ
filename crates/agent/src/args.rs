@@ -118,7 +118,8 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> [--namespace x
   --meeting-most <n>                the participants kept (49; 1 or more)
   --meeting-video-linger-ms <ms>    how long a participant's video stays after its picture (30000)
   --speech on|off                   off: no transcript is followed (on)
-  --transcript <prefix>             the prefix the transcriber listens under (the broadcast's namespace)
+  --transcript <prefix>             the prefix the transcriber listens under (the room's, else the
+                                    meeting's, else the broadcast's namespace)
 Each event is a line of JSON on stdout and in <dir>/events.jsonl. A line of stdin is said in the
 chat; /frame asks for a picture; a line that begins with // is said with one / taken off.";
 

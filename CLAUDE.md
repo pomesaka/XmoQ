@@ -13,23 +13,13 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 
 初回は`mise trust`と`mise install`。道具の版は`mise.toml`と`rust-toolchain.toml`で固定している。Rustのビルドには、miseが入れないCとC++のコンパイラが要る。
 
-| コマンド | 何をするか |
+| コマンド | いつ走らせるか |
 |---|---|
-| `mise run check` | CIと同じ検査の全部 |
-| `mise run check:rust` | fmt、clippy、test |
-| `mise run check:ts` | Biome、oxlint、型検査、`bun test` |
-| `mise run check:layers`、`check:workflows`、`check:docs` | 層の依存。actionlintとshellcheck。生成した記録の索引と照合のファイルの一覧が古くないか |
-| `mise run fmt` | 整形と安全な直し。記録の索引と照合のファイルの一覧も書き直す（記録か照合の台本を足したら走らせる） |
-| `mise run interop` | `moqtail`の相手とつなぐ照合。`check`には入っていない |
-| `mise run demo` | Start the own relay, the gatherer of the chat, the transcriber and the pages of the demo: one publishes video, others watch |
-| `mise run watch -- <旗>` | The viewer for the terminal: mise run watch -- --room http://127.0.0.1:8787/rooms/demo |
-| `mise run chat -- <旗>` | The gatherer of the chat: mise run chat -- --url https://host:port/ --cert-sha256 <hex> --store chat.sqlite3 |
-| `mise run agent -- <旗>` | The reader of a room for an agent: mise run agent -- --room http://127.0.0.1:8787/rooms/demo --out /tmp/room |
-| `mise run agent-demo -- start`、`stop` | A demo of its own on other ports, the agent's reader in its room and the publishing page in a headless Chromium, in the background: mise run agent-demo -- start --out /tmp/room [--meeting N], then stop --out /tmp/room |
-| `mise run transcriber -- <旗>` | The transcriber: mise run transcriber -- --url https://host:port/ --cert-sha256 <hex> --namespace xmoq/demo |
-| `mise run speech-model` | Fetch a model of whisper.cpp for xmoq-speech into ~/.cache/xmoq/whisper: mise run speech-model -- [small-q5_1 (default)\|tiny\|large-v3-turbo-q5_0] [--dir <dir>] |
+| `mise run check` | 終わったと報告する前。CIと同じ検査の全部 |
+| `mise run fmt` | 整形した後と、記録か照合の台本を足した後（生成する索引も書き直す） |
+| `mise run interop` | `crates/`、`packages/`、`interop/`、`fixtures/`を変えた後。`check`には入っていない |
 
-説明は`mise.toml`のdescriptionの写し（`mise tasks`が同じ文を出す）。旗と手順は各部品のREADMEにある。
+タスクの一覧と説明は`mise tasks`が出す。説明は`mise.toml`のdescriptionにだけ書き、ほかの文書に写さない。旗と既定値は各プログラムの`USAGE`（無ければ`Args`のdoc）、旗の組み合わせと手順は各部品のREADMEにある。
 
 ## このプロジェクトの決まり
 
@@ -101,7 +91,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | docs/validation.md、docs/experiments/ | 記録 | 検証の観点と、走らせた記録 |
 | docs/av-demo.md | 記録のまとめ | デモの映像と音で測れたことと限界。数字は記録から取る |
 | docs/moq-libraries.md | 記録 | Phase 0のライブラリ調査（終了済み） |
-| crates/*/README.md、packages/*/README.md、demo/README.md | 仕様 | 部品の範囲、旗、既定値、既知の不足 |
+| crates/*/README.md、packages/*/README.md、demo/README.md | 仕様 | 部品の範囲、旗の組み合わせ、旗に閉じない上限、既知の不足。プログラムの旗と既定値は`USAGE`（無ければ`Args`のdoc）にだけ書く。READMEを持つのは、走らせ方、ビルド要件とライセンス、複数の実装が守る契約（共有の固定値の表）のどれかを持つ部品で、ほかはcrateなら`lib.rs`の`//!`に書く |
 | fixtures/*/README.md | 仕様 | 2つ以上の実装がテストで読む固定値と表の出どころ |
 | interop/README.md、interop/peers/*/README.md | 手順 | 照合の相手の用意と走らせ方 |
 | .github/workflows/、scripts/ci/、mise.toml | 検査 | CIとローカルの検査。規約を検査で守る |
@@ -118,7 +108,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | 構成要素の責務や接続を変えた | docs/architecture.md、docs/assets/architecture.svg、docs/assets/broadcast-flow.svg |
 | プロトコルの層や運ぶものを変えた | docs/protocols.md、docs/assets/protocol-layers.svg |
 | 範囲を広げた・狭めた | docs/vision.md、docs/requirements.md、docs/roadmap.md |
-| ビルド・テスト・起動のコマンドを足した・変えた | CLAUDE.md、README.md |
+| ビルド・テスト・起動のコマンドを足した・変えた | `mise.toml`のdescription。検査のタスクなら CLAUDE.md と README.md の表も |
 | 部品（crate、パッケージ）や共有の固定値を足した | そのREADME、README.md の一覧 |
 | 新しい文書を足した | README.md の一覧、このDocumentation Map |
 | エージェントの進め方を変えた | docs/agent-guide.md、CLAUDE.md |

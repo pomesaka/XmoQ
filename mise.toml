@@ -36,7 +36,7 @@ description = "Biome, oxlint, typecheck and bun test for packages/ and interop/"
 run = "scripts/ci/check-ts.sh"
 
 [tasks."check:layers"]
-description = "Dependency rules: the layers of the packages, I/O-free crates, nothing depends on spikes/ or interop/"
+description = "Dependency rules of scripts/ci/check-layers.sh: the layers of the packages, crates free of I/O, of a C compiler or of SQLite, nothing depends on spikes/, interop/ or xmoq-quiet-peer"
 run = "scripts/ci/check-layers.sh"
 
 [tasks."check:workflows"]
@@ -50,7 +50,7 @@ run = ["scripts/ci/experiments-index.sh --check", "scripts/ci/interop-index.sh -
 # Not part of `check`: it builds the moqtail relay and needs a Chromium, which takes minutes the
 # first time. CI runs it in a job of its own.
 [tasks.interop]
-description = "Build the interop peers, run every pairing of own and moqtail clients and the runs in which a client leaves"
+description = "Build the interop peers and the own parts, and run every driver of interop/ through the relays, the pages in a real Chromium; not part of check"
 run = "scripts/ci/interop.sh"
 
 [tasks.watch]
@@ -74,7 +74,7 @@ description = "A demo of its own on other ports, the agent's reader in its room 
 run = "scripts/agent-demo.sh"
 
 [tasks.speech-model]
-description = "Fetch a model of whisper.cpp for xmoq-speech into ~/.cache/xmoq/whisper: mise run speech-model -- [small-q5_1 (default)|tiny|large-v3-turbo-q5_0] [--dir <dir>]"
+description = "Fetch a model of whisper.cpp for xmoq-speech into ~/.cache/xmoq/whisper: mise run speech-model -- [small-q5_1 (default)|tiny|large-v3-turbo-q5_0|silero-v5.1.2] [--dir <dir>]"
 run = "crates/speech/scripts/fetch-model.sh"
 
 [tasks.demo]

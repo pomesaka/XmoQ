@@ -48,20 +48,13 @@ Bytes and tables that more than one implementation reads in its tests (`fixtures
 
 Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise install` once. The Rust build also needs a C compiler, which mise does not install: `xmoq-chat` builds SQLite from source (on macOS the Command Line Tools' `clang`, on Linux `gcc`), and `xmoq-watch` builds OpenH264 with a C++ compiler. Then:
 
-| Command | What it runs |
+| Command | When |
 |---|---|
-| `mise run check` | Everything CI runs |
-| `mise run check:rust` | `cargo fmt --check`, `cargo clippy` with warnings as errors, `cargo test` |
-| `mise run check:ts` | Biome (format and lint), oxlint (`as` assertions), `typecheck` for packages and `interop/`, `bun test` per package |
-| `mise run check:layers` | Dependency rules: the layers of the packages (`package_layer` in `scripts/ci/check-layers.sh`), `xmoq-moqt` free of I/O crates, nothing depending on `spikes/`, packages not depending on `interop/` |
-| `mise run check:workflows` | `actionlint` and `shellcheck` |
-| `mise run check:docs` | The index of `docs/experiments/` and the list of files of `interop/` are what `scripts/ci/experiments-index.sh` and `scripts/ci/interop-index.sh` write (`mise run fmt` writes them) |
-| `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
-| `mise run fmt` | Apply formatting and safe fixes, and write the generated parts of the documents again (the index of `docs/experiments/` and the list of files of `interop/`) |
+| `mise run check` | Before a change is said to be done: everything CI runs |
+| `mise run fmt` | After formatting, and after a record or a driver of `interop/` is added: it writes the generated parts of the documents again |
+| `mise run interop` | After a change to `crates/`, `packages/`, `interop/` or `fixtures/`. Not part of `check` |
 
-The tasks that run a part (the demo, the terminal viewer, the chat's gatherer, the transcriber and its model, the reader for an agent and its demo) are listed with a line of use each by `mise tasks`; their flags are in the part's README (above).
-
-The relay's flags are in [its README](crates/relay/README.md), the pages' and `demo/serve.ts`'s in [the demo's README](demo/README.md), the terminal viewer's in `USAGE` of `crates/watch/src/args.rs`.
+`mise tasks` lists every task with what it does, from the descriptions in `mise.toml`, which are written there alone; what a check holds to is in its script under `scripts/ci/`. A program's flags and their defaults are in its `USAGE`, or the doc of its `Args` where it has none; the pages' flags are in [the demo's README](demo/README.md).
 
 CI (`.github/workflows/ci.yml`) runs the same tasks. A task whose target does not exist yet prints `SKIP` and succeeds; `spikes/` is outside every check, and `interop/peers/`, copies of `spikes/moqtail/` written with the `moqtail` library, is outside lint and formatting. The interop run is a CI job of its own, which calls `mise run interop`; for a pull request that touches nothing the run depends on, the job reports that it skipped the pairings.
 
