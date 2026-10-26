@@ -81,6 +81,14 @@ const MAX_BYTES_HELD: usize = 32 * 1024 * 1024;
 /// delivered yet, and this client closes right after its last write.
 const DELIVERY_WAIT: Duration = Duration::from_secs(5);
 
+/// How long a subgroup stream may take to be written, while the peer takes
+/// nothing of it; then it is reset with `CANCELLED` and the client goes on.
+/// The gatherer and the transcriber give theirs as long (`GROUP_WRITE_WAIT`
+/// of `xmoq-track-serving`). **Provisional.** WHY a limit: the
+/// `PUBLISH_DONE` of a subscription waits for its streams to be closed
+/// (§10.11), and a peer that takes nothing would hold it for good.
+const SUBGROUP_WRITE_WAIT: Duration = Duration::from_secs(5);
+
 /// How long the subscriber gets to end its direction of the request stream
 /// after this client's `PUBLISH_DONE`, before the session is closed without
 /// knowing whether everything arrived. Provisional.
@@ -2043,7 +2051,13 @@ impl Client<'_> {
         args.trace
             .bytes(Direction::Send, &format!("data#{group_id}"), &bytes);
         let failed = |error| anyhow!("could not write the subgroup stream: {error:?}");
-        match data.write_all(&bytes).await {
+        let Ok(written) = tokio::time::timeout(SUBGROUP_WRITE_WAIT, data.write_all(&bytes)).await
+        else {
+            data.reset(stream_reset_code::CANCELLED);
+            report::subgroup_not_taken(group_id, SUBGROUP_WRITE_WAIT);
+            return Ok(true);
+        };
+        match written {
             Ok(()) => {}
             // The stream was stopped before all of it was written. §11.4.3:
             // "The publisher SHOULD respond with a reset."
