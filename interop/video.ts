@@ -22,8 +22,10 @@
 //       seconds in the capture), since the page comes in the middle of a
 //       Group and has to wait for a key frame.
 //     - **Every frame is 1280x720, and each is 40,000 microseconds after
-//       the one before it.** A frame that is missing, twice or out of
-//       order shows here.
+//       the one before it**, but where the rest of a Group was dropped for
+//       a decoder that was behind (below): the frame after it is then the
+//       first of a later Group. A frame that is missing otherwise, twice or
+//       out of order shows here.
 //     - **The browser has an H.264 decoder** (`VideoDecoder.isConfigSupported`
 //       for the catalog's codec). Where it has none, the run says so, and
 //       does not go on to say that no frame came.
@@ -31,9 +33,11 @@
 //       were given to it. How many are still inside it is not looked at: a
 //       decoder holds some, and how many is the decoder's.
 //     - **Nothing was dropped but what came before the first key frame**
-//       (`no-key-frame`), of which there can be none or up to a Group.
-//       No `gap`, no `unusable`, no `late`: `mlmpub` sends in order, on
-//       loopback, and its Objects are LOC's.
+//       (`no-key-frame`), of which there can be none or up to a Group, and
+//       the rest of a Group for a decoder that was behind (`decoder-behind`
+//       for what was there, `late` for what came after), as many as the
+//       frames passed over at most. No `gap`, no `unusable`: `mlmpub` sends
+//       in order, on loopback, and its Objects are LOC's.
 //
 //   page-to-page  A page encodes frames it paints, 320x180 at 25 frames a
 //                 second with a key frame every second, and publishes them
@@ -385,8 +389,8 @@ const FRAMES = 50;
 /** Longer than the 50 frames take, 2 seconds, and the wait for a key frame, 1 second at most. The page reports what it has when this is over. */
 const PLAY_TIMEOUT_MS = 10_000;
 
-/** Throws unless the report is what the top of this file says. */
-function check(report: PageVideoReport, seen: string): void {
+/** Throws unless the report is what the top of this file says; the frames passed over with the rest of a Group otherwise. */
+function check(report: PageVideoReport, seen: string): number {
 	const { frames, stats } = report;
 	if (frames.length < FRAMES) {
 		throw new Error(
@@ -399,6 +403,13 @@ function check(report: PageVideoReport, seen: string): void {
 			`the first frame is at ${first?.timestamp}, which is not the start of a Group: ${seen}`,
 		);
 	}
+	// WHY the rest of a Group may be passed over: a decoder that is slower
+	// than the track loses it (`abandonGroup` of the video receiver), which
+	// is the machine's speed and not the transport's doing, as the run of a
+	// page's video has it. Anything else that is missing is not.
+	const behind =
+		(stats.dropped["decoder-behind"] ?? 0) + (stats.dropped.late ?? 0);
+	let passedOver = 0;
 	frames.forEach((frame, index) => {
 		if (frame.width !== 1280 || frame.height !== 720) {
 			throw new Error(
@@ -406,12 +417,25 @@ function check(report: PageVideoReport, seen: string): void {
 			);
 		}
 		const before = frames[index - 1];
-		if (before !== undefined && frame.timestamp - before.timestamp !== 40_000) {
+		if (before === undefined) return;
+		const after = frame.timestamp - before.timestamp;
+		if (after === 40_000) return;
+		if (
+			after <= 0 ||
+			after % 40_000 !== 0 ||
+			frame.timestamp % 1_000_000 !== 0
+		) {
 			throw new Error(
-				`frame ${index} is ${frame.timestamp - before.timestamp} microseconds after the one before it, not 40000: ${seen}`,
+				`frame ${index} is ${after} microseconds after the one before it, not 40000, nor the first of a later Group: ${seen}`,
 			);
 		}
+		passedOver += after / 40_000 - 1;
 	});
+	if (passedOver > behind) {
+		throw new Error(
+			`${passedOver} frames were passed over, and ${behind} dropped for a decoder that was behind: ${seen}`,
+		);
+	}
 	if (stats.decoderFailures !== 0) {
 		throw new Error(
 			`the decoder failed ${stats.decoderFailures} times (${stats.lastDecoderError}): ${seen}`,
@@ -423,11 +447,15 @@ function check(report: PageVideoReport, seen: string): void {
 		);
 	}
 	const reasons = Object.keys(stats.dropped).filter(
-		(reason) => reason !== "no-key-frame",
+		(reason) =>
+			reason !== "no-key-frame" &&
+			reason !== "decoder-behind" &&
+			reason !== "late",
 	);
 	if (reasons.length > 0) {
 		throw new Error(`Objects were dropped as ${reasons.join(", ")}: ${seen}`);
 	}
+	return passedOver;
 }
 
 async function fromMlmpub(): Promise<string> {
@@ -495,9 +523,9 @@ async function fromMlmpub(): Promise<string> {
 		frames: report.frames.slice(0, 3),
 	});
 	log("driver", `REPORT ${seen}`);
-	check(report, seen);
+	const passedOver = check(report, seen);
 	const dropped = report.stats.dropped["no-key-frame"] ?? 0;
-	return `${report.frames.length} frames of ${TRACK} decoded, 1280x720 and 40 ms apart, from the first frame of a Group on; ${dropped} Objects before it were not played`;
+	return `${report.frames.length} frames of ${TRACK} decoded, 1280x720 and 40 ms apart, from the first frame of a Group on, but for ${passedOver} passed over with the rest of a Group for a decoder that was behind; ${dropped} Objects before it were not played`;
 }
 
 /** The namespace an own page publishes its video under. */

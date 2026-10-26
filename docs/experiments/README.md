@@ -283,4 +283,5 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-25 [The relay raises the Largest Object at an Object's first byte](2026-10-25-the-relay-raises-the-largest-object-at-its-first-byte.md)
 - 2026-10-25 [TRACK_STATUS through the relays](2026-10-25-track-status-through-the-relays.md)
 - 2026-10-26 [A large Group cut off before it is FETCHed](2026-10-26-a-large-group-cut-off-before-it-is-fetched.md)
+- 2026-10-26 [A slow teardown, and a decoder behind on mlmpub's video](2026-10-26-a-slow-teardown-and-a-decoder-behind-on-mlmpubs-video.md)
 - 2026-10-26 [The audio run drops a piece that comes after the next](2026-10-26-the-audio-run-drops-a-piece-that-comes-after-the-next.md)
