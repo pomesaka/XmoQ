@@ -1201,6 +1201,10 @@ async fn play(
                         break "the video track is malformed";
                     }
                 }
+                // The fault is on this side: INTERNAL_ERROR, as every client.
+                Some(UniEvent::ReaderPanicked) => {
+                    return Err(xmoq_moqt_io::client::ReaderPanicked.into());
+                }
                 Some(other) => bail!("not expected of the relay: {other:?}"),
                 None => {
                     failed = Some(anyhow!("the connection is gone"));

@@ -80,6 +80,22 @@ impl std::fmt::Display for HeldTooMuch {
 
 impl std::error::Error for HeldTooMuch {}
 
+/// A reader of this crate panicked and lost a stream of the peer
+/// (`UniEvent::ReaderPanicked`, `PeerRequestStreamEvent::ReaderPanicked`):
+/// the session cannot go on with a hole in it, and is closed with
+/// `INTERNAL_ERROR` ([`termination_code`]), the fault being on this side
+/// (§3.5: "An implementation specific error occurred").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReaderPanicked;
+
+impl std::fmt::Display for ReaderPanicked {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "a reader of a stream of the peer panicked")
+    }
+}
+
+impl std::error::Error for ReaderPanicked {}
+
 /// The peer sent no SETUP within the time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoSetupInTime(pub Duration);
@@ -259,7 +275,8 @@ pub async fn setup<C: Connection, E: UniEvents>(
 /// The code to close the session with after `error` (§3.5):
 /// `CONTROL_MESSAGE_TIMEOUT` for a SETUP that did not come, as `@xmoq/moqt`
 /// has it; `INTERNAL_ERROR` for more data before it than is held
-/// ([`HeldTooMuch`]); the one a protocol error asks for; and `NO_ERROR` for
+/// ([`HeldTooMuch`]) and for a reader that panicked ([`ReaderPanicked`]);
+/// the one a protocol error asks for; and `NO_ERROR` for
 /// everything else, a request that is given up alone among them.
 ///
 /// WHY the chain of sources: a wrapper (`anyhow`'s `context`, a
@@ -271,7 +288,7 @@ pub fn termination_code(error: &(dyn std::error::Error + 'static)) -> u32 {
     if causes().any(<dyn std::error::Error>::is::<NoSetupInTime>) {
         return TerminationCode::ControlMessageTimeout.code();
     }
-    if causes().any(<dyn std::error::Error>::is::<HeldTooMuch>) {
+    if causes().any(|cause| cause.is::<HeldTooMuch>() || cause.is::<ReaderPanicked>()) {
         return TerminationCode::InternalError.code();
     }
     causes()
@@ -310,10 +327,11 @@ mod tests {
     #[test]
     fn a_session_is_closed_with_the_code_its_failure_asks_for() {
         // (what failed; the code the session is closed with)
-        let cases: [(Box<dyn std::error::Error>, u32); 7] = [
+        let cases: [(Box<dyn std::error::Error>, u32); 8] = [
             (Box::new(SetupError::NoSetup("the readers stopped")), 0x0),
             (Box::new(NoSetupInTime(SETUP_WAIT)), 0x11),
             (Box::new(SetupError::HeldTooMuch(HeldTooMuch)), 0x1),
+            (Box::new(ReaderPanicked), 0x1),
             (
                 Box::new(SetupError::TimedOut(NoSetupInTime(SETUP_WAIT))),
                 0x11,

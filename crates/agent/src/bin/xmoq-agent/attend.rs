@@ -866,7 +866,10 @@ pub async fn attend(
                         }
                     }
                 }
-                Some(other) => bail!("not expected of the relay: {other:?}"),
+                // The fault is on this side: INTERNAL_ERROR, as every client.
+                Some(UniEvent::ReaderPanicked) => {
+                    return Err(xmoq_moqt_io::client::ReaderPanicked.into());
+                }
                 None => bail!("the connection is gone"),
             },
         }

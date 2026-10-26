@@ -2459,7 +2459,9 @@ impl Client<'_> {
                     // Bytes that do not decode close the session with the
                     // code of that error, as after a PUBLISH.
                     PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
-                    PeerRequestStreamEvent::ReaderPanicked => bail!("a stream reader failed"),
+                    PeerRequestStreamEvent::ReaderPanicked => {
+                        return Err(client::ReaderPanicked.into());
+                    }
                     // The driver is done: other requests are not served any
                     // more.
                     PeerRequestStreamEvent::Opened { .. }
@@ -3017,7 +3019,7 @@ impl Client<'_> {
                 }
             }
             PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
-            PeerRequestStreamEvent::ReaderPanicked => bail!("a stream reader failed"),
+            PeerRequestStreamEvent::ReaderPanicked => return Err(client::ReaderPanicked.into()),
         }
         Ok(())
     }
