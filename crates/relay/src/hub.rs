@@ -615,6 +615,8 @@ struct SessionHandle<C: Connection> {
     /// [`HubConfig::when_full`]; it counts for [`MAX_SENDING_AWAY`] and not
     /// for [`HubConfig::max_sessions`].
     sent_away: bool,
+    /// The relay's: [`Role::Client`] for its session with the upstream.
+    role: Role,
 }
 
 /// What waits to be written to one subscription, and the stream of it that
@@ -1776,6 +1778,7 @@ impl<C: Connection> Hub<C> {
                 fetch_writes: Vec::new(),
                 fetch_write_controls: HashMap::new(),
                 sent_away: send_to.is_some(),
+                role,
             },
         );
         let mut events = VecDeque::from([Event::SessionOpened { session, role }]);
@@ -1930,11 +1933,38 @@ impl<C: Connection> Hub<C> {
         }
         // A session goes through here when it is closed, by the relay or by
         // the peer.
-        if self.sessions.is_empty()
-            && let Some(drained) = self.drained.take()
+        if self.drained.is_some()
+            && self
+                .sessions
+                .values()
+                .all(|handle| handle.role == Role::Client)
         {
-            let _ = drained.send(());
+            self.upstream_drained();
         }
+    }
+
+    /// The clients of the relay that goes away are gone: the sessions with
+    /// the upstream that are left are closed, and the relay is drained.
+    ///
+    /// WHY not waited for: the upstream was told the relay goes (§10.4, a
+    /// client's GOAWAY "intends to close the session soon") and has no
+    /// reason to close; it would be closed with `GOAWAY_TIMEOUT` (§3.5:
+    /// "The session was closed because the peer took too long to close the
+    /// session in response to a GOAWAY") when the Timeout is over, and the
+    /// relay would stop that much later. WHY `NO_ERROR`: neither side did
+    /// anything wrong. WHY kept until now: the clients that were still
+    /// there got their tracks through it.
+    fn upstream_drained(&mut self) {
+        let Some(drained) = self.drained.take() else {
+            return;
+        };
+        let upstream: Vec<SessionKey> = self.sessions.keys().copied().collect();
+        let mut pending = VecDeque::new();
+        for session in upstream {
+            self.close(session, NO_ERROR, "the relay is stopping", &mut pending);
+        }
+        self.feed(pending);
+        let _ = drained.send(());
     }
 
     /// Finishes the relay's direction of a request stream of a peer, and
