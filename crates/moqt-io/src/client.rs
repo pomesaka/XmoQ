@@ -1,13 +1,15 @@
 //! The start and the end of a client's session: the SETUP it sends and the
 //! one it waits for (§3.3), what is kept until the session is closed, and
 //! the code it closes the session with (§3.5). Every client of this
-//! repository that is not the relay takes them from here: the Rust client
-//! (`xmoq-moqt-client`), the gatherer of the chat, the transcriber, and the
-//! viewers (`xmoq-viewer-io`, for the terminal viewer and the agent).
+//! repository that is not the relay takes them from here: the gatherer of
+//! the chat, the transcriber, and the viewers (`xmoq-viewer-io`, for the
+//! terminal viewer and the agent). The Rust client (`xmoq-moqt-client`)
+//! takes the options of its SETUP and the code, and waits for the peer's
+//! SETUP itself (why, where it does).
 //!
 //! WHY here, once: the clients start and close a session the same way, and
-//! copies of the rule had drifted apart (one found a SETUP that did not come
-//! under a `context`, the others did not, and closed with `NO_ERROR`).
+//! a copy of the rule in each would part from the others (a SETUP that did
+//! not come is found under any number of wrappers here, [`termination_code`]).
 
 use std::future::Future;
 use std::time::Duration;

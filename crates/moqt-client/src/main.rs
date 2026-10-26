@@ -2525,8 +2525,8 @@ impl Client<'_> {
     /// value is published", and the relay takes the Object for the largest
     /// from its first byte as well. A FETCH or a SUBSCRIBE that this client answers
     /// while the Object is under way would otherwise be answered as if the
-    /// Object did not exist: a Joining FETCH would end before it, and the
-    /// subscription begin after it. An Object that could not be written
+    /// Object did not exist: a Standalone FETCH (`--answer-fetch`) would end
+    /// before it, and the subscription begin after it. An Object that could not be written
     /// ends the mode, and the session with it.
     async fn send_attending(
         &mut self,
@@ -3137,7 +3137,8 @@ async fn run_session(
             // The GOAWAY behind the refusal, which travels on another
             // stream and may be read after it. WHY a limit, the time an
             // answer gets: GOING_AWAY also comes from a peer that received a
-            // GOAWAY (§10.6.2) and sends none. `@xmoq/media` waits the same.
+            // GOAWAY (§10.6.2) and sends none. `@xmoq/moqt` waits the same
+            // (`goAwayBehind`, `packages/moqt/src/webtransport/keep-moving.ts`).
             Err(error) if error.chain().any(<dyn std::error::Error>::is::<GoingAway>) => {
                 let wait = Duration::from_millis(client.args.waits.answer);
                 match tokio::time::timeout(wait, session_inbox.next_control_message()).await {

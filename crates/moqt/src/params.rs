@@ -89,11 +89,13 @@ pub enum Parameter {
     ObjectDeliveryTimeout(u64),
     /// 0x03. The Token structure of §10.2.2, kept as received.
     ///
-    /// FIXME: decode the Token structure once authentication is decided. Until
-    /// then two requirements of §10.2.2 are not met: a server does not close
-    /// the session for Alias Type DELETE or `USE_ALIAS` in SETUP, and a Token
-    /// that cannot be decoded does not close it with
-    /// `KEY_VALUE_FORMATTING_ERROR`.
+    /// The session does not decode it, and leaves two requirements of
+    /// §10.2.2 to its caller: a server closes the session for Alias Type
+    /// DELETE or `USE_ALIAS` in SETUP, and for a Token that cannot be decoded
+    /// with `KEY_VALUE_FORMATTING_ERROR`. The relay meets both when it is
+    /// given a key (`crates/relay/src/auth.rs`, with [`crate::token`]).
+    ///
+    /// FIXME: a relay without a key, and every client, meets neither.
     AuthorizationToken(Vec<u8>),
     /// 0x04, milliseconds (§10.2.6).
     RendezvousTimeout(u64),

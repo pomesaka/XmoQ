@@ -577,11 +577,6 @@ impl ServerCertVerifier for PinnedCertificate {
     }
 }
 
-/// The QUIC and TLS settings of a client that pins the server certificate.
-///
-/// The QUIC settings are the defaults of quinn, without a keep-alive: a
-/// client talks to the one server it chose, and the server's keep-alive keeps
-/// the connection up.
 /// The streams of each kind, unidirectional and bidirectional, that the
 /// readers of this crate read at once with `streams`: what a peer is let
 /// open in QUIC, by a client ([`connect`]) and by a server ([`QuicLimits`]).
@@ -594,6 +589,10 @@ pub fn streams_read_at_once(streams: &crate::StreamConfig) -> (u32, u32) {
     )
 }
 
+/// The QUIC and TLS settings of a client that pins the server certificate.
+///
+/// No keep-alive: a client talks to the one server it chose, and the
+/// server's keep-alive keeps the connection up.
 fn client_config(
     cert_sha256: [u8; 32],
     streams: &crate::StreamConfig,
@@ -620,7 +619,7 @@ fn client_config(
     // read at once, and no more: quinn's default lets it open 100 of each
     // kind, and what a client does not read would wait in QUIC, each stream
     // with a receive window of its own, where no limit of this crate sees
-    // it. Everything else is left at quinn's defaults, as before.
+    // it. Everything else is left at quinn's defaults.
     let (uni, bi) = streams_read_at_once(streams);
     let mut transport = quinn::TransportConfig::default();
     transport
