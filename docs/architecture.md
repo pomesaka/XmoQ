@@ -43,7 +43,7 @@ WHY: the audits found the same job written in two places or more, one of them ri
 
 Also decided on 2026-10-26:
 
-- One rule for the next session, with values for each role: one for the viewers and the agent, one for the gatherer and the transcriber. Today the first try after a GOAWAY is at once and the next ones 1 s apart for the viewers, and the gatherer and the transcriber wait 1 s doubling to 30 s.
+- One rule for the next session, with values for each role: one for the viewers and the agent, one for the gatherer and the transcriber. Today all four go by `NextSession` of `xmoq-again` for where and for the try at once after a GOAWAY; after any other end the viewers wait 1 s from the try before, and the gatherer and the transcriber 1 s doubling to 30 s (`NextTry` of `xmoq-track-serving`).
 - What both implementations of a followed track wait and ask for: a subscription that comes before the track's publisher waits 30 s (RENDEZVOUS_TIMEOUT), where `@xmoq/chat` and `@xmoq/transcript` ask for 10 s; a transcript is read on from where the last subscription left it (Absolute Joining FETCH), as the chat's lines are, where `@xmoq/transcript` asks for the latest pieces anew.
 - `xmoq-track-serving` becomes `xmoq-publisher` once the Rust client answers a FETCH through it.
 - The names of a meeting's namespaces (`xmoq/meet/<room>/<id>`), in `xmoq-viewer` today, go to a crate of their own, `xmoq-meeting-tracks` (planned), as the chat's are `xmoq-chat-tracks` and the transcript's `xmoq-transcript-tracks`. WHY: the names of each kind of a room's tracks are then in a crate of the same form, one that a part which is not a viewer can depend on.

@@ -30,6 +30,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use xmoq_again::AskAgain;
+use xmoq_again::next_session::new_url;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
@@ -121,8 +122,9 @@ const CATALOG_LIMIT: usize = 1024 * 1024;
 pub enum Ended {
     /// The transcriber was told to stop.
     Stopped,
-    /// The relay sent GOAWAY (§10.4).
-    GoAway,
+    /// The relay sent GOAWAY on the control stream (§10.4), with the URL
+    /// to go to, or none for the same.
+    Moved(Option<String>),
 }
 
 /// What a request of the transcriber is for.
@@ -1084,9 +1086,9 @@ impl Transcribing<'_> {
         self.take_early()?;
         match event {
             UniEvent::Control(message) => match self.session.on_control_message(message)? {
-                ControlEvent::GoAway(_) => {
+                ControlEvent::GoAway(go_away) => {
                     println!("GOAWAY");
-                    return Ok(Some(Ended::GoAway));
+                    return Ok(Some(Ended::Moved(new_url(&go_away.new_session_uri))));
                 }
                 ControlEvent::Setup(_) => bail!("the session took a second SETUP"),
             },
@@ -1253,6 +1255,37 @@ impl Transcribing<'_> {
         }
     }
 
+    /// The relay sent GOAWAY on the stream of a request of the transcriber:
+    /// the request alone is asked again, on this session, as after its end
+    /// (§10.4: "the endpoint SHOULD re-issue that specific request ... and
+    /// close the old request stream using the appropriate mechanism (e.g.
+    /// FIN, stream reset, or `PUBLISH_DONE`)"). A subscription and the FETCH
+    /// for the catalog are cancelled (§5.1, §5.2), and the PUBLISH of a
+    /// transcript ends with `PUBLISH_DONE` `GOING_AWAY` once its streams are
+    /// closed (§10.11) and is sent again. The FETCH is not asked again, as
+    /// after any other end of it: the catalog's subscription goes on.
+    ///
+    /// FIXME: a New Session URI names another session for the request, and
+    /// the request is asked again on this one (§10.4: "on a session at the
+    /// specified URI"); the transcriber keeps one session.
+    fn request_moved(&mut self, token: u64, purpose: &Purpose) {
+        match purpose {
+            Purpose::Speech(prefix) => {
+                if self
+                    .published
+                    .get(*prefix)
+                    .is_some_and(|entry| entry.publish() == Some(token))
+                {
+                    self.end_publish(*prefix, publish_done_status::GOING_AWAY);
+                }
+            }
+            purpose => {
+                self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
+                self.request_over(token, purpose, "GOAWAY");
+            }
+        }
+    }
+
     fn request_over(&mut self, token: u64, purpose: &Purpose, why: &str) {
         match purpose {
             Purpose::Watch(index) => {
@@ -1393,7 +1426,7 @@ impl Transcribing<'_> {
         match (purpose, event) {
             (_, RequestEvent::GoAway(_)) => {
                 println!("GOAWAY on a request stream");
-                return Ok(Some(Ended::GoAway));
+                self.request_moved(token, purpose);
             }
             (Purpose::Watch(index), RequestEvent::NamespacesSubscribed) => {
                 if let Some(watch) = self.watches.get(*index) {

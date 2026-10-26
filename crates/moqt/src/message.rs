@@ -218,6 +218,8 @@ pub mod publish_done_status {
     pub const INTERNAL_ERROR: u64 = 0x0;
     /// `TRACK_ENDED`: the track is no longer being published.
     pub const TRACK_ENDED: u64 = 0x2;
+    /// `GOING_AWAY`: the subscriber or the publisher sent a GOAWAY.
+    pub const GOING_AWAY: u64 = 0x4;
     /// `TOO_FAR_BEHIND`: the publisher's queue for this subscriber exceeded its
     /// limit.
     pub const TOO_FAR_BEHIND: u64 = 0x5;

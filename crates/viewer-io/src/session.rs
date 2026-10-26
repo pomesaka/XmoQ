@@ -734,13 +734,10 @@ pub async fn refuse_peer_request<S: std::hash::BuildHasher>(
     }
 }
 
-/// Where a GOAWAY says to go: its New Session URI, or `None` for the URL of
-/// the session (§10.4: "If the URI is zero bytes long, the current URI is
-/// reused instead").
+/// Where a GOAWAY says to go ([`xmoq_again::next_session::new_url`]).
 #[must_use]
 pub fn new_url(go_away: &GoAway) -> Option<String> {
-    (!go_away.new_session_uri.is_empty())
-        .then(|| String::from_utf8_lossy(&go_away.new_session_uri).into_owned())
+    xmoq_again::next_session::new_url(&go_away.new_session_uri)
 }
 
 /// The Timestamp of LOC of an Object, in microseconds. `None` for an

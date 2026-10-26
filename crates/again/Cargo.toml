@@ -1,7 +1,7 @@
 [package]
 name = "xmoq-again"
 version = "0.0.0"
-description = "When a track that ended, or was refused, is asked for again on the same session. Without I/O and without dependencies."
+description = "When a track that ended, or was refused, is asked for again on the same session, and when and where the next session goes after one ended. Without I/O and without dependencies."
 edition.workspace = true
 publish.workspace = true
 

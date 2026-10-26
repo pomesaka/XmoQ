@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use tokio::sync::{mpsc, watch};
+use xmoq_again::next_session::{After, NextSession};
 use xmoq_agent::args::{Args, Source};
 use xmoq_agent::events::{BroadcastState, Event};
 use xmoq_agent::input::{self, Input};
@@ -29,7 +30,7 @@ use xmoq_agent::presence::Presence;
 use xmoq_chat_tracks::names::Person;
 use xmoq_moqt_io::StreamConfig;
 use xmoq_moqt_io::wt;
-use xmoq_viewer::reconnect::{After, BETWEEN_TRIES_MS, NextSession};
+use xmoq_viewer::reconnect::BETWEEN_TRIES_MS;
 use xmoq_viewer::room::{self, Broadcast, Relay};
 use xmoq_viewer_io::ending::{self, UntilClosed};
 use xmoq_viewer_io::room_socket::{ChatTokens, ROOM_COMES_WITHIN, RoomSocket};

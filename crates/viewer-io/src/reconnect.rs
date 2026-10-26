@@ -1,6 +1,7 @@
 //! What a viewer that connects again needs of its sockets, beside the rule
-//! of when and where, and the times the room and the relay get
-//! (`xmoq_viewer::reconnect`): the GOAWAY behind a refusal.
+//! of when and where (`next_session` of `xmoq-again`) and the times the
+//! room and the relay get (`xmoq_viewer::reconnect`): the GOAWAY behind a
+//! refusal.
 //!
 //! FIXME: joining a room again and the wait before a try are written in
 //! both programs, each with the `unless_ended` of its own loop; one here

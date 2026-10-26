@@ -17,12 +17,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use tokio::sync::watch;
+use xmoq_again::next_session::Ended as SessionEnded;
 use xmoq_moqt_io::wt;
 use xmoq_moqt_io::{Connection, StreamConfig, client};
 use xmoq_speech::engine::EngineOptions;
 use xmoq_speech::model::{DEFAULT_VAD_MODEL, default_model_dir, model_file};
 use xmoq_speech::vad::Silero;
-use xmoq_track_serving::backoff::Backoff;
+use xmoq_track_serving::backoff::NextTry;
 use xmoq_transcriber::args::Args;
 use xmoq_transcriber::transcript::Transcript;
 
@@ -98,19 +99,22 @@ async fn run(args: Args) -> Result<()> {
         .map(|_| Transcript::new(first, args.keep))
         .collect();
     let streams = StreamConfig::default();
-    let mut backoff = Backoff::default();
+    // Where and when the next session goes (`NextTry`): the New Session URI
+    // of a GOAWAY, at once; after any other end, after a wait that grows.
+    let mut next = NextTry::default();
     let key = args.auth_key.as_deref().map(xmoq_room_token::RoomKey::new);
+    let mut url = next.first(&args.url);
     loop {
         let began = Instant::now();
-        let connecting = wt::connect(&args.url, args.cert_sha256, &streams);
+        let connecting = wt::connect(&url, args.cert_sha256, &streams);
         let connection = tokio::select! {
             connected = connecting => connected,
             _ = stop.changed() => return Ok(()),
         };
-        match connection {
+        let ended = match connection {
             Ok(connection) => {
                 let connection = Arc::new(connection);
-                println!("CONNECTED url={}", args.url);
+                println!("CONNECTED url={url}");
                 // Dropped once the session is closed.
                 let mut kept = client::UntilClosed::default();
                 let result = session::transcribe(
@@ -128,14 +132,20 @@ async fn run(args: Args) -> Result<()> {
                 }
                 connection.close(client::termination_code_of(&result), b"");
                 let _ = tokio::time::timeout(CLOSE_GRACE, connection.closed()).await;
-                if matches!(result, Ok(Ended::Stopped)) {
-                    return Ok(());
+                match result {
+                    Ok(Ended::Stopped) => return Ok(()),
+                    Ok(Ended::Moved(to)) => SessionEnded::Moved(to),
+                    Err(_) => SessionEnded::Failed { began: true },
                 }
             }
-            Err(error) => println!("NOT_CONNECTED {error}"),
-        }
-        let wait = backoff.after(began.elapsed());
-        println!("CONNECTING_AGAIN in_ms={}", wait.as_millis());
+            Err(error) => {
+                println!("NOT_CONNECTED {error}");
+                SessionEnded::Failed { began: false }
+            }
+        };
+        let wait;
+        (url, wait) = next.after(&args.url, ended, began.elapsed());
+        println!("CONNECTING_AGAIN url={url} in_ms={}", wait.as_millis());
         tokio::select! {
             () = tokio::time::sleep(wait) => {}
             _ = stop.changed() => return Ok(()),
