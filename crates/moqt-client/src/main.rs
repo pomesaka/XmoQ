@@ -1120,6 +1120,12 @@ struct Serving {
     track_alias: u64,
     /// Subgroup streams opened for the subscription, for `PUBLISH_DONE`.
     streams: u64,
+    /// A subgroup stream of the subscription is being written.
+    sending: bool,
+    /// The status of a `PUBLISH_DONE` that waits for the stream being
+    /// written to be closed (§10.11: "A sender MUST NOT send `PUBLISH_DONE`
+    /// until it has closed all streams it will ever open").
+    done_due: Option<u64>,
 }
 
 /// Completes with the code of the `STOP_SENDING` the subscriber sent on the
@@ -2415,18 +2421,24 @@ impl Client<'_> {
                         let Some(served) = &mut serving else {
                             bail!("asked to send while nobody is subscribed");
                         };
-                        // Counted when it is begun: a PUBLISH_DONE that the
-                        // subscription gets while the stream is under way
-                        // (an update that is refused) counts it.
                         served.streams += 1;
+                        served.sending = true;
                         let object = (served.track_alias, group_id, payload, ObjectStatus::Normal, 1);
                         let opened = self
                             .send_attending(&mut peer_requests, &mut serving, Some(&mut stdin), object)
                             .await?;
-                        // The stream was not opened after all, and is none
-                        // of the subscription's that is still there.
-                        if !opened && let Some(served) = serving.as_mut() {
-                            served.streams = served.streams.saturating_sub(1);
+                        if let Some(served) = serving.as_mut() {
+                            served.sending = false;
+                            // The stream was not opened after all, and is
+                            // none of the subscription's.
+                            if !opened {
+                                served.streams = served.streams.saturating_sub(1);
+                            }
+                        }
+                        // The stream is closed: a PUBLISH_DONE that waited
+                        // for it goes now (an update that was refused).
+                        if let Some(status) = serving.as_mut().and_then(|served| served.done_due.take()) {
+                            self.end_served(&mut serving, status).await?;
                         }
                         group_id += 1;
                     }
@@ -2965,6 +2977,8 @@ impl Client<'_> {
                 send,
                 track_alias,
                 streams: 0,
+                sending: false,
+                done_due: None,
             });
             return Ok(());
         }
@@ -3042,12 +3056,18 @@ impl Client<'_> {
                     xmoq_moqt_io::send_message(&mut served.send, response, wire, "served").await?;
                 }
                 // Any other update is refused: the first one is answered
-                // with REQUEST_ERROR, and the subscription ends (§10.9.1).
+                // with REQUEST_ERROR, and the subscription ends (§10.9.1),
+                // with its PUBLISH_DONE once the stream being written, if
+                // one is, is closed (§10.11).
                 if let PeerRequestEvent::UpdateRefused { response, .. } = event {
                     xmoq_moqt_io::send_message(&mut served.send, &response, wire, "served").await?;
                     report::update_refused();
-                    self.end_served(serving, publish_done_status::UPDATE_FAILED)
-                        .await?;
+                    if served.sending {
+                        served.done_due = Some(publish_done_status::UPDATE_FAILED);
+                    } else {
+                        self.end_served(serving, publish_done_status::UPDATE_FAILED)
+                            .await?;
+                    }
                 }
             }
             PeerRequestStreamEvent::Closed { stream, how } => {
