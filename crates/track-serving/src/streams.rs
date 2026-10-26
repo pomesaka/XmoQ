@@ -18,15 +18,12 @@ use xmoq_moqt::data::{
 };
 use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::stream_reset_code;
-use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendStream,
-    Trace, WriteError, send_message,
+    Connection, RecvStream, RequestClose, RequestReadError, RequestReader, RequestStreamEvent,
+    SendStream, Trace, WriteError, send_message,
 };
 
 use crate::answers::PEER_END_WAIT;
-
-type Send = <WtConnection as Connection>::Send;
 
 /// Messages for one request stream that its task has not sent yet: among
 /// them the answers to the relay's `REQUEST_UPDATE`s, of which §10.9 has
@@ -107,11 +104,8 @@ pub struct RequestTask {
 /// to `heard` with `token`. The stream is cancelled when what this returns
 /// is dropped. After the client finished its direction, the relay gets
 /// [`PEER_END_WAIT`] to end its own before it is stopped.
-// FIXME: generic over `Connection`, as `crate::answers` is, with
-// `send_group` and `PeerRequests`, so that tests on `MemoryConnection`
-// reach them.
-pub fn open_request(
-    connection: &Arc<WtConnection>,
+pub fn open_request<C: Connection>(
+    connection: &Arc<C>,
     token: u64,
     message: ControlMessage,
     waits: Waits,
@@ -137,8 +131,8 @@ pub fn open_request(
     clippy::too_many_lines,
     reason = "one stream's whole life in one select: what it is told, what it reads, its times"
 )]
-async fn request(
-    connection: Arc<WtConnection>,
+async fn request<C: Connection>(
+    connection: Arc<C>,
     token: u64,
     message: ControlMessage,
     waits: Waits,
@@ -256,9 +250,9 @@ async fn request(
 
 /// Cancels a request on its stream (§3.3.2): a reset of the client's
 /// direction, and `STOP_SENDING` for the relay's where it is not over.
-fn cancel(
-    send: Option<Send>,
-    reader: RequestReader<<WtConnection as Connection>::Recv>,
+fn cancel<S: SendStream, R: RecvStream>(
+    send: Option<S>,
+    reader: RequestReader<R>,
     peer_done: bool,
     code: u32,
 ) {
@@ -271,13 +265,12 @@ fn cancel(
 }
 
 /// Stops the receiving half of a stream that was never read.
-fn recv_stop(recv: <WtConnection as Connection>::Recv) {
-    use xmoq_moqt_io::RecvStream;
+fn recv_stop(recv: impl RecvStream) {
     recv.stop(stream_reset_code::CANCELLED);
 }
 
 /// [`SendStream::stopped`] of a half that may be gone.
-async fn stopped(send: Option<&mut Send>) -> WriteError {
+async fn stopped(send: Option<&mut impl SendStream>) -> WriteError {
     match send {
         Some(send) => send.stopped().await,
         None => std::future::pending().await,
@@ -305,7 +298,10 @@ pub struct GroupToSend {
 /// # Errors
 ///
 /// Why it was not sent, for the log.
-pub async fn send_group(connection: Arc<WtConnection>, group: GroupToSend) -> Result<(), String> {
+pub async fn send_group<C: Connection>(
+    connection: Arc<C>,
+    group: GroupToSend,
+) -> Result<(), String> {
     let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
         track_alias: group.track_alias,
         group_id: group.group_id,
@@ -377,5 +373,197 @@ impl Sending {
 impl Drop for Sending {
     fn drop(&mut self) {
         self.0.send_modify(|count| *count = count.saturating_sub(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use xmoq_moqt::data::{SubgroupEvent, SubgroupStreamDecoder};
+    use xmoq_moqt::message::{RequestOk, Subscribe};
+    use xmoq_moqt::name::{FullTrackName, TrackNamespace};
+    use xmoq_moqt_io::memory::{self, MemoryConnection};
+
+    use super::*;
+
+    /// A request the relay can answer with `REQUEST_OK`.
+    fn track_status() -> ControlMessage {
+        ControlMessage::TrackStatus(Subscribe {
+            request_id: 0,
+            full_track_name: FullTrackName::new(
+                TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+                b"a".to_vec(),
+            )
+            .unwrap(),
+            parameters: vec![],
+        })
+    }
+
+    const WAITS: Waits = Waits {
+        open: Duration::from_secs(1),
+        answer: Duration::from_secs(10),
+    };
+
+    /// What the task of the request says next, in time.
+    async fn next(heard: &mut mpsc::Receiver<(u64, Heard)>) -> Heard {
+        let (token, what) = tokio::time::timeout(Duration::from_secs(30), heard.recv())
+            .await
+            .expect("in time")
+            .expect("the task says something");
+        assert_eq!(token, 7);
+        what
+    }
+
+    /// The request stream the client opened, from the relay's side, with
+    /// the request read off it.
+    async fn relay_side(
+        relay: &MemoryConnection,
+    ) -> (
+        <MemoryConnection as Connection>::Send,
+        RequestReader<<MemoryConnection as Connection>::Recv>,
+    ) {
+        let (send, recv) = relay.accept_bi().await.unwrap();
+        let mut reader = RequestReader::new(recv, &Trace::default(), "relay");
+        let first = reader.next_event().await.unwrap();
+        assert!(
+            matches!(
+                first,
+                RequestStreamEvent::Message(ControlMessage::TrackStatus(_))
+            ),
+            "{first:?}"
+        );
+        (send, reader)
+    }
+
+    #[tokio::test]
+    async fn a_request_hears_its_answer_and_its_finish_waits_for_the_relays_fin() {
+        let (client, relay) = memory::pair();
+        let (heard_by, mut heard) = mpsc::channel(8);
+        // Held here: the connection closes when its last holder lets go.
+        let client = Arc::new(client);
+        let task = open_request(&client, 7, track_status(), WAITS, heard_by);
+        let (mut send, mut reader) = relay_side(&relay).await;
+        assert!(matches!(next(&mut heard).await, Heard::Opened));
+        let ok = ControlMessage::RequestOk(RequestOk {
+            parameters: vec![],
+            track_properties: vec![],
+        });
+        send_message(&mut send, &ok, &Trace::default(), "relay")
+            .await
+            .unwrap();
+        let answer = next(&mut heard).await;
+        assert!(
+            matches!(answer, Heard::Message(ControlMessage::RequestOk(_))),
+            "{answer:?}"
+        );
+        task.commands.send(Command::Finish).await.unwrap();
+        // The client's FIN, then the relay's.
+        let end = reader.next_event().await.unwrap();
+        assert!(
+            matches!(end, RequestStreamEvent::Closed(RequestClose::Fin)),
+            "{end:?}"
+        );
+        send.finish();
+        let closed = next(&mut heard).await;
+        assert!(
+            matches!(closed, Heard::Closed(RequestClose::Fin)),
+            "{closed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_without_an_answer_in_its_time_is_told_so() {
+        let (client, relay) = memory::pair();
+        let (heard_by, mut heard) = mpsc::channel(8);
+        let client = Arc::new(client);
+        let _task = open_request(&client, 7, track_status(), WAITS, heard_by);
+        let _relay = relay_side(&relay).await;
+        assert!(matches!(next(&mut heard).await, Heard::Opened));
+        let late = next(&mut heard).await;
+        assert!(matches!(late, Heard::NotAnswered), "{late:?}");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_resets_its_direction_and_stops_the_relays() {
+        let (client, relay) = memory::pair();
+        let (heard_by, mut heard) = mpsc::channel(8);
+        // Held here: the connection closes when its last holder lets go.
+        let client = Arc::new(client);
+        let task = open_request(&client, 7, track_status(), WAITS, heard_by);
+        let (mut send, mut reader) = relay_side(&relay).await;
+        assert!(matches!(next(&mut heard).await, Heard::Opened));
+        // §3.3.2, with INTERNAL_ERROR (0x0) for a code that is not the
+        // default.
+        task.commands.send(Command::Cancel(0x0)).await.unwrap();
+        let end = reader.next_event().await.unwrap();
+        assert!(
+            matches!(
+                end,
+                RequestStreamEvent::Closed(RequestClose::Reset(Some(0x0)))
+            ),
+            "{end:?}"
+        );
+        let stopped = tokio::time::timeout(Duration::from_secs(5), send.stopped())
+            .await
+            .expect("in time");
+        assert_eq!(stopped, WriteError::Stopped(Some(0x0)));
+    }
+
+    #[tokio::test]
+    async fn a_group_goes_on_a_subgroup_stream_of_its_own_with_a_fin() {
+        let (client, relay) = memory::pair();
+        let opened = Arc::new(AtomicU64::new(0));
+        let group = GroupToSend {
+            track_alias: 5,
+            group_id: 3,
+            payload: b"hi".to_vec(),
+            opened: Arc::clone(&opened),
+        };
+        let client = Arc::new(client);
+        assert_eq!(send_group(Arc::clone(&client), group).await, Ok(()));
+        assert_eq!(opened.load(Ordering::Relaxed), 1);
+
+        let mut stream = relay.accept_uni().await.unwrap();
+        let mut decoder = SubgroupStreamDecoder::new(1024);
+        let mut buffer = [0u8; 64];
+        let mut events = Vec::new();
+        while let Some(read) = stream.read(&mut buffer).await.unwrap() {
+            decoder.push(&buffer[..read]).unwrap();
+            while let Some(event) = decoder.next_event().unwrap() {
+                events.push(event);
+            }
+        }
+        decoder.finish().unwrap();
+        let [SubgroupEvent::Header(header), SubgroupEvent::Object(object)] = events.as_slice()
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(
+            (header.track_alias, header.group_id, header.subgroup_id),
+            (5, 3, SubgroupId::Zero)
+        );
+        assert_eq!(
+            (object.object_id, object.payload.as_slice()),
+            (0, &b"hi"[..])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_group_the_relay_allows_no_stream_for_is_not_sent() {
+        let (client, _relay) = memory::pair_with_stream_limit(1);
+        let client = Arc::new(client);
+        // The one stream the relay allows, held open.
+        let _held = client.open_uni().await.unwrap();
+        let opened = Arc::new(AtomicU64::new(0));
+        let group = GroupToSend {
+            track_alias: 5,
+            group_id: 3,
+            payload: b"hi".to_vec(),
+            opened: Arc::clone(&opened),
+        };
+        assert_eq!(
+            send_group(client, group).await,
+            Err("no stream within 1000 ms".to_string())
+        );
+        assert_eq!(opened.load(Ordering::Relaxed), 0);
     }
 }

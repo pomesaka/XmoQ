@@ -1539,7 +1539,7 @@ impl Transcribing<'_> {
 
     /// A FETCH of the relay: for a range of a transcript, which is answered
     /// from the pieces kept ([`xmoq_track_serving::fetch`]).
-    fn on_fetch(&mut self, asked: AskedFetch) -> Result<()> {
+    fn on_fetch(&mut self, asked: AskedFetch<Send>) -> Result<()> {
         // A Joining FETCH is refused, as the gatherer refuses it: the relay
         // turns a viewer's into a Standalone one before it asks.
         let FetchRange::Standalone {
@@ -1592,7 +1592,7 @@ impl Transcribing<'_> {
     }
 
     /// Refuses a FETCH of the relay with `code`.
-    fn refuse(&mut self, asked: AskedFetch, code: u64) -> Result<()> {
+    fn refuse(&mut self, asked: AskedFetch<Send>, code: u64) -> Result<()> {
         Ok(self.requests.refuse_fetch(&mut self.session, asked, code)?)
     }
 
