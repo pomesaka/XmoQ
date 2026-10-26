@@ -84,7 +84,12 @@ export const HERE: Broadcast = {
 
 /** What a room says on its WebSocket (`packages/room/src/worker.ts`). */
 type RoomMessage =
-	| { type: "hello"; connected: number; broadcast: Broadcast | null }
+	| {
+			type: "hello";
+			connected: number;
+			broadcast: Broadcast | null;
+			transcript: string[] | null;
+		}
 	| { type: "connected"; connected: number }
 	| { type: "reaction"; emoji: string }
 	| { type: "reactions"; counts: Record<string, number> }
@@ -95,6 +100,14 @@ export interface Room {
 	readonly broadcast: Promise<Broadcast | null>;
 	/** The broadcast the room has now, as it last said; null without one, or before it said anything. */
 	current(): Broadcast | null;
+	/**
+	 * The prefix the room says a transcriber listens under for its broadcast
+	 * (`transcript` of its hello), the fields of `xmoq/transcript/<prefix>`
+	 * the room gives a token in; null without one, or before the hello.
+	 * WHY from the room: it gives tokens in its own prefix alone
+	 * (`tokenForNamespace` of `packages/room/src/core/rules.ts`).
+	 */
+	transcript(): string[] | null;
 	/**
 	 * Resolves with the broadcast of the room: at once where it has one, and
 	 * else when a publisher registers one (the room says so to everybody in
@@ -140,6 +153,7 @@ export function joinRoom(as: string): Room | undefined {
 		setTimeout(() => shown.remove(), 2000);
 	};
 	let latest: Broadcast | null = null;
+	let transcript: string[] | null = null;
 	/** Where this page publishes, said again each time the socket opens: the room forgets it with the socket. */
 	let published: Broadcast | undefined;
 	/** The callers of `named` that wait for a publisher to register. */
@@ -157,7 +171,10 @@ export function joinRoom(as: string): Room | undefined {
 				}
 			},
 			message(message) {
-				if (message.type === "hello") first(message.broadcast);
+				if (message.type === "hello") {
+					transcript = message.transcript;
+					first(message.broadcast);
+				}
 				if (message.type === "hello" || message.type === "broadcast") {
 					latest = message.broadcast;
 					if (latest !== null) {
@@ -230,6 +247,7 @@ export function joinRoom(as: string): Room | undefined {
 	return {
 		broadcast,
 		current: () => latest,
+		transcript: () => transcript,
 		named: () =>
 			latest === null
 				? new Promise((resolve) => {

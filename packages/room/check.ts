@@ -85,61 +85,65 @@ say("after the publisher's socket closed:", gone);
 if (at(gone, "broadcast") !== null || at(gone, "connected") !== 0)
 	fail("the broadcast outlived its publisher");
 
-// 1b. A token, where the rooms have a key: the text the relay checks.
+// 1b. Tokens, where the rooms have a key: the text the relay checks, in the
+// namespaces of the room alone, and an answer to every ask, with token null
+// where there is none, so that a reader that goes by the order goes on.
 {
 	const asker = join();
 	await asker.opened;
-	const tokens = (): number => ofType(asker.got, "token").length;
-	asker.socket.send(
-		JSON.stringify({
-			type: "token-for",
+	const broadcasts = (process.env.BROADCAST_NAMESPACES ?? "").split(",");
+	const asks: { role: "pub" | "sub"; namespace: string[]; given: boolean }[] = [
+		{ role: "sub", namespace: ["xmoq", "chat", room], given: true },
+		{ role: "pub", namespace: ["xmoq", "chat", room, "ann"], given: true },
+		{
 			role: "sub",
 			namespace: ["xmoq", "demo"],
-		}),
-	);
-	await wait(300);
-	const answer = ofType(asker.got, "token")[0];
-	const token = at(answer, "token");
-	say(
-		"a token for sub in xmoq/demo:",
-		token === null ? "none (the rooms have no key)" : masked(token),
-	);
-	if (answer === undefined) fail("no answer to token-for");
-	if (
-		process.env.AUTH_KEY_HEX &&
-		!/^v1\|xmoq\/demo\|sub\|\d+\|[0-9a-f]{64}$/.test(textOf(token))
-	) {
-		fail("the token has not the form v1|namespace|role|expiry|mac");
+			given: broadcasts.includes("xmoq/demo"),
+		},
+		{ role: "sub", namespace: ["xmoq", "*"], given: false },
+		{ role: "sub", namespace: ["xmoq/demo"], given: false },
+		// A meeting's namespaces are join-meeting's, where the room counts.
+		{ role: "pub", namespace: ["xmoq", "meet", room, "x"], given: false },
+		// None above the room, which a SUBSCRIBE_NAMESPACE would list every
+		// room under, and none of another room.
+		{ role: "sub", namespace: ["xmoq"], given: false },
+		{ role: "sub", namespace: ["xmoq", "chat"], given: false },
+		{ role: "sub", namespace: ["xmoq", "chat", `${room}-other`], given: false },
+	];
+	for (const { role, namespace } of asks) {
+		asker.socket.send(JSON.stringify({ type: "token-for", role, namespace }));
 	}
-	asker.socket.send(
-		JSON.stringify({
-			type: "token-for",
-			role: "sub",
-			namespace: ["xmoq", "*"],
-		}),
+	await wait(500);
+	const answers = ofType(asker.got, "token");
+	say(
+		"the tokens:",
+		answers.map((answer) => [
+			at(answer, "namespace"),
+			masked(at(answer, "token")),
+		]),
 	);
-	await wait(300);
-	if (tokens() !== 1) fail("a token was made for a namespace with a field *");
-	asker.socket.send(
-		JSON.stringify({
-			type: "token-for",
-			role: "sub",
-			namespace: ["xmoq/demo"],
-		}),
-	);
-	await wait(300);
-	if (tokens() !== 1)
-		fail("a token was made for a namespace with a / in a field");
-	// A meeting's namespaces are join-meeting's, where the room counts.
-	asker.socket.send(
-		JSON.stringify({
-			type: "token-for",
-			role: "pub",
-			namespace: ["xmoq", "meet", room, "x"],
-		}),
-	);
-	await wait(300);
-	if (tokens() !== 1) fail("token-for made a token in a meeting's namespace");
+	if (answers.length !== asks.length)
+		fail(`${answers.length} answers to ${asks.length} asks for a token`);
+	asks.forEach(({ role, namespace, given }, index) => {
+		const answer = answers[index];
+		const token = at(answer, "token");
+		const what = `${role} in ${namespace.join("/")}`;
+		if (!same(at(answer, "namespace"), namespace))
+			fail(
+				`the answer to ${what} names ${JSON.stringify(at(answer, "namespace"))}`,
+			);
+		if (!given || !process.env.AUTH_KEY_HEX) {
+			if (token !== null) fail(`a token was made for ${what}`);
+			return;
+		}
+		const form = new RegExp(
+			`^v1\\|${namespace.join("/").replaceAll("*", "\\*")}\\|${role}\\|\\d+\\|[0-9a-f]{64}$`,
+		);
+		if (!form.test(textOf(token)))
+			fail(
+				`the token for ${what} has not the form v1|namespace|role|expiry|mac`,
+			);
+	});
 	asker.socket.close();
 	await wait(200);
 }

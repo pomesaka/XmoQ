@@ -60,12 +60,16 @@
 // the Worker has the key it shares with the relay (`AUTH_KEY_HEX`), a
 // client sends {type: "token-for", role: "pub" | "sub", namespace: [...]}
 // and gets {type: "token", role, namespace, token}, or token null where
-// there is no key; nothing for a namespace with a `*` or a `/` in a field. The token is the text the relay checks
+// there is no key. The token is the text the relay checks
 // (crates/relay/src/auth.rs): `v1|<namespace>|<role>|<expiry>|<mac>`, the
-// mac HMAC-SHA-256 over what stands before it. **Anybody who asks gets
-// one**: who may publish in a room, and who may watch, is what would be
-// decided here, and is not. Except in a meeting's namespaces (`xmoq/meet`
-// and under it), which token-for leaves unanswered: they are join-meeting's.
+// mac HMAC-SHA-256 over what stands before it. **Only in the namespaces of
+// the room** (provisional, 2026-10-26: the user's answer to Q65 is
+// awaited): its chat, its transcripts, and the broadcasts of
+// `BROADCAST_NAMESPACES` (`tokenForNamespace` has the table and why); any
+// other ask is answered with token null, a meeting's namespaces (`xmoq/meet`
+// and under it) among them, which are join-meeting's. **Anybody who asks gets one**
+// there: who may publish in a room, and who may watch, is what would be
+// decided here, and is not.
 
 // **A meeting** (decided on 2026-10-25): a participant sends
 // {type: "join-meeting", participant: "<id>"}, the id a random one the page
@@ -87,6 +91,7 @@
 // room counts who it would give a token to now.
 
 import {
+	broadcastNamespaces,
 	MOST_IN_A_MEETING,
 	participantId,
 	relayOf,
@@ -100,6 +105,7 @@ import { keyOfSetting, type Role, TOKEN_SECONDS, tokenText } from "./token.ts";
 interface Env {
 	ROOMS: DurableObjectNamespace;
 	AUTH_KEY_HEX?: string;
+	BROADCAST_NAMESPACES?: string;
 	REACTION_BATCH_MS?: string;
 	RELAY_URL?: string;
 	RELAY_CERT_SHA256_HEX?: string;
@@ -280,14 +286,29 @@ export class Room {
 			"namespace" in said &&
 			Array.isArray(said.namespace)
 		) {
-			const namespace = tokenForNamespace(said.namespace);
-			if (namespace === undefined) return;
+			const { room } = attachmentOf(socket);
+			const namespace = tokenForNamespace(said.role, said.namespace, {
+				room,
+				broadcasts: broadcastNamespaces(this.env.BROADCAST_NAMESPACES),
+				transcripts: [
+					transcriptPrefix(this.env.TRANSCRIPT_PREFIX, room),
+					transcriptPrefix(this.env.MEETING_TRANSCRIPT_PREFIX, room),
+				].filter((prefix) => prefix !== null),
+			});
+			// WHY an answer with no token where none is made, and not none: a
+			// reader matches the answers to its asks by their order (the
+			// pages, `asked` of `crates/viewer-io/src/room_socket.rs`), and
+			// one ask left unanswered would have it wait for ever, or take
+			// the answer of the ask after it for this one.
 			socket.send(
 				JSON.stringify({
 					type: "token",
 					role: said.role,
-					namespace,
-					token: await this.token(said.role, namespace),
+					namespace: namespace ?? said.namespace.map(String),
+					token:
+						namespace === undefined
+							? null
+							: await this.token(said.role, namespace),
 				}),
 			);
 			return;

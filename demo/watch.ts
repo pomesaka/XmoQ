@@ -239,16 +239,18 @@ async function main(): Promise<void> {
 	// relay this page was served with.
 	const room = joinRoom(`viewer-${Math.floor(Math.random() * 1000)}`);
 	if (room !== undefined) await room.broadcast;
-	// The transcriber listens under the namespace the publishing page
-	// announces (`serve.ts`), and its transcript is of that prefix.
-	// After a GOAWAY the captions go to its URI with the same certificate's
-	// hash, as the broadcast and the chat do.
-	startCaptions(NAMESPACE, async (goAway) =>
+	// The transcriber listens under the prefix the room names (its hello),
+	// and the namespace the publishing page announces where no room runs
+	// (`serve.ts`); its transcript is of that prefix. After a GOAWAY the
+	// captions go to its URI with the same certificate's hash, as the
+	// broadcast and the chat do.
+	const listened = room?.transcript() ?? NAMESPACE;
+	startCaptions(listened, async (goAway) =>
 		connectToRelay(
 			goAway === undefined || goAway.newSessionUri === ""
 				? through(HERE)
 				: { ...HERE, relayUrl: goAway.newSessionUri },
-			await room?.token("sub", [...TRANSCRIPT_PREFIX, ...NAMESPACE]),
+			await room?.token("sub", [...TRANSCRIPT_PREFIX, ...listened]),
 		),
 	);
 	/** What the first line under the picture says of the session. */

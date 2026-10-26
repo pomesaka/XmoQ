@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+	broadcastNamespaces,
 	relayOf,
 	type SeatAnswer,
 	seatFor,
@@ -7,35 +8,177 @@ import {
 	transcriptPrefix,
 } from "../src/core/rules.ts";
 
-test.each<{ name: string; asked: unknown[]; namespace: string[] | undefined }>([
+/** The room "blue", the demo's broadcast, and the two transcripts of the demo. */
+const BLUE = {
+	room: "blue",
+	broadcasts: [["xmoq", "demo"]],
+	transcripts: [
+		["xmoq", "demo"],
+		["xmoq", "meet", "blue"],
+	],
+};
+
+test.each<{
+	name: string;
+	role: "pub" | "sub";
+	asked: unknown[];
+	namespace: string[] | undefined;
+}>([
 	{
-		name: "a namespace is answered",
+		name: "sub in the room's chat",
+		role: "sub",
+		asked: ["xmoq", "chat", "blue"],
+		namespace: ["xmoq", "chat", "blue"],
+	},
+	{
+		name: "pub as one in the room's chat",
+		role: "pub",
+		asked: ["xmoq", "chat", "blue", "ann"],
+		namespace: ["xmoq", "chat", "blue", "ann"],
+	},
+	{
+		name: "sub in a transcript of the broadcast",
+		role: "sub",
+		asked: ["xmoq", "transcript", "xmoq", "demo"],
+		namespace: ["xmoq", "transcript", "xmoq", "demo"],
+	},
+	{
+		name: "sub in the transcript of the meeting",
+		role: "sub",
+		asked: ["xmoq", "transcript", "xmoq", "meet", "blue"],
+		namespace: ["xmoq", "transcript", "xmoq", "meet", "blue"],
+	},
+	{
+		name: "sub in a broadcast",
+		role: "sub",
+		asked: ["xmoq", "demo"],
+		namespace: ["xmoq", "demo"],
+	},
+	{
+		name: "pub in a broadcast",
+		role: "pub",
 		asked: ["xmoq", "demo"],
 		namespace: ["xmoq", "demo"],
 	},
 	{
 		name: "fields that are not text are made text",
-		asked: ["xmoq", 7],
-		namespace: ["xmoq", "7"],
+		role: "pub",
+		asked: ["xmoq", "chat", "blue", 7],
+		namespace: ["xmoq", "chat", "blue", "7"],
 	},
-	{ name: "not with a field *", asked: ["xmoq", "*"], namespace: undefined },
+	{
+		name: "not sub in xmoq, which tells of every room",
+		role: "sub",
+		asked: ["xmoq"],
+		namespace: undefined,
+	},
+	{
+		name: "not sub in the chat of every room",
+		role: "sub",
+		asked: ["xmoq", "chat"],
+		namespace: undefined,
+	},
+	{
+		name: "not in another room's chat",
+		role: "sub",
+		asked: ["xmoq", "chat", "red"],
+		namespace: undefined,
+	},
+	{
+		name: "not pub as one in another room's chat",
+		role: "pub",
+		asked: ["xmoq", "chat", "red", "ann"],
+		namespace: undefined,
+	},
+	{
+		name: "not pub in the room's chat itself",
+		role: "pub",
+		asked: ["xmoq", "chat", "blue"],
+		namespace: undefined,
+	},
+	{
+		name: "not pub under one in the chat",
+		role: "pub",
+		asked: ["xmoq", "chat", "blue", "ann", "x"],
+		namespace: undefined,
+	},
+	{
+		name: "not sub as one in the chat",
+		role: "sub",
+		asked: ["xmoq", "chat", "blue", "ann"],
+		namespace: undefined,
+	},
+	{
+		name: "not pub in a transcript",
+		role: "pub",
+		asked: ["xmoq", "transcript", "xmoq", "demo"],
+		namespace: undefined,
+	},
+	{
+		name: "not in another room's transcript",
+		role: "sub",
+		asked: ["xmoq", "transcript", "xmoq", "meet", "red"],
+		namespace: undefined,
+	},
+	{
+		name: "not under a broadcast",
+		role: "sub",
+		asked: ["xmoq", "demo", "x"],
+		namespace: undefined,
+	},
+	{
+		name: "not with a field *",
+		role: "sub",
+		asked: ["xmoq", "chat", "*"],
+		namespace: undefined,
+	},
 	{
 		name: "not with a / in a field",
-		asked: ["xmoq/demo"],
+		role: "sub",
+		asked: ["xmoq/chat", "blue"],
 		namespace: undefined,
 	},
 	{
 		name: "not in a meeting",
+		role: "pub",
 		asked: ["xmoq", "meet", "blue", "x"],
 		namespace: undefined,
 	},
+])("token-for: $name", ({ role, asked, namespace }) => {
+	expect(tokenForNamespace(role, asked, BLUE)).toEqual(namespace);
+});
+
+test("token-for: nothing in a room whose name has a /", () => {
+	expect(
+		tokenForNamespace("sub", ["xmoq", "demo"], { ...BLUE, room: "a/b" }),
+	).toBeUndefined();
+});
+
+test.each<{
+	name: string;
+	setting: string | undefined;
+	namespaces: string[][];
+}>([
+	{ name: "none where it is not set", setting: undefined, namespaces: [] },
+	{ name: "none where it is empty", setting: "", namespaces: [] },
 	{
-		name: "not for the meetings",
-		asked: ["xmoq", "meet"],
-		namespace: undefined,
+		name: "several",
+		setting: "xmoq/demo,xmoq/other/one",
+		namespaces: [
+			["xmoq", "demo"],
+			["xmoq", "other", "one"],
+		],
 	},
-])("token-for: $name", ({ asked, namespace }) => {
-	expect(tokenForNamespace(asked)).toEqual(namespace);
+])("the namespaces of broadcasts: $name", ({ setting, namespaces }) => {
+	expect(broadcastNamespaces(setting)).toEqual(namespaces);
+});
+
+test.each<{ name: string; setting: string }>([
+	{ name: "an empty field", setting: "xmoq//demo" },
+	{ name: "a field *", setting: "xmoq/*" },
+	{ name: "an empty namespace among them", setting: "xmoq/demo," },
+])("BROADCAST_NAMESPACES is an error: $name", ({ setting }) => {
+	expect(() => broadcastNamespaces(setting)).toThrow(RangeError);
 });
 
 test.each<{
