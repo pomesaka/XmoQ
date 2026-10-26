@@ -1667,6 +1667,48 @@ async fn the_relay_cancels_its_subscribe_when_the_last_subscriber_is_gone() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_relay_cancels_its_subscribe_while_its_update_waits_for_credit_the_publisher_gives_not()
+{
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    // WHY a window of one byte: the relay's REQUEST_UPDATE is then being
+    // written, held back by a publisher that reads no more, when the cancel
+    // comes.
+    let (local, remote) = pair_with_window(1);
+    let mut publisher = Peer::connect_over(&hub, local, remote, true, Arrival::First).await;
+    let _namespace = publisher.publish_namespace().await;
+    let mut subscriber = Peer::connect(&hub, true).await;
+    let mut request = subscriber.start_subscribing().await;
+    let (id, mut send, _reader) = publisher.relay_subscribe().await;
+    // DYNAMIC_GROUPS (0x30) = 1: the relay passes a NEW_GROUP_REQUEST on.
+    let dynamic_groups = vec![KeyValuePair::varint(0x30, 1).unwrap()];
+    let (_, ok) = publisher
+        .session
+        .accept_subscribe(id, vec![], dynamic_groups)
+        .unwrap();
+    send_message(&mut send, &ok, &Trace::default(), "relay")
+        .await
+        .unwrap();
+    subscriber.answer(&mut request).await;
+    let update = subscriber
+        .session
+        .update_subscription(request.id, vec![Parameter::NewGroupRequest(0)])
+        .unwrap();
+    send_message(&mut request.send, &update, &Trace::default(), "request")
+        .await
+        .unwrap();
+    tokio::time::sleep(SOON).await;
+
+    // The last subscriber goes, and the relay cancels its SUBSCRIBE. WHY
+    // the publisher's half is watched and nothing read: a read gives the
+    // credit, which would let the write end.
+    subscriber.connection.close(0, b"");
+    assert_eq!(
+        timeout(Duration::from_secs(5), send.stopped()).await,
+        Ok(WriteError::Stopped(Some(0x1)))
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_subscriber_that_finishes_its_direction_keeps_getting_objects() {
     let (hub, _task) = hub::spawn(HubConfig::default());
     let mut publisher = Peer::connect(&hub, true).await;
