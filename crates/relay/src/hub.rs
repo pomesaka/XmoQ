@@ -26,10 +26,10 @@ use xmoq_moqt::printable::{printable, printable_namespace};
 use xmoq_moqt::session::MAX_UNANSWERED_UPDATES;
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
-    Connection, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, OutgoingEvent,
-    OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent, QueueFull, RecvStream,
-    RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendBudget, SendLimits,
-    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError,
+    Connection, ConnectionEnd, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams,
+    OutgoingEvent, OutgoingSubgroup, PeerRequestClose, PeerRequestStreamEvent, QueueFull,
+    RecvStream, RequestClose, RequestReadError, RequestReader, RequestStreamEvent, SendBudget,
+    SendLimits, SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, WriteError,
     open_fetch_stream_in_order, open_fetch_stream_without_header, read_request_streams,
     read_uni_streams, send_message,
 };
@@ -489,7 +489,7 @@ impl Log {
         // Relaxed: a count for a log line.
         let dropped = self.dropped.swap(0, Ordering::Relaxed);
         if dropped > 0 {
-            let notice = format!("LOG_DROPPED lines={dropped}");
+            let notice = log_dropped_line(dropped);
             if self.lines.try_send(notice).is_err() {
                 self.dropped.fetch_add(dropped, Ordering::Relaxed);
             }
@@ -498,6 +498,11 @@ impl Log {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// `interop/harness.ts` looks for it.
+fn log_dropped_line(dropped: u64) -> String {
+    format!("LOG_DROPPED lines={dropped}")
 }
 
 /// What reaches the hub.
@@ -1767,11 +1772,11 @@ impl<C: Connection> Hub<C> {
             _ => None,
         };
         if full && send_to.is_none() {
-            self.log(|| format!("SESSION_REFUSED session={} too many sessions", session.0));
+            self.log(|| session_refused_line(session));
             connection.close(TerminationCode::InternalError.code(), b"too many sessions");
             return;
         }
-        self.log(|| format!("SESSION_OPENED session={}", session.0));
+        self.log(|| session_opened_line(session));
         let stops = StreamStops::default();
         let (control, control_inbox) = mpsc::channel(self.config.session_queue_len);
 
@@ -1847,7 +1852,7 @@ impl<C: Connection> Hub<C> {
     /// ([`HubConfig::when_full`]): what the core is told, and the timer of
     /// its GOAWAY.
     fn send_away(&mut self, session: SessionKey, url: String) -> Event {
-        self.log(|| format!("SESSION_SENT_AWAY session={} uri={url}", session.0));
+        self.log(|| session_sent_away_line(session, &url));
         let due = tokio::spawn({
             let events = self.events.clone();
             async move {
@@ -1931,14 +1936,7 @@ impl<C: Connection> Hub<C> {
                 message,
             } = &event
             {
-                self.log(|| {
-                    format!(
-                        "RECV session={} own={} {}",
-                        session.0,
-                        request.0,
-                        name(message)
-                    )
-                });
+                self.log(|| recv_line(*session, *request, message));
             }
             if let Event::DrainTimeout { session, wait, .. } = &event {
                 self.drain_ended(*session, *wait, "timeout");
@@ -1957,14 +1955,7 @@ impl<C: Connection> Hub<C> {
                 if self.fetch_pipes.remove(&(*session, *stream)).is_none() {
                     continue;
                 }
-                self.log(|| {
-                    format!(
-                        "FETCH_PIPE_ENDED session={} stream={} {}",
-                        session.0,
-                        stream.0,
-                        pipe_end(*how)
-                    )
-                });
+                self.log(|| fetch_pipe_ended_line(*session, *stream, *how));
             }
             // The peer's half of the stream is gone: nothing is left to wait
             // for there.
@@ -2945,14 +2936,7 @@ impl<C: Connection> Hub<C> {
                 going_away,
                 drained,
             } => {
-                self.log(|| {
-                    format!(
-                        "GOING_AWAY sessions={} timeout_ms={} uri={}",
-                        self.sessions.len(),
-                        going_away.timeout_ms,
-                        String::from_utf8_lossy(&going_away.new_session_uri)
-                    )
-                });
+                self.log(|| going_away_line(self.sessions.len(), &going_away));
                 self.drained = Some(drained);
                 self.feed(VecDeque::from([Event::GoingAway(going_away)]));
                 return;
@@ -2969,7 +2953,7 @@ impl<C: Connection> Hub<C> {
             .values()
             .map(|handle| Arc::clone(&handle.connection))
             .collect();
-        self.log(|| format!("STOPPING sessions={}", sessions.len()));
+        self.log(|| stopping_line(sessions.len()));
         let mut pending = VecDeque::new();
         for session in sessions {
             self.close(session, code, reason, &mut pending);
@@ -3000,12 +2984,7 @@ impl<C: Connection> Hub<C> {
         if let Some(until) = handle.idle_until {
             self.idle.remove(&(until, session));
         }
-        self.log(|| {
-            format!(
-                "CLOSE_SESSION session={} code={code:#x} reason={reason:?}",
-                session.0
-            )
-        });
+        self.log(|| close_session_line(session, code, reason));
         // WHY here and not through a writer of the session: the session is
         // forgotten right after, which stops its writers. A close left in a
         // queue would be lost, and the peer would see the connection go away
@@ -3048,7 +3027,7 @@ impl<C: Connection> Hub<C> {
             self.idle.remove(&(until, session));
         }
         if idle_until.is_some() | self.closing.remove(&session) {
-            self.log(|| format!("SESSION_CLOSED session={}", session.0));
+            self.log(|| session_closed_line(session));
         }
         // Every writer of the session, also one that was finished and has not
         // written everything out.
@@ -3070,13 +3049,74 @@ impl<C: Connection> Hub<C> {
             return;
         };
         let after_ms = began.elapsed().as_millis();
-        self.log(|| {
-            format!(
-                "DRAIN_ENDED session={} after_ms={after_ms} by={by}",
-                session.0
-            )
-        });
+        self.log(|| drain_ended_line(session, after_ms, by));
     }
+}
+
+// The lines of the sessions and of the relay as a whole. The interop scenes
+// wait for each (the scripts are named on each function), and the tests in
+// `line_tests` pin them.
+
+/// `interop/when-full.ts`.
+fn session_refused_line(session: SessionKey) -> String {
+    format!("SESSION_REFUSED session={} too many sessions", session.0)
+}
+
+/// `interop/disconnect.ts`, `interop/no-answer.ts`, `interop/rendezvous.ts`.
+fn session_opened_line(session: SessionKey) -> String {
+    format!("SESSION_OPENED session={}", session.0)
+}
+
+/// `interop/when-full.ts`.
+fn session_sent_away_line(session: SessionKey, url: &str) -> String {
+    format!("SESSION_SENT_AWAY session={} uri={url}", session.0)
+}
+
+/// `interop/fetch.ts`, `interop/rendezvous.ts`, `interop/disconnect.ts`.
+fn recv_line(session: SessionKey, request: OwnRequestKey, message: &ControlMessage) -> String {
+    format!(
+        "RECV session={} own={} {}",
+        session.0,
+        request.0,
+        name(message)
+    )
+}
+
+/// `interop/quiet-peer.ts`, `interop/video.ts`, `interop/watch-rust.ts`.
+fn going_away_line(sessions: usize, going_away: &GoingAway) -> String {
+    format!(
+        "GOING_AWAY sessions={} timeout_ms={} uri={}",
+        sessions,
+        going_away.timeout_ms,
+        String::from_utf8_lossy(&going_away.new_session_uri)
+    )
+}
+
+/// `interop/watch-rust.ts`.
+fn stopping_line(sessions: usize) -> String {
+    format!("STOPPING sessions={sessions}")
+}
+
+/// `interop/auth-edge.ts`, `interop/disconnect.ts`, `interop/new-group.ts`,
+/// `interop/no-answer.ts`, `interop/quiet-peer.ts`, `interop/rendezvous.ts`.
+fn close_session_line(session: SessionKey, code: u32, reason: &str) -> String {
+    format!(
+        "CLOSE_SESSION session={} code={code:#x} reason={reason:?}",
+        session.0
+    )
+}
+
+/// `interop/disconnect.ts`, `interop/quiet-peer.ts`.
+fn session_closed_line(session: SessionKey) -> String {
+    format!("SESSION_CLOSED session={}", session.0)
+}
+
+/// `interop/disconnect.ts`.
+fn drain_ended_line(session: SessionKey, after_ms: u128, by: &str) -> String {
+    format!(
+        "DRAIN_ENDED session={} after_ms={after_ms} by={by}",
+        session.0
+    )
 }
 
 fn uni_envelope<C: Connection>(session: SessionKey, event: UniEvent) -> Envelope<C> {
@@ -3146,11 +3186,7 @@ fn request_envelope<C: Connection>(
             // that cancels sends both (§3.3.2), and whichever the relay sees
             // first ends the request; the other is then not looked at.
             if let (PeerRequestClose::Reset(code), Some(log)) = (how, log) {
-                log.print(format!(
-                    "RESET_RECEIVED session={} stream={stream} {}",
-                    session.0,
-                    stop_code(code)
-                ));
+                log.print(reset_received_line(session, stream, code));
             }
             Envelope::Core(Event::RequestClosed {
                 session,
@@ -3169,12 +3205,26 @@ fn request_envelope<C: Connection>(
     }
 }
 
+/// `interop/no-answer.ts`.
+fn reset_received_line(session: SessionKey, stream: u64, code: Option<u32>) -> String {
+    format!(
+        "RESET_RECEIVED session={} stream={stream} {}",
+        session.0,
+        stop_code(code)
+    )
+}
+
 fn reader_panicked<C: Connection>(session: SessionKey) -> Envelope<C> {
     Envelope::Broken {
         session,
         code: TerminationCode::InternalError,
         reason: "a stream reader failed",
     }
+}
+
+/// `interop/no-answer.ts`.
+fn connection_ended_line(session: SessionKey, end: &ConnectionEnd) -> String {
+    format!("CONNECTION_ENDED session={} {end:?}", session.0)
 }
 
 /// Owns the readers of one session and reports the session closed.
@@ -3196,7 +3246,7 @@ async fn watch_session<C: Connection>(
 ) {
     let end = connection.closed().await;
     if let Some(log) = &log {
-        log.print(format!("CONNECTION_ENDED session={} {end:?}", session.0));
+        log.print(connection_ended_line(session, &end));
     }
     let read = async {
         for reader in &mut readers {
@@ -3319,12 +3369,7 @@ async fn write_request<C: Connection>(
             stopped = send.stopped() => {
                 if let WriteError::Stopped(code) = stopped {
                     if let Some(log) = &log {
-                        log.print(format!(
-                            "STOP_SENDING_RECEIVED session={} stream={} {}",
-                            session.0,
-                            stream.0,
-                            stop_code(code)
-                        ));
+                        log.print(stop_sending_received_line(session, stream, code));
                     }
                     // §3.3.2, §5.1: STOP_SENDING on a request stream cancels
                     // the request. The relay's half is reset in turn.
@@ -3660,6 +3705,16 @@ fn end_own_request<S: SendStream, R>(
     reader.stop(code);
 }
 
+/// `interop/fetch-rust.ts`.
+fn fetch_pipe_ended_line(session: SessionKey, stream: StreamKey, how: FetchPipeEnd) -> String {
+    format!(
+        "FETCH_PIPE_ENDED session={} stream={} {}",
+        session.0,
+        stream.0,
+        pipe_end(how)
+    )
+}
+
 /// How the passing on of a fetch stream ended, for the log. The three waits
 /// of a relayed FETCH show apart: the answer that did not come is a
 /// `REQUEST_ERROR` with `TIMEOUT` and no pipe, a publisher that sent nothing
@@ -3839,6 +3894,17 @@ impl<C: Connection> FetchPipe<C> {
 /// there was none.
 fn stop_code(code: Option<u32>) -> String {
     code.map_or_else(|| "code=none".to_string(), |code| format!("code={code:#x}"))
+}
+
+/// A peer stopped a request stream of its own. `interop/disconnect.ts` and
+/// `interop/no-answer.ts` wait for this form, with `stream=`.
+fn stop_sending_received_line(session: SessionKey, stream: StreamKey, code: Option<u32>) -> String {
+    format!(
+        "STOP_SENDING_RECEIVED session={} stream={} {}",
+        session.0,
+        stream.0,
+        stop_code(code)
+    )
 }
 
 /// [`HubConfig::log_arrivals`]: a subgroup stream or an Object of a peer the
@@ -4144,6 +4210,14 @@ fn name(message: &ControlMessage) -> String {
 
 #[cfg(test)]
 mod line_tests {
+    use xmoq_moqt::data::{SubgroupHeader, SubgroupId};
+    use xmoq_moqt::fetch::RangeEnd;
+    use xmoq_moqt::message::{
+        Fetch, FetchOk, FetchRange, PublishDone, ReasonPhrase, RequestError, RequestOk,
+        RequestUpdate, SubscribeOk,
+    };
+    use xmoq_moqt::name::Location;
+
     use super::*;
 
     #[test]
@@ -4177,6 +4251,414 @@ mod line_tests {
         ];
         for (action, line) in cases {
             assert_eq!(describe(&action).as_deref(), Some(line));
+        }
+    }
+
+    // The interop scenes wait for these lines by their form, which a test of
+    // the hub does not show (`interop/disconnect.ts`, at its top). Each row
+    // names the scripts that wait for its kind.
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "a table of 24 rows and one loop")]
+    fn the_lines_of_actions_keep_the_form_the_interop_scenes_wait_for() {
+        let s = SessionKey;
+        let st = StreamKey;
+        let fetch = ControlMessage::Fetch(Fetch {
+            request_id: 2,
+            range: FetchRange::RelativeJoining {
+                joining_request_id: 0,
+                joining_start: 0,
+            },
+            parameters: Vec::new(),
+        });
+        let update = ControlMessage::RequestUpdate(RequestUpdate {
+            request_id: 4,
+            parameters: Vec::new(),
+        });
+        let answer = |message| Action::SendRequest {
+            session: s(1),
+            stream: st(5),
+            message,
+        };
+        let cases = [
+            // catalog.ts, fetch-rust.ts, rendezvous.ts.
+            (
+                Action::SubscribeHeld {
+                    session: s(1),
+                    stream: st(5),
+                },
+                "HOLD_REQUEST session=1 stream=5 SUBSCRIBE",
+            ),
+            (
+                Action::StartJoiningFetchTimer {
+                    session: s(1),
+                    stream: st(5),
+                },
+                "HOLD_REQUEST session=1 stream=5 FETCH",
+            ),
+            // half-object.ts.
+            (
+                Action::StartReceiptTimer {
+                    session: s(1),
+                    stream: st(5),
+                    wait_ms: 300,
+                },
+                "HOLD_FETCH_FOR_OBJECT session=1 stream=5 wait_ms=300",
+            ),
+            // fetch-rust.ts, fetch.ts, half-object.ts.
+            (
+                Action::WriteFetchStream {
+                    session: s(1),
+                    stream: st(5),
+                    request_id: 2,
+                    pieces: vec![
+                        FetchPiece::EndOfRange(
+                            RangeEnd::Unknown,
+                            Location {
+                                group: 3,
+                                object: 1,
+                            },
+                        ),
+                        FetchPiece::EndOfRange(
+                            RangeEnd::Unknown,
+                            Location {
+                                group: 4,
+                                object: 0,
+                            },
+                        ),
+                    ],
+                    wait_ms: 1000,
+                    send_order: 0,
+                },
+                "WRITE_FETCH_STREAM session=1 request_id=2 pieces=2",
+            ),
+            // fetch-rust.ts, fetch.ts.
+            (
+                Action::AbortFetchWrite {
+                    session: s(1),
+                    stream: st(5),
+                    code: 0x1,
+                },
+                "ABORT_FETCH_WRITE session=1 stream=5 code=0x1",
+            ),
+            // quiet-peer.ts.
+            (
+                Action::NoteHeldBeyondCache {
+                    session: s(1),
+                    stream: st(5),
+                    refused: false,
+                    relay_bytes: 2048,
+                    session_bytes: 1024,
+                },
+                "HELD_BEYOND_CACHE session=1 stream=5 stopped relay_bytes=2048 session_bytes=1024",
+            ),
+            (
+                Action::NoteHeldBeyondCache {
+                    session: s(1),
+                    stream: st(5),
+                    refused: true,
+                    relay_bytes: 2048,
+                    session_bytes: 1024,
+                },
+                "HELD_BEYOND_CACHE session=1 stream=5 refused relay_bytes=2048 session_bytes=1024",
+            ),
+            // auth-edge.ts, disconnect.ts, new-group.ts.
+            (
+                Action::OpenDataStream {
+                    session: s(1),
+                    out_stream: OutStreamKey(7),
+                    header: SubgroupHeader {
+                        track_alias: 9,
+                        group_id: 3,
+                        subgroup_id: SubgroupId::Zero,
+                        publisher_priority: None,
+                        properties: false,
+                        end_of_group: false,
+                        first_object: true,
+                    },
+                    subgroup_delivery_timeout: Some(500),
+                    send_order: 0,
+                },
+                "OPEN_DATA session=1 out=7 track_alias=9 group=3",
+            ),
+            // disconnect.ts.
+            (
+                Action::FinishDataStream {
+                    out_stream: OutStreamKey(7),
+                },
+                "FINISH_DATA out=7",
+            ),
+            // disconnect.ts.
+            (
+                Action::ResetDataStream {
+                    out_stream: OutStreamKey(7),
+                    code: 0x2,
+                },
+                "RESET_DATA out=7 code=0x2",
+            ),
+            // disconnect.ts.
+            (
+                Action::StopDataStream {
+                    session: s(1),
+                    stream: st(5),
+                    code: 0x0,
+                },
+                "STOP_DATA session=1 stream=5 code=0x0",
+            ),
+            // disconnect.ts, rendezvous.ts.
+            (
+                Action::StartDrainTimer {
+                    session: s(1),
+                    track_alias: 9,
+                    wait: 4,
+                },
+                "DRAIN_TIMER session=1 track_alias=9",
+            ),
+            // fetch-rust.ts.
+            (
+                Action::FinishRequest {
+                    session: s(1),
+                    stream: st(5),
+                },
+                "FINISH_REQUEST session=1 stream=5",
+            ),
+            // disconnect.ts.
+            (
+                Action::ResetRequest {
+                    session: s(1),
+                    stream: st(5),
+                    code: 0x1,
+                },
+                "RESET_REQUEST session=1 stream=5 code=0x1",
+            ),
+            // chat-edge.ts, disconnect.ts, fetch-rust.ts, fetch.ts,
+            // half-object.ts, no-answer.ts, rendezvous.ts.
+            (
+                Action::OpenRequest {
+                    session: s(0),
+                    request: OwnRequestKey(3),
+                    message: fetch,
+                },
+                "OPEN_REQUEST session=0 own=3 FETCH",
+            ),
+            // video.ts.
+            (
+                Action::SendOwnRequest {
+                    session: s(0),
+                    request: OwnRequestKey(3),
+                    message: update.clone(),
+                },
+                "SEND_OWN_REQUEST session=0 own=3 REQUEST_UPDATE",
+            ),
+            // chat-edge.ts, fetch.ts, no-answer.ts.
+            (
+                Action::CancelOwnRequest {
+                    session: s(0),
+                    request: OwnRequestKey(3),
+                    code: 0x1,
+                },
+                "CANCEL_OWN_REQUEST session=0 own=3 code=0x1",
+            ),
+            // chat-edge.ts.
+            (
+                Action::StartParentAnnouncementTimer {
+                    session: s(0),
+                    wait_ms: 1500,
+                },
+                "ANNOUNCE_TO_PARENT_LATER session=0 after_ms=1500",
+            ),
+            // The control messages, by `name`: auth-edge.ts, chat-edge.ts,
+            // disconnect.ts, fetch-rust.ts, half-object.ts, new-group.ts,
+            // no-answer.ts, quiet-peer.ts, rendezvous.ts.
+            (
+                answer(ControlMessage::SubscribeOk(SubscribeOk {
+                    track_alias: 9,
+                    parameters: Vec::new(),
+                    track_properties: Vec::new(),
+                })),
+                "SEND session=1 stream=5 SUBSCRIBE_OK track_alias=9",
+            ),
+            (
+                answer(ControlMessage::RequestError(RequestError {
+                    error_code: 0x10,
+                    retry_interval: 0,
+                    error_reason: ReasonPhrase::default(),
+                    redirect: None,
+                })),
+                "SEND session=1 stream=5 REQUEST_ERROR error_code=0x10",
+            ),
+            (
+                answer(ControlMessage::PublishDone(PublishDone {
+                    status_code: 0x5,
+                    stream_count: 2,
+                    error_reason: ReasonPhrase::default(),
+                })),
+                "SEND session=1 stream=5 PUBLISH_DONE status_code=0x5 stream_count=2",
+            ),
+            (
+                answer(ControlMessage::FetchOk(FetchOk {
+                    end_of_track: false,
+                    end_location: Location {
+                        group: 4,
+                        object: 0,
+                    },
+                    parameters: Vec::new(),
+                    track_properties: Vec::new(),
+                })),
+                "SEND session=1 stream=5 FETCH_OK",
+            ),
+            (
+                answer(ControlMessage::RequestOk(RequestOk::default())),
+                "SEND session=1 stream=5 REQUEST_OK",
+            ),
+            (answer(update), "SEND session=1 stream=5 REQUEST_UPDATE"),
+        ];
+        for (action, line) in cases {
+            assert_eq!(describe(&action).as_deref(), Some(line));
+        }
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "a table of 28 rows and one loop")]
+    fn the_lines_of_sessions_and_streams_keep_the_form_the_interop_scenes_wait_for() {
+        let s = SessionKey;
+        let st = StreamKey;
+        let fetch_ok = ControlMessage::FetchOk(FetchOk {
+            end_of_track: true,
+            end_location: Location {
+                group: 4,
+                object: 0,
+            },
+            parameters: Vec::new(),
+            track_properties: Vec::new(),
+        });
+        let going_away = |uri: &[u8]| GoingAway {
+            new_session_uri: uri.to_vec(),
+            timeout_ms: 10_000,
+        };
+        // (the line as the relay makes it; the line)
+        let cases = [
+            // harness.ts.
+            (
+                crate::listening_line("xmoq-relay/0.0.0", 4443),
+                "LISTENING xmoq-relay/0.0.0 port=4443",
+            ),
+            // harness.ts.
+            (log_dropped_line(12), "LOG_DROPPED lines=12"),
+            // disconnect.ts, no-answer.ts, rendezvous.ts.
+            (session_opened_line(s(3)), "SESSION_OPENED session=3"),
+            // when-full.ts.
+            (
+                session_refused_line(s(3)),
+                "SESSION_REFUSED session=3 too many sessions",
+            ),
+            // when-full.ts.
+            (
+                session_sent_away_line(s(3), "https://b.example:4443/?sent-away"),
+                "SESSION_SENT_AWAY session=3 uri=https://b.example:4443/?sent-away",
+            ),
+            // auth-edge.ts, disconnect.ts, new-group.ts, no-answer.ts,
+            // quiet-peer.ts, rendezvous.ts.
+            (
+                close_session_line(s(3), 0x11, "no SETUP in time"),
+                "CLOSE_SESSION session=3 code=0x11 reason=\"no SETUP in time\"",
+            ),
+            // disconnect.ts, quiet-peer.ts.
+            (session_closed_line(s(3)), "SESSION_CLOSED session=3"),
+            // no-answer.ts.
+            (
+                connection_ended_line(
+                    s(3),
+                    &ConnectionEnd::ClosedByPeer {
+                        code: 0,
+                        reason: "bye".to_string(),
+                    },
+                ),
+                "CONNECTION_ENDED session=3 ClosedByPeer { code: 0, reason: \"bye\" }",
+            ),
+            (
+                connection_ended_line(s(3), &ConnectionEnd::ClosedLocally),
+                "CONNECTION_ENDED session=3 ClosedLocally",
+            ),
+            (
+                connection_ended_line(s(3), &ConnectionEnd::Lost("timed out".to_string())),
+                "CONNECTION_ENDED session=3 Lost(\"timed out\")",
+            ),
+            // quiet-peer.ts, video.ts, watch-rust.ts.
+            (
+                going_away_line(2, &going_away(b"https://c.example:4443/")),
+                "GOING_AWAY sessions=2 timeout_ms=10000 uri=https://c.example:4443/",
+            ),
+            (
+                going_away_line(2, &going_away(b"")),
+                "GOING_AWAY sessions=2 timeout_ms=10000 uri=",
+            ),
+            // watch-rust.ts.
+            (stopping_line(2), "STOPPING sessions=2"),
+            // disconnect.ts.
+            (
+                drain_ended_line(s(3), 250, "timeout"),
+                "DRAIN_ENDED session=3 after_ms=250 by=timeout",
+            ),
+            (
+                drain_ended_line(s(3), 40, "stop"),
+                "DRAIN_ENDED session=3 after_ms=40 by=stop",
+            ),
+            // disconnect.ts, no-answer.ts.
+            (
+                stop_sending_received_line(s(3), st(4), Some(0x1)),
+                "STOP_SENDING_RECEIVED session=3 stream=4 code=0x1",
+            ),
+            (
+                stop_sending_received_line(s(3), st(4), None),
+                "STOP_SENDING_RECEIVED session=3 stream=4 code=none",
+            ),
+            // no-answer.ts.
+            (
+                reset_received_line(s(3), 4, Some(0x1)),
+                "RESET_RECEIVED session=3 stream=4 code=0x1",
+            ),
+            (
+                reset_received_line(s(3), 4, None),
+                "RESET_RECEIVED session=3 stream=4 code=none",
+            ),
+            // disconnect.ts, fetch.ts, rendezvous.ts.
+            (
+                recv_line(s(0), OwnRequestKey(3), &fetch_ok),
+                "RECV session=0 own=3 FETCH_OK",
+            ),
+            // fetch-rust.ts.
+            (
+                fetch_pipe_ended_line(s(1), st(5), FetchPipeEnd::Finished),
+                "FETCH_PIPE_ENDED session=1 stream=5 finished",
+            ),
+            (
+                fetch_pipe_ended_line(s(1), st(5), FetchPipeEnd::UpstreamAborted(Some(0x6))),
+                "FETCH_PIPE_ENDED session=1 stream=5 upstream_reset code=0x6",
+            ),
+            (
+                fetch_pipe_ended_line(s(1), st(5), FetchPipeEnd::UpstreamLost),
+                "FETCH_PIPE_ENDED session=1 stream=5 upstream_lost",
+            ),
+            (
+                fetch_pipe_ended_line(s(1), st(5), FetchPipeEnd::UpstreamStalled),
+                "FETCH_PIPE_ENDED session=1 stream=5 upstream_stalled",
+            ),
+            (
+                fetch_pipe_ended_line(s(1), st(5), FetchPipeEnd::DownstreamStopped(None)),
+                "FETCH_PIPE_ENDED session=1 stream=5 downstream_stopped code=none",
+            ),
+            (
+                fetch_pipe_ended_line(s(1), st(5), FetchPipeEnd::DownstreamStalled),
+                "FETCH_PIPE_ENDED session=1 stream=5 downstream_stalled",
+            ),
+            (
+                fetch_pipe_ended_line(s(1), st(5), FetchPipeEnd::DownstreamLost),
+                "FETCH_PIPE_ENDED session=1 stream=5 downstream_lost",
+            ),
+        ];
+        for (made, line) in cases {
+            assert_eq!(made, line);
         }
     }
 }
@@ -5006,6 +5488,12 @@ mod fetch_write_tests {
                 WriteEnd::NotTaken,
                 0,
                 "FETCH_WRITE_ENDED session=2 stream=5 not_taken pieces=0 code=0x5",
+            ),
+            // TOO_FAR_BEHIND (0x5), for a subscriber that stopped taking.
+            (
+                WriteEnd::TooSlow,
+                2,
+                "FETCH_WRITE_ENDED session=2 stream=5 too_slow pieces=2 code=0x5",
             ),
             // CANCELLED (0x1), for a subscriber that stopped the stream.
             (
