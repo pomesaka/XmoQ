@@ -3,9 +3,8 @@
 // after one ended (`createNextSession`). No I/O and no timer: these say how
 // long, and the caller waits. The rule on the same session is also the
 // Rust clients' (`crates/again`), and both read
-// `fixtures/ask-again/same-session.tsv`.
-// FIXME: name the Rust reader of `next-session.tsv` here once
-// `xmoq-viewer` reads it; until then only this package does.
+// `fixtures/ask-again/same-session.tsv`; the rule of the next session is
+// also `reconnect` of `xmoq-viewer`, and both read `next-session.tsv`.
 //
 // WHY here, in @xmoq/moqt, and not in a package of its own: the loop that
 // follows a GOAWAY (`keepMoving`, `src/webtransport`) needs the connection's
