@@ -31,7 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use xmoq_again::AskAgain;
+use xmoq_again::{AskAgain, Pauses};
+use xmoq_moqt::message::request_error_code;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::session::{RequestEvent, RequestId, Session};
 use xmoq_moqt::{RequestFault, stream_reset_code};
@@ -141,11 +142,54 @@ pub enum Happened {
     /// reset, a lost connection), a GOAWAY on its stream (§10.4), or the
     /// track found malformed (§2.4.2).
     Ended,
-    /// Its SUBSCRIBE was refused, with the wait its Retry Interval names
-    /// (`RequestError::retry_wait_ms`; `None` for none).
-    Refused(Option<u64>),
+    /// Its SUBSCRIBE was refused with `REQUEST_ERROR`.
+    Refused {
+        /// Its Error Code.
+        error_code: u64,
+        /// The wait its Retry Interval names (`RequestError::retry_wait_ms`;
+        /// `None` for none).
+        named_ms: Option<u64>,
+    },
     /// Its SUBSCRIBE could not be sent, or was not answered.
     NotSent,
+}
+
+/// How a track is kept, besides the pauses: what [`decide`] goes by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keeping {
+    /// [`Wanted::again_after_failure`].
+    pub again_after_failure: bool,
+    /// The most times in a row it is asked again without a subscription
+    /// between, after which it is given up; `None` for no limit.
+    pub times: Option<u32>,
+    /// Whether its publisher need not publish it: a refusal with
+    /// `DOES_NOT_EXIST` gives it up.
+    pub optional: bool,
+}
+
+/// What [`decide`] keeps of one track between what happens to it: the
+/// pauses, and how many times in a row it was asked again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tries {
+    again: AskAgain,
+    asked: u32,
+}
+
+impl Tries {
+    /// None yet, with `pauses`.
+    #[must_use]
+    pub fn new(pauses: Pauses) -> Self {
+        Self {
+            again: AskAgain::new(pauses),
+            asked: 0,
+        }
+    }
+}
+
+impl Default for Tries {
+    fn default() -> Self {
+        Self::new(Pauses::default())
+    }
 }
 
 /// What becomes of a kept track after what happened.
@@ -159,26 +203,39 @@ pub enum Becomes {
     GivenUp,
 }
 
-/// What becomes of a track after `happened`, by the rule `again` keeps of
-/// the pauses (`AskAgain` of `xmoq-again`); `again_after_failure` is
-/// [`Wanted::again_after_failure`]. A message that breaks the protocol is
-/// not one of these: it is the caller's error, and the session is closed
-/// with its code (`client::termination_code` of `xmoq-moqt-io`).
+/// What becomes of a track kept as `keeping` after `happened`, by what
+/// `tries` keeps: the pauses (`AskAgain` of `xmoq-again`), and the times it
+/// was asked again. A message that breaks the protocol is not one of these:
+/// it is the caller's error, and the session is closed with its code
+/// (`client::termination_code` of `xmoq-moqt-io`).
 ///
 /// WHY a failure is paused for as a refusal without a Retry Interval is,
 /// where the track is asked again: as the pages that ask again
-/// (`afterRefusal` of `@xmoq/moqt`).
-pub fn decide(happened: Happened, again_after_failure: bool, again: &mut AskAgain) -> Becomes {
-    match happened {
+/// (`afterRefusal` of `@xmoq/moqt`). WHY a malformed track is asked again,
+/// as any end: what broke the object model may be one Group of a publisher
+/// that goes on ([`KeptTrack::malformed`]).
+pub fn decide(happened: Happened, keeping: Keeping, tries: &mut Tries) -> Becomes {
+    let pause = match happened {
         Happened::Subscribed => {
-            again.subscribed();
-            Becomes::Subscribed
+            tries.again.subscribed();
+            tries.asked = 0;
+            return Becomes::Subscribed;
         }
-        Happened::Ended => Becomes::Again(again.after_end()),
-        Happened::Refused(named_ms) => Becomes::Again(again.after_refusal(named_ms)),
-        Happened::NotSent if again_after_failure => Becomes::Again(again.after_refusal(None)),
-        Happened::NotSent => Becomes::GivenUp,
-    }
+        Happened::Refused { error_code, .. }
+            if keeping.optional && error_code == request_error_code::DOES_NOT_EXIST =>
+        {
+            return Becomes::GivenUp;
+        }
+        Happened::NotSent if !keeping.again_after_failure => return Becomes::GivenUp,
+        _ if keeping.times.is_some_and(|times| tries.asked >= times) => {
+            return Becomes::GivenUp;
+        }
+        Happened::Ended => tries.again.after_end(),
+        Happened::Refused { named_ms, .. } => tries.again.after_refusal(named_ms),
+        Happened::NotSent => tries.again.after_refusal(None),
+    };
+    tries.asked += 1;
+    Becomes::Again(pause)
 }
 
 /// What a thing on the subscription's stream does to it.
@@ -242,7 +299,7 @@ pub struct KeptTrack<C: Connection = WtConnection> {
     /// The SUBSCRIBE on its way, with the session's handle of it.
     asking: Option<(RequestId, Answer<C>)>,
     ask_at: Option<tokio::time::Instant>,
-    again: AskAgain,
+    tries: Tries,
 }
 
 /// Waits for `item` where there is one, and for ever where there is none.
@@ -263,7 +320,7 @@ impl<C: Connection> KeptTrack<C> {
             subscription: None,
             asking: None,
             ask_at: Some(tokio::time::Instant::now()),
-            again: AskAgain::default(),
+            tries: Tries::default(),
         }
     }
 
@@ -282,7 +339,7 @@ impl<C: Connection> KeptTrack<C> {
             subscription: None,
             asking: None,
             ask_at: None,
-            again: AskAgain::default(),
+            tries: Tries::default(),
         };
         kept.take(subscription);
         kept
@@ -426,11 +483,7 @@ impl<C: Connection> KeptTrack<C> {
 
     /// A SUBSCRIBE that could not be sent, or was not answered, for `why`.
     fn not_sent(&mut self, why: String) -> Said {
-        match decide(
-            Happened::NotSent,
-            self.wanted.again_after_failure,
-            &mut self.again,
-        ) {
+        match decide(Happened::NotSent, self.keeping(), &mut self.tries) {
             Becomes::Again(pause_ms) => {
                 self.ask_in(pause_ms);
                 Said::Failed { why, pause_ms }
@@ -439,9 +492,20 @@ impl<C: Connection> KeptTrack<C> {
         }
     }
 
-    /// The pause [`decide`] gives after `happened`, where it is one.
+    /// How the track is kept: with no limit on the times, and as a track
+    /// its publisher is to publish.
+    fn keeping(&self) -> Keeping {
+        Keeping {
+            again_after_failure: self.wanted.again_after_failure,
+            times: None,
+            optional: false,
+        }
+    }
+
+    /// The pause [`decide`] gives after `happened`, an end or a refusal,
+    /// which by [`Self::keeping`] is always one.
     fn pause_after(&mut self, happened: Happened) -> u64 {
-        match decide(happened, self.wanted.again_after_failure, &mut self.again) {
+        match decide(happened, self.keeping(), &mut self.tries) {
             Becomes::Again(pause_ms) => pause_ms,
             Becomes::Subscribed | Becomes::GivenUp => 0,
         }
@@ -456,17 +520,16 @@ impl<C: Connection> KeptTrack<C> {
     ) -> Result<Said, RequestFault> {
         Ok(match settle(session, asked, sent) {
             Ok(subscription) => {
-                decide(
-                    Happened::Subscribed,
-                    self.wanted.again_after_failure,
-                    &mut self.again,
-                );
+                decide(Happened::Subscribed, self.keeping(), &mut self.tries);
                 let track_alias = subscription.track_alias;
                 self.take(subscription);
                 Said::Subscribed { track_alias }
             }
             Err(NotSubscribed::Refused(error)) => {
-                let pause_ms = self.pause_after(Happened::Refused(error.retry_wait_ms()));
+                let pause_ms = self.pause_after(Happened::Refused {
+                    error_code: error.error_code,
+                    named_ms: error.retry_wait_ms(),
+                });
                 self.ask_in(pause_ms);
                 Said::Refused {
                     error_code: error.error_code,
@@ -553,17 +616,28 @@ mod tests {
         assert!(table.ends_with('\n') && !table.ends_with("\n\n"), "{path}");
         let rows: Vec<Vec<&str>> = table.lines().map(|row| row.split('\t').collect()).collect();
         // A table that lost rows would pass.
-        assert_eq!(rows.len(), 16, "{path}");
+        assert_eq!(rows.len(), 23, "{path}");
         for row in rows {
-            let [case, failure, steps, expected] = row.as_slice() else {
-                panic!("a row of four columns: {row:?}");
+            let [case, failure, steps, expected, times, publisher] = row.as_slice() else {
+                panic!("a row of six columns: {row:?}");
             };
-            let again_after_failure = match *failure {
-                "again" => true,
-                "give-up" => false,
-                other => panic!("{case}: {other}"),
+            let keeping = Keeping {
+                again_after_failure: match *failure {
+                    "again" => true,
+                    "give-up" => false,
+                    other => panic!("{case}: {other}"),
+                },
+                times: match *times {
+                    "-" => None,
+                    times => Some(times.parse().expect("times")),
+                },
+                optional: match *publisher {
+                    "required" => false,
+                    "optional" => true,
+                    other => panic!("{case}: {other}"),
+                },
             };
-            let mut again = AskAgain::default();
+            let mut tries = Tries::default();
             let got: Vec<String> = steps
                 .split(' ')
                 .map(|step| {
@@ -583,11 +657,18 @@ mod tests {
                         refused => {
                             let mut fields = refused.split(':');
                             assert_eq!(fields.next(), Some("refused"), "{case}: {step}");
-                            let _code = fields.next().expect("a code");
-                            Happened::Refused(fields.next().map(|ms| ms.parse().expect("ms")))
+                            let code = fields.next().expect("a code");
+                            Happened::Refused {
+                                error_code: u64::from_str_radix(
+                                    code.strip_prefix("0x").expect("hexadecimal"),
+                                    16,
+                                )
+                                .expect("a code"),
+                                named_ms: fields.next().map(|ms| ms.parse().expect("ms")),
+                            }
                         }
                     };
-                    match decide(happened, again_after_failure, &mut again) {
+                    match decide(happened, keeping, &mut tries) {
                         Becomes::Subscribed => "subscribed".to_string(),
                         Becomes::Again(pause_ms) => format!("again:{pause_ms}"),
                         Becomes::GivenUp => "given-up".to_string(),

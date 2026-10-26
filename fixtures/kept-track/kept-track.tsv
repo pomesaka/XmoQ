@@ -1,16 +1,23 @@
-a subscription that ends with PUBLISH_DONE is asked again after the pause	again	subscribed publish-done	subscribed again:1000
-a FIN of the publisher without PUBLISH_DONE ends it as well	again	subscribed fin	subscribed again:1000
-a reset of its stream ends it	again	subscribed reset	subscribed again:1000
-a connection lost while it is read ends it	again	subscribed lost	subscribed again:1000
-a GOAWAY on its stream has it asked again on this session	again	subscribed goaway	subscribed again:1000
-a track found malformed is asked again after the pause	again	subscribed malformed	subscribed again:1000
-a refusal without a time	again	refused:0x10	again:1000
-a refusal that names 3 s	again	refused:0x10:3000	again:3000
-refusals that say at once double from 100 ms, and a subscription begins them anew	again	refused:0x5:0 refused:0x5:0 subscribed publish-done refused:0x5:0	again:100 again:200 subscribed again:1000 again:100
-a SUBSCRIBE that could not be sent is asked again as a refusal without a time	again	not-sent	again:1000
-a SUBSCRIBE not answered, the same	again	not-answered	again:1000
-a track that gives up on a failure: not sent	give-up	not-sent	given-up
-a track that gives up on a failure: not answered	give-up	not-answered	given-up
-an end has it asked again whatever it does on a failure	give-up	subscribed publish-done	subscribed again:1000
-a message that breaks the protocol on its stream closes the session	again	subscribed violation	subscribed closed:0x3
-an answer that breaks the protocol closes the session	give-up	violation	closed:0x3
+a subscription that ends with PUBLISH_DONE is asked again after the pause	again	subscribed publish-done	subscribed again:1000	-	required
+a FIN of the publisher without PUBLISH_DONE ends it as well	again	subscribed fin	subscribed again:1000	-	required
+a reset of its stream ends it	again	subscribed reset	subscribed again:1000	-	required
+a connection lost while it is read ends it	again	subscribed lost	subscribed again:1000	-	required
+a GOAWAY on its stream has it asked again on this session	again	subscribed goaway	subscribed again:1000	-	required
+a track found malformed is asked again after the pause	again	subscribed malformed	subscribed again:1000	-	required
+a refusal without a time	again	refused:0x10	again:1000	-	required
+a refusal that names 3 s	again	refused:0x10:3000	again:3000	-	required
+refusals that say at once double from 100 ms, and a subscription begins them anew	again	refused:0x5:0 refused:0x5:0 subscribed publish-done refused:0x5:0	again:100 again:200 subscribed again:1000 again:100	-	required
+a SUBSCRIBE that could not be sent is asked again as a refusal without a time	again	not-sent	again:1000	-	required
+a SUBSCRIBE not answered, the same	again	not-answered	again:1000	-	required
+a track that gives up on a failure: not sent	give-up	not-sent	given-up	-	required
+a track that gives up on a failure: not answered	give-up	not-answered	given-up	-	required
+an end has it asked again whatever it does on a failure	give-up	subscribed publish-done	subscribed again:1000	-	required
+a message that breaks the protocol on its stream closes the session	again	subscribed violation	subscribed closed:0x3	-	required
+an answer that breaks the protocol closes the session	give-up	violation	closed:0x3	-	required
+a track asked again 2 times in a row is given up the third time	again	refused:0x5 publish-done not-sent	again:1000 again:1000 given-up	2	required
+a subscription between counts the times anew	again	refused:0x5 refused:0x5 subscribed malformed refused:0x5 reset	again:1000 again:1000 subscribed again:1000 again:1000 given-up	2	required
+no times: never asked again	again	subscribed publish-done	subscribed given-up	0	required
+a malformed track and a SUBSCRIBE not answered count among the times	again	subscribed malformed not-answered refused:0x5:3000	subscribed again:1000 again:1000 given-up	2	required
+a track its publisher need not publish is given up where it does not exist	again	refused:0x10	given-up	-	optional
+and is asked again after another refusal and after an end	again	refused:0x5:3000 subscribed publish-done refused:0x10:1001	again:3000 subscribed again:1000 given-up	30	optional
+one it is to publish is asked again where it does not exist	again	refused:0x10:1001	again:1001	30	required

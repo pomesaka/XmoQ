@@ -42,7 +42,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use xmoq_chat::args::Rooms as Taken;
 use xmoq_chat::gather::Left;
-use xmoq_chat::said_again::{SaidAgain, Settings as AskAgain, SubscriptionEnd};
+use xmoq_chat::said_again::Settings as AskAgain;
 use xmoq_moqt::params::SubscriptionFilter;
 
 use anyhow::{Result, anyhow, bail};
@@ -84,6 +84,7 @@ use xmoq_publisher::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
 use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
 use xmoq_publisher::streams::{COMMAND_QUEUE, Command, GroupToSend, Heard, Sending, send_group};
 use xmoq_publisher::{shown, sleep_until};
+use xmoq_subscriber::kept::{Becomes, Happened, Tries, decide};
 use xmoq_subscriber::namespaces::KeptNamespace;
 
 use crate::storage::Store;
@@ -185,7 +186,7 @@ struct Subscription {
     /// The token of its SUBSCRIBE, while it has one.
     token: Option<u64>,
     /// When it is asked again after it is over.
-    again: SaidAgain,
+    tries: Tries,
 }
 
 impl Followed {
@@ -193,7 +194,7 @@ impl Followed {
     fn new(settings: AskAgain) -> Self {
         let subscription = || Subscription {
             token: None,
-            again: SaidAgain::new(settings),
+            tries: settings.tries(),
         };
         Self {
             said: subscription(),
@@ -736,8 +737,8 @@ impl Gathering<'_> {
 
     /// A track of a participant that stays announced is over: it is asked
     /// for again after a pause, or not until its NAMESPACE comes again
-    /// ([`SaidAgain`]).
-    fn track_over(&mut self, person: &Person, track: PersonTrack, end: SubscriptionEnd, why: &str) {
+    /// (`kept::decide` of `xmoq-subscriber`, by [`AskAgain::keeping`]).
+    fn track_over(&mut self, person: &Person, track: PersonTrack, end: Happened, why: &str) {
         let word = person_word(track);
         println!(
             "{word}NOT_SUBSCRIBED room={:?} name={:?} why={why:?}",
@@ -750,8 +751,8 @@ impl Gathering<'_> {
         };
         let subscription = followed.of_mut(track);
         subscription.token = None;
-        match subscription.again.over(end) {
-            Some(pause) => {
+        match decide(end, self.ask_again.keeping(track), &mut subscription.tries) {
+            Becomes::Again(pause) => {
                 println!(
                     "{word}ASKING_AGAIN room={:?} name={:?} in_ms={pause}",
                     person.room.to_string(),
@@ -762,7 +763,7 @@ impl Gathering<'_> {
                     Instant::now() + Duration::from_millis(pause),
                 );
             }
-            None => println!(
+            Becomes::GivenUp | Becomes::Subscribed => println!(
                 "{word}NOT_ASKING_AGAIN room={:?} name={:?}",
                 person.room.to_string(),
                 person.name
@@ -780,7 +781,12 @@ impl Gathering<'_> {
             person.name
         );
         if let Some(followed) = self.people.get_mut(person) {
-            followed.of_mut(track).again.subscribed();
+            let keeping = self.ask_again.keeping(track);
+            decide(
+                Happened::Subscribed,
+                keeping,
+                &mut followed.of_mut(track).tries,
+            );
         }
         self.settle_early()
     }
@@ -857,7 +863,7 @@ impl Gathering<'_> {
                 .entry(person.clone())
                 .or_insert_with(|| Followed::new(settings));
             for track in PERSON_TRACKS {
-                followed.of_mut(track).again = SaidAgain::new(settings);
+                followed.of_mut(track).tries = settings.tries();
             }
         }
         match admitted {
@@ -1262,7 +1268,7 @@ impl Gathering<'_> {
     /// session keeps, `TooManyNamespaces`) is asked no more often than every
     /// 30 seconds. What it misses: a `NAMESPACE_DONE` that comes while no
     /// request is open; that participant stays followed, and is asked again
-    /// for its `said` as many times as [`SaidAgain`] lets it.
+    /// for its `said` as many times as `kept::decide` lets it.
     fn request_over(&mut self, token: u64, purpose: &Purpose, why: &str) {
         match purpose {
             Purpose::Watch(index) => {
@@ -1272,7 +1278,7 @@ impl Gathering<'_> {
                 }
             }
             Purpose::Person(person, track) => {
-                self.track_over(person, *track, SubscriptionEnd::Ended, why);
+                self.track_over(person, *track, Happened::NotSent, why);
             }
             Purpose::Room(room, track) => {
                 let room = room.clone();
@@ -1301,7 +1307,7 @@ impl Gathering<'_> {
         };
         match &purpose {
             Purpose::Person(person, track) => {
-                let end = SubscriptionEnd::Malformed;
+                let end = Happened::Ended;
                 self.track_over(person, *track, end, "the track is malformed");
             }
             purpose => self.request_over(token, purpose, "the track is malformed"),
@@ -1391,11 +1397,9 @@ impl Gathering<'_> {
             (Purpose::Person(person, track), RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
                 let why = format!("refused with {:#x}", error.error_code);
-                let not_there = error.error_code == request_error_code::DOES_NOT_EXIST;
-                let end = if *track == PersonTrack::Reacted && not_there {
-                    SubscriptionEnd::NotPublished
-                } else {
-                    SubscriptionEnd::Refused(error.retry_wait_ms())
+                let end = Happened::Refused {
+                    error_code: error.error_code,
+                    named_ms: error.retry_wait_ms(),
                 };
                 self.track_over(person, *track, end, &why);
             }
@@ -1421,7 +1425,7 @@ impl Gathering<'_> {
                     done.status_code
                 );
                 self.let_go(token, Command::Finish);
-                self.track_over(person, *track, SubscriptionEnd::Ended, "PUBLISH_DONE");
+                self.track_over(person, *track, Happened::Ended, "PUBLISH_DONE");
             }
             (
                 _,
