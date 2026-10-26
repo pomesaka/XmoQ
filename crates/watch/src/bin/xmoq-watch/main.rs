@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
-use xmoq_again::next_session::{After, Ended, NextSession};
+use xmoq_again::next_session::{After, Ended, NextSession, Pause};
 use xmoq_chat_tracks::names::Person;
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
@@ -44,7 +44,6 @@ use xmoq_moqt_io::{
 };
 use xmoq_picture::video_decoder::VideoDecoder;
 use xmoq_viewer::chat_track::{shown, shown_gap};
-use xmoq_viewer::reconnect::BETWEEN_TRIES_MS;
 use xmoq_viewer::room::{self, Broadcast};
 use xmoq_viewer_io::chat_tracks::{ChatTracks, Out as ChatOut};
 use xmoq_viewer_io::ending::{self, UntilClosed};
@@ -384,7 +383,7 @@ async fn run(args: &Args, ui: &mut Ui) -> Result<()> {
     // WHY the first failure ends the viewer, with a room as well: a person
     // started it and looks at it, and a relay that turns it down is to be
     // seen at once.
-    let mut rule = NextSession::new(BETWEEN_TRIES_MS, room.is_some(), true);
+    let mut rule = NextSession::new(Pause::VIEWER, room.is_some(), true);
     let since = Instant::now();
     let now_ms = || u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX);
     loop {

@@ -30,7 +30,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use xmoq_again::AskAgain;
-use xmoq_again::next_session::new_url;
+use xmoq_again::next_session::{Growing, Pause, new_url};
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
@@ -58,7 +58,6 @@ use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
 use xmoq_speech::vad::Silero;
 use xmoq_speech::{AudioPacket, Listener};
 use xmoq_track_serving::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
-use xmoq_track_serving::backoff::Backoff;
 use xmoq_track_serving::fetch::pieces_of;
 use xmoq_track_serving::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
 use xmoq_track_serving::requests::{AskedFetch, FetchAnswer, PeerRequests};
@@ -158,7 +157,19 @@ struct Watch {
     prefix: TrackNamespace,
     again: Option<Instant>,
     sent: Instant,
-    backoff: Backoff,
+    /// The wait after it ended, which grows while it ends again and again.
+    ends: Growing,
+    /// The wait after it was refused, by the Retry Interval.
+    refusals: AskAgain,
+}
+
+/// Has `watch` asked for again `wait_ms` from now, and says so.
+fn watch_again_in(watch: &mut Watch, wait_ms: u64, why: &str) {
+    println!(
+        "WATCH_ENDED prefix={} why={why:?} again_in_ms={wait_ms}",
+        shown(&watch.prefix)
+    );
+    watch.again = Some(Instant::now() + Duration::from_millis(wait_ms));
 }
 
 /// How the subscription to a catalog or a sound ended.
@@ -337,7 +348,8 @@ pub async fn transcribe(
                 prefix: prefix.clone(),
                 again: None,
                 sent: Instant::now(),
-                backoff: Backoff::default(),
+                ends: Growing::new(Pause::SERVING),
+                refusals: AskAgain::default(),
             })
             .collect(),
         broadcasts: HashMap::new(),
@@ -1297,13 +1309,10 @@ impl Transcribing<'_> {
         match purpose {
             Purpose::Watch(index) => {
                 if let Some(watch) = self.watches.get_mut(*index) {
-                    let wait = watch.backoff.after(watch.sent.elapsed());
-                    println!(
-                        "WATCH_ENDED prefix={} why={why:?} again_in_ms={}",
-                        shown(&watch.prefix),
-                        wait.as_millis()
-                    );
-                    watch.again = Some(Instant::now() + wait);
+                    let lasted =
+                        u64::try_from(watch.sent.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let wait = watch.ends.after(lasted);
+                    watch_again_in(watch, wait, why);
                 }
             }
             Purpose::Catalog(namespace) => {
@@ -1440,7 +1449,8 @@ impl Transcribing<'_> {
                 self.request_moved(token, purpose);
             }
             (Purpose::Watch(index), RequestEvent::NamespacesSubscribed) => {
-                if let Some(watch) = self.watches.get(*index) {
+                if let Some(watch) = self.watches.get_mut(*index) {
+                    watch.refusals.subscribed();
                     println!("WATCHING prefix={}", shown(&watch.prefix));
                 }
             }
@@ -1488,6 +1498,12 @@ impl Transcribing<'_> {
                 let why = format!("refused with {:#x}", error.error_code);
                 let over = SubscriptionEnd::Refused(error.retry_wait_ms());
                 match purpose {
+                    Purpose::Watch(index) => {
+                        if let Some(watch) = self.watches.get_mut(*index) {
+                            let wait = watch.refusals.after_refusal(error.retry_wait_ms());
+                            watch_again_in(watch, wait, &why);
+                        }
+                    }
                     Purpose::Audio(namespace) => self.audio_over(&namespace.clone(), over, &why),
                     Purpose::Catalog(namespace) => {
                         self.catalog_over(&namespace.clone(), over, &why);

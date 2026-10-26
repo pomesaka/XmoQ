@@ -9,7 +9,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-xmoq-again = { path = "../again" }
 xmoq-moqt = { path = "../moqt" }
 xmoq-moqt-io = { path = "../moqt-io" }
 tokio = { version = "=1.49.0", features = ["macros", "rt", "sync", "time"] }

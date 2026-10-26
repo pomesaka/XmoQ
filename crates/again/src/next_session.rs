@@ -52,6 +52,84 @@ pub enum After {
     EndWithError,
 }
 
+/// The pause from one try at a session to the next, where the next is not
+/// the one made at once after a GOAWAY: [`Self::first_ms`] at first, twice
+/// the one before after each try, up to [`Self::most_ms`], and
+/// [`Self::first_ms`] again after a session that lasted
+/// [`Self::went_well_ms`] from its try. It counts from the try before, not
+/// from the end of the session. Each role has its own (`fixtures/ask-again/`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pause {
+    /// The first pause, in milliseconds.
+    pub first_ms: u64,
+    /// The longest, in milliseconds.
+    pub most_ms: u64,
+    /// How long a session has to have lasted from its try for the pause to
+    /// begin again from [`Self::first_ms`]; `None` where it never grows.
+    pub went_well_ms: Option<u64>,
+}
+
+impl Pause {
+    /// The viewers' and the agent's: 1 s from one try to the next, however
+    /// often a room names another place. **Provisional.** WHY it does not
+    /// grow: a person waits for the picture.
+    pub const VIEWER: Self = Self {
+        first_ms: 1_000,
+        most_ms: 1_000,
+        went_well_ms: None,
+    };
+
+    /// The gatherer's and the transcriber's: 1 s, doubling to 30 s, and 1 s
+    /// again after a session of a minute. **Provisional**: long against a
+    /// relay that is being started again, short against a person waiting
+    /// for the chat. WHY it grows: a relay that ends every session at once
+    /// would have such a client connect every second for good, and nobody
+    /// watches it. WHY it comes back to the first: after a session that went
+    /// well for a while, the next end is one of its own and not the same
+    /// one again.
+    pub const SERVING: Self = Self {
+        first_ms: 1_000,
+        most_ms: 30_000,
+        went_well_ms: Some(60_000),
+    };
+}
+
+/// The pauses of a [`Pause`] one after the other: the gatherer's and the
+/// transcriber's wait before a `SUBSCRIBE_NAMESPACE` that ended is asked
+/// again, and the wait of [`NextSession`].
+#[derive(Debug, Clone)]
+pub struct Growing {
+    pause: Pause,
+    next_ms: u64,
+}
+
+impl Growing {
+    /// At the first pause.
+    #[must_use]
+    pub fn new(pause: Pause) -> Self {
+        Self {
+            pause,
+            next_ms: pause.first_ms,
+        }
+    }
+
+    /// The pause after something that lasted `lasted_ms` from its try ended:
+    /// the first after one that lasted [`Pause::went_well_ms`], else twice
+    /// the one before, up to [`Pause::most_ms`].
+    pub fn after(&mut self, lasted_ms: u64) -> u64 {
+        if self
+            .pause
+            .went_well_ms
+            .is_some_and(|well| lasted_ms >= well)
+        {
+            self.next_ms = self.pause.first_ms;
+        }
+        let pause = self.next_ms;
+        self.next_ms = pause.saturating_mul(2).min(self.pause.most_ms);
+        pause
+    }
+}
+
 /// Where the next session goes, and when.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Next {
@@ -59,10 +137,6 @@ pub struct Next {
     pub url: String,
     /// How long to wait first, in milliseconds.
     pub wait_ms: u64,
-    /// Whether this is the try made at once after a GOAWAY. A caller that
-    /// waits by a rule of its own after any other end (the gatherer and the
-    /// transcriber, whose wait grows) waits nothing where this is set.
-    pub at_once: bool,
 }
 
 /// How the last try was made.
@@ -77,7 +151,8 @@ enum Try {
 /// The state of the rule from one session to the next.
 #[derive(Debug, Clone)]
 pub struct NextSession {
-    between_ms: u64,
+    /// The pause of each try that is not made at once.
+    pauses: Growing,
     follows: bool,
     /// The last GOAWAY: the URL the viewer was told to leave, and where to
     /// go instead. It holds for every try while the place is still the one
@@ -98,15 +173,15 @@ pub struct NextSession {
 }
 
 impl NextSession {
-    /// The rule for a viewer that waits `between_ms` from one try to the
+    /// The rule for a client that pauses by `pause` from one try to the
     /// next, and that `follows` a room: one whose room says what comes next
     /// connects again after a broadcast ended or broke; one without ends.
-    #[must_use]
     /// `first_failure_ends`: a first try that fails before anything came of
-    /// it ends the viewer, though it follows a room.
-    pub fn new(between_ms: u64, follows: bool, first_failure_ends: bool) -> Self {
+    /// it ends the client, though it follows a room.
+    #[must_use]
+    pub fn new(pause: Pause, follows: bool, first_failure_ends: bool) -> Self {
         Self {
-            between_ms,
+            pauses: Growing::new(pause),
             follows,
             moved: None,
             just_moved: false,
@@ -139,20 +214,17 @@ impl NextSession {
         let at_once = self.just_moved && self.last_try == Try::Waited;
         self.just_moved = false;
         self.last_try = if at_once { Try::AtOnce } else { Try::Waited };
-        let wait_ms = if at_once {
-            0
-        } else {
-            self.tried_at_ms.map_or(0, |tried| {
-                self.between_ms.saturating_sub(now_ms.saturating_sub(tried))
-            })
+        let wait_ms = match self.tried_at_ms {
+            _ if at_once => 0,
+            None => 0,
+            Some(tried) => {
+                let lasted = now_ms.saturating_sub(tried);
+                self.pauses.after(lasted).saturating_sub(lasted)
+            }
         };
         self.tried_at_ms = Some(now_ms.saturating_add(wait_ms));
         self.connected = Some(url.clone());
-        Next {
-            url,
-            wait_ms,
-            at_once,
-        }
+        Next { url, wait_ms }
     }
 
     /// The session [`Self::next`] gave ended so.
@@ -189,6 +261,29 @@ impl NextSession {
 mod tests {
     use super::*;
 
+    /// A pause that does not grow.
+    fn fixed(ms: u64) -> Pause {
+        Pause {
+            first_ms: ms,
+            most_ms: ms,
+            went_well_ms: None,
+        }
+    }
+
+    /// The second column of a row of `next-session.tsv`:
+    /// `<first>,<most>,<went well>`, `-` for a pause that does not begin
+    /// again.
+    fn pause_of(text: &str) -> Pause {
+        let [first, most, went_well] = text.split(',').collect::<Vec<_>>()[..] else {
+            panic!("a pause of three values: {text}");
+        };
+        Pause {
+            first_ms: first.parse().expect("the first pause"),
+            most_ms: most.parse().expect("the longest"),
+            went_well_ms: (went_well != "-").then(|| went_well.parse().expect("how long")),
+        }
+    }
+
     /// The third column of a row of `next-session.tsv`: each end, how long
     /// its session lasted from its try (`@N`, 0 without it), and the wait it
     /// is to be followed by.
@@ -223,40 +318,65 @@ mod tests {
         let rows: Vec<Vec<&str>> = table.lines().map(|row| row.split('\t').collect()).collect();
         // As many as the table has: a row that is added there and not read
         // here is counted, as `@xmoq/moqt` counts them.
-        assert_eq!(rows.len(), 6, "{path}");
+        assert_eq!(rows.len(), 9, "{path}");
         assert!(
             table.ends_with('\n'),
             "{path}: its last row ends with a line feed"
         );
         for row in rows {
-            let [name, between, ends] = row.as_slice() else {
+            let [name, pause, ends] = row.as_slice() else {
                 panic!("a row of three columns: {row:?}");
             };
-            let between: u64 = between.parse().expect("the usual wait");
-            // A room is followed: no end ends the viewer.
-            let mut rule = NextSession::new(between, true, false);
+            // A room is followed: no end ends the client.
+            let mut rule = NextSession::new(pause_of(pause), true, false);
             // The first try at 0; then for each end, the session lasts as
             // the row says from its try, ends, and the next try waits.
             let mut now = 0;
             rule.next("https://a/", now);
             for (step, (end, lasted, wait)) in waits_of(ends).into_iter().enumerate() {
                 now += lasted;
-                let moved = matches!(end, Ended::Moved(_));
                 assert_eq!(rule.ended(end), After::Connect, "{name}, step {step}");
                 let next = rule.next("https://a/", now);
                 assert_eq!(next.wait_ms, wait, "{name}, step {step}");
-                // No row has a session after a GOAWAY that lasted the
-                // whole pause: what waits nothing after one is the try made
-                // at once.
-                assert_eq!(next.at_once, moved && wait == 0, "{name}, step {step}");
                 now += next.wait_ms;
             }
         }
     }
 
     #[test]
+    fn the_serving_pause_doubles_up_to_its_most_and_begins_again_after_a_long_run() {
+        // (case, how long each lasted, the pauses after each, in seconds)
+        let cases: [(&str, &[u64], &[u64]); 4] = [
+            ("one at once", &[0], &[1]),
+            (
+                "again and again at once",
+                &[0, 0, 0, 0, 0, 0, 0, 0],
+                &[1, 2, 4, 8, 16, 30, 30, 30],
+            ),
+            (
+                "one that went well between",
+                &[0, 0, 0, 60, 0],
+                &[1, 2, 4, 1, 2],
+            ),
+            ("one short of going well", &[0, 0, 59], &[1, 2, 4]),
+        ];
+        for (case, lasted, expected) in cases {
+            let mut pauses = Growing::new(Pause::SERVING);
+            let got: Vec<u64> = lasted
+                .iter()
+                .map(|lasted| pauses.after(lasted * 1_000) / 1_000)
+                .collect();
+            assert_eq!(got, expected, "{case}");
+        }
+        // The viewers' does not grow.
+        let mut pauses = Growing::new(Pause::VIEWER);
+        let got: Vec<u64> = (0..4).map(|_| pauses.after(0)).collect();
+        assert_eq!(got, [1_000; 4]);
+    }
+
+    #[test]
     fn a_goaway_names_where_the_next_sessions_go() {
-        let mut rule = NextSession::new(1000, true, true);
+        let mut rule = NextSession::new(fixed(1000), true, true);
         assert_eq!(rule.next("https://a/", 0).url, "https://a/");
         rule.ended(Ended::Moved(Some("https://b/".to_string())));
         assert_eq!(rule.next("https://a/", 10).url, "https://b/");
@@ -302,7 +422,7 @@ mod tests {
             (true, vec![Ended::Broken], After::Connect),
         ];
         for (follows, ends, expected) in cases {
-            let mut rule = NextSession::new(1000, follows, true);
+            let mut rule = NextSession::new(fixed(1000), follows, true);
             let mut after = After::Connect;
             for (at, end) in ends.iter().enumerate() {
                 rule.next("https://a/", u64::try_from(at).unwrap() * 1000);
@@ -313,7 +433,7 @@ mod tests {
         // One whose first failure does not end it, as `xmoq-agent`, goes on
         // where it follows a room, and ends where it does not.
         for (follows, expected) in [(true, After::Connect), (false, After::EndWithError)] {
-            let mut rule = NextSession::new(1000, follows, false);
+            let mut rule = NextSession::new(fixed(1000), follows, false);
             rule.next("https://a/", 0);
             assert_eq!(
                 rule.ended(Ended::Failed { began: false }),

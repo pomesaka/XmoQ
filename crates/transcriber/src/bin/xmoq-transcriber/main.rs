@@ -17,13 +17,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use tokio::sync::watch;
-use xmoq_again::next_session::Ended;
+use xmoq_again::next_session::{Ended, NextSession, Pause};
 use xmoq_moqt_io::wt;
 use xmoq_moqt_io::{Connection, StreamConfig, client};
 use xmoq_speech::engine::EngineOptions;
 use xmoq_speech::model::{DEFAULT_VAD_MODEL, default_model_dir, model_file};
 use xmoq_speech::vad::Silero;
-use xmoq_track_serving::backoff::NextTry;
 use xmoq_transcriber::args::Args;
 use xmoq_transcriber::transcript::Transcript;
 
@@ -99,13 +98,15 @@ async fn run(args: Args) -> Result<()> {
         .map(|_| Transcript::new(first, args.keep))
         .collect();
     let streams = StreamConfig::default();
-    // Where and when the next session goes (`NextTry`): the New Session URI
-    // of a GOAWAY, at once; after any other end, after a wait that grows.
-    let mut next = NextTry::default();
+    // Where and when the next session goes: the New Session URI of a GOAWAY,
+    // at once; after any other end, after a wait that grows (the role's
+    // `Pause`). No end ends the client: it follows nothing that could.
+    let mut next = NextSession::new(Pause::SERVING, true, false);
+    let started = Instant::now();
+    let now_ms = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let key = args.auth_key.as_deref().map(xmoq_room_token::RoomKey::new);
-    let mut url = next.first(&args.url);
+    let mut url = next.next(&args.url, now_ms()).url;
     loop {
-        let began = Instant::now();
         let connecting = wt::connect(&url, args.cert_sha256, &streams);
         let connection = tokio::select! {
             connected = connecting => connected,
@@ -143,8 +144,10 @@ async fn run(args: Args) -> Result<()> {
                 Ended::Failed { began: false }
             }
         };
-        let wait;
-        (url, wait) = next.after(&args.url, ended, began.elapsed());
+        next.ended(ended);
+        let after = next.next(&args.url, now_ms());
+        url = after.url;
+        let wait = Duration::from_millis(after.wait_ms);
         println!("CONNECTING_AGAIN url={url} in_ms={}", wait.as_millis());
         tokio::select! {
             () = tokio::time::sleep(wait) => {}

@@ -36,9 +36,9 @@ The pause before the next try at a session.
 
 | Column | Content |
 |---|---|
-| 2 | The least time from one try to the next, in milliseconds |
+| 2 | The pause, `F,M,W`: the first `F` ms, doubling from one try to the next up to `M` ms, and `F` again after a session that lasted `W` ms from its try (`-`: never) |
 | 3 | The steps: `moved` (a GOAWAY ended the session), `ended` (it ended), `failed` (it could not be made, or broke), each as `ending@L=N`: the session lasted `L` ms from its try (`@L` left out: 0), and `N` is the pause before the next try |
 
-**The pause is counted from the try before**: what is left of column 2 since that try began, and 0 where the session lasted that long or longer. After a GOAWAY it is 0, unless the try before was itself one made at once after a GOAWAY; then it is counted as after any other end.
+**The pause is counted from the try before**: what is left of it since that try began, and 0 where the session lasted that long or longer. After a GOAWAY it is 0, unless the try before was itself one made at once after a GOAWAY; then it is counted as after any other end. A try made at once leaves the pause as it was. The roles have their own: the viewers `1000,1000,-`, the gatherer and the transcriber `1000,30000,60000` (`Pause` of `xmoq-again`).
 
 How the rows are read: the first try is at 0. For each step the clock moves by `L`, the session ends, the pause is compared with `N`, and the clock moves by the pause; the next try begins there.

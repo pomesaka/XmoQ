@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use tokio::sync::{mpsc, watch};
-use xmoq_again::next_session::{After, NextSession};
+use xmoq_again::next_session::{After, NextSession, Pause};
 use xmoq_agent::args::{Args, Source};
 use xmoq_agent::events::{BroadcastState, Event};
 use xmoq_agent::input::{self, Input};
@@ -30,7 +30,6 @@ use xmoq_agent::presence::Presence;
 use xmoq_chat_tracks::names::Person;
 use xmoq_moqt_io::StreamConfig;
 use xmoq_moqt_io::wt;
-use xmoq_viewer::reconnect::BETWEEN_TRIES_MS;
 use xmoq_viewer::room::{self, Broadcast, Relay};
 use xmoq_viewer_io::ending::{self, UntilClosed};
 use xmoq_viewer_io::room_socket::{ChatTokens, MeetingFull, ROOM_COMES_WITHIN, RoomSocket};
@@ -423,7 +422,7 @@ async fn place(
 /// [`place`] in the room at `address`: `room`, joined first where it is not
 /// (it went away during a session, or this is the first), and joined anew
 /// where it fails before the session, by the rule of the next session
-/// (`BETWEEN_TRIES_MS` from the try before), with an `error` where the
+/// (`Pause::VIEWER` from the try before), with an `error` where the
 /// failure is not the one told last.
 ///
 /// WHY on and on, where `xmoq-watch` ends: as for a first session that
@@ -444,7 +443,7 @@ async fn place_in_room(
     room: &mut Option<RoomSocket>,
     reader: &mut Reader,
 ) -> Result<Option<Place>> {
-    let mut rule = NextSession::new(BETWEEN_TRIES_MS, true, false);
+    let mut rule = NextSession::new(Pause::VIEWER, true, false);
     let began = Instant::now();
     let mut told: Option<String> = None;
     loop {
@@ -682,7 +681,7 @@ async fn run(args: &Args, reader: &mut Reader, pictures: &mut Option<Pictures>) 
     // the room start (`scripts/agent-demo.sh`), and nobody looks at it to
     // start it again; it waits as for a broadcast that broke off.
     let follows = matches!(args.source, Source::Room { .. });
-    let mut rule = NextSession::new(BETWEEN_TRIES_MS, follows, false);
+    let mut rule = NextSession::new(Pause::VIEWER, follows, false);
     let began = Instant::now();
     loop {
         let Some(mut place) = place(args, &mut room, reader).await? else {
