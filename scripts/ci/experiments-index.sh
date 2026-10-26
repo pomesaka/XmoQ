@@ -6,7 +6,7 @@ cd "${REPO_ROOT}"
 
 # Writes the index at the end of docs/experiments/README.md: every record, under the Phase of the
 # roadmap that its "Roadmap item" names first, by date. With --check, fails where the README is
-# not what this would write.
+# not what this would write, or a record lacks the "Date", "Commit SHA" or "Roadmap item" line.
 #
 # WHY generated: a record is added with nearly every change, and an index kept by hand misses
 # them (57 of 214 records were linked from nowhere when this was written). WHY by the Phase its
@@ -19,7 +19,9 @@ marker="<!-- The index below is written by scripts/ci/experiments-index.sh (mise
 records() {
 	local record phase name heading
 	for record in docs/experiments/2026-*.md; do
-		phase="$(sed -n 's/^- Roadmap item:.*Phase \([0-9][0-9a-z]*\).*/\1/p' "${record}" | head -n 1)"
+		# WHY grep -o and not sed: a sed pattern with ".*" before "Phase" takes the last one the line
+		# names, where a record that names two is filed under the first.
+		phase="$(grep -m 1 '^- Roadmap item:' "${record}" | grep -oE 'Phase [0-9][0-9a-z]*' | head -n 1 | cut -d ' ' -f 2 || true)"
 		name="$(basename "${record}")"
 		heading="$(sed -n '1s/^# //p' "${record}")"
 		printf '%s\t- %s [%s](%s)\n' "${phase:-none}" "${name:0:10}" "${heading}" "${name}"
@@ -50,7 +52,25 @@ index() {
 before="$(awk -v marker="${marker}" '$0 == marker { exit } { print }' "${readme}")"
 written="${before}"$'\n\n'"$(index)"
 
+# The records that lack one of the lines at the top of the template, as "record: line" lines.
+# WHY checked: the index is built from "Roadmap item", and a record without it is filed under no
+# Phase without anyone noticing; "Date" and "Commit SHA" say what tree a run was made on.
+lacking() {
+	local record head
+	for record in docs/experiments/2026-*.md; do
+		for head in "Date" "Commit SHA" "Roadmap item"; do
+			if ! grep -q "^- ${head}:" "${record}"; then
+				echo "${record}: - ${head}:"
+			fi
+		done
+	done
+}
+
 if [[ "${1:-}" == --check ]]; then
+	missing="$(lacking)"
+	if [[ -n "${missing}" ]]; then
+		fail "records without a line of the template's top (${readme}):"$'\n'"${missing}"
+	fi
 	if [[ "${written}" != "$(cat "${readme}")" ]]; then
 		fail "${readme}: its index is not what scripts/ci/experiments-index.sh writes; run mise run fmt"
 	fi

@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, meetings: finding the participants (undecided; the part both of its choices can use is this one, which the Rust session has since #263).
+- Roadmap item: Phase 6, meetings: finding the participants (undecided; the part both of its choices can use is this one, which the Rust session has since #263).
 
 ## Objective
 

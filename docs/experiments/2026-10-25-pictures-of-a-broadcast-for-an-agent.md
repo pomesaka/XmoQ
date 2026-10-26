@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4; the reader for agents (`crates/agent`), its pictures (`crates/picture`).
+- Roadmap item: Phase 5; the reader for agents (`crates/agent`), its pictures (`crates/picture`).
 
 ## Objective
 

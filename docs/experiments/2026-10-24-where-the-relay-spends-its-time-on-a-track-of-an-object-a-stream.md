@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, relay scale/load testing
+- Roadmap item: Phase 7, relay scale/load testing
 
 ## Objective
 

@@ -1,6 +1,8 @@
 # Datagrams read by the browser client
 
-Date: 2026-10-24
+- Date: 2026-10-24
+- Commit SHA: f349fbfc, the commit that adds this record
+- Roadmap item: Phase 0b, the MoQT layer of the TypeScript implementation
 
 ## Objective
 

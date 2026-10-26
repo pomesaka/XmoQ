@@ -35,6 +35,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 ### Phase 0 — Feasibility
 
 - 2026-10-10 [moq-dev: one MoQ object between Chromium and Rust](2026-10-10-moq-dev-object-transfer.md)
+- 2026-10-10 [2026-10-10 — moqtail: one Object between browser and Rust (MOQT draft 18)](2026-10-10-moqtail-object-transfer.md)
 
 ### Phase 0b — Own MoQ Transport implementation (draft 18)
 
@@ -56,6 +57,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-10 [The relay takes each Subgroup from one stream](2026-10-10-relay-subgroup-selection.md)
 - 2026-10-10 [Routing from a moqtail-ts publisher, and how soon the relay notices a vanished peer](2026-10-10-routing-follow-ups.md)
 - 2026-10-10 [A subscription nobody reads, in `@xmoq/moqt` and in Chromium](2026-10-10-subscription-backlog-in-chromium.md)
+- 2026-10-10 [Two publishers of one track in the interop matrix](2026-10-10-two-publishers-in-the-interop-matrix.md)
 - 2026-10-10 [The code and reason of a session close from `@xmoq/moqt` in Chromium](2026-10-10-webtransport-close-info-in-chromium.md)
 - 2026-10-10 [Stream resets and STOP_SENDING from `@xmoq/moqt` in Chromium](2026-10-10-webtransport-error-in-chromium.md)
 - 2026-10-10 [WebTransport library comparison: wtransport and web-transport-quinn](2026-10-10-webtransport-library-comparison.md)
@@ -68,17 +70,19 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-13 [A session that announces a namespace again and again](2026-10-13-a-session-that-announces-a-namespace-again-and-again.md)
 - 2026-10-13 [A session that asks for a new track again and again](2026-10-13-a-session-that-asks-for-a-new-track-again-and-again.md)
 - 2026-10-13 [A subscriber asks for a new Group](2026-10-13-a-subscriber-asks-for-a-new-group.md)
+- 2026-10-13 [A viewer that comes before the broadcast](2026-10-13-a-viewer-that-comes-before-the-broadcast.md)
 - 2026-10-13 [What a refusal says of when to ask again](2026-10-13-what-a-refusal-says-of-when-to-ask-again.md)
 - 2026-10-14 [A FETCH goes to the next publisher](2026-10-14-a-fetch-goes-to-the-next-publisher.md)
 - 2026-10-24 [An Object past the end of a track, at the relay](2026-10-24-an-object-past-the-end-of-a-track.md)
+- 2026-10-24 [Datagrams read by the browser client](2026-10-24-datagrams-read-by-the-browser-client.md)
 - 2026-10-24 [The Request IDs of requests the Rust client refuses](2026-10-24-the-request-ids-of-requests-the-rust-client-refuses.md)
+- 2026-10-25 [Objects before their SUBSCRIBE_OK](2026-10-25-objects-before-their-subscribe-ok.md)
 - 2026-10-25 [The relay checks a Subgroup sent again](2026-10-25-the-relay-checks-a-subgroup-sent-again.md)
 
 ### Phase 1 — Video
 
 - 2026-10-10 [WebTransport and WebCodecs per browser: published sources, and Firefox measured](2026-10-10-browser-support-webtransport-webcodecs.md)
 - 2026-10-10 [What following LOC and MSF takes: the drafts, FETCH, and who else implements them](2026-10-10-loc-msf-fetch-survey.md)
-- 2026-10-10 [Two publishers of one track in the interop matrix](2026-10-10-two-publishers-in-the-interop-matrix.md)
 - 2026-10-10 [WebCodecs loopback: encode, copy to bytes, decode in one page](2026-10-10-webcodecs-loopback.md)
 - 2026-10-11 [A page answers the FETCH a relay sends it](2026-10-11-a-page-answers-a-fetch.md)
 - 2026-10-11 [A page that only announced a namespace answers the relay's SUBSCRIBE](2026-10-11-a-page-answers-the-relays-subscribe.md)
@@ -143,13 +147,12 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-12 [A viewer changes the delivery timeout of its subscription with REQUEST_UPDATE, and the relay follows](2026-10-12-a-viewer-changes-its-delivery-timeout-with-request-update.md)
 - 2026-10-12 [Delivery timeouts of a subscription: what draft 18 has, who does what, and the viewer's side made ready](2026-10-12-delivery-timeouts-of-a-subscription-what-draft-18-has-and-who-does-what.md)
 - 2026-10-12 [The relay follows the delivery timeout a viewer asks for](2026-10-12-the-relay-follows-the-delivery-timeout-a-viewer-asks-for.md)
-- 2026-10-12 [The terminal viewer asks for a delivery timeout](2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)
 - 2026-10-12 [The terminal viewer chooses a version of the video](2026-10-12-the-terminal-viewer-chooses-a-version-of-the-video.md)
-- 2026-10-12 [The terminal viewer has the page's automatic buffer](2026-10-12-the-terminal-viewer-has-the-pages-automatic-buffer.md)
 - 2026-10-12 [Two versions of the video, and a viewer that changes between them](2026-10-12-two-versions-of-the-video-and-a-viewer-that-changes-between-them.md)
 - 2026-10-12 [Which delivery timeout a viewer asks for on its video](2026-10-12-which-delivery-timeout-a-viewer-asks-for-on-its-video.md)
 - 2026-10-13 [A page that waits for the broadcast at the relay](2026-10-13-a-page-that-waits-for-the-broadcast-at-the-relay.md)
 - 2026-10-13 [A publisher and a viewer whose clocks run at different speeds](2026-10-13-a-publisher-and-a-viewer-whose-clocks-run-at-different-speeds.md)
+- 2026-10-13 [An hour of the demo](2026-10-13-an-hour-of-the-demo.md)
 - 2026-10-13 [The automatic buffer: what raises it, and how fast it comes down](2026-10-13-the-automatic-buffer-what-raises-it-and-how-fast-it-comes-down.md)
 - 2026-10-13 [The default playout buffer: 50 ms, 150 ms, or one that follows the link](2026-10-13-the-default-playout-buffer.md)
 - 2026-10-13 [The run in which the buffer stood still while the sound was too late](2026-10-13-the-run-in-which-the-buffer-stood-still.md)
@@ -173,12 +176,12 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-12 [Opus decoded and played with Rust crates](2026-10-12-opus-decoded-and-played-with-rust-crates.md)
 - 2026-10-12 [Picture and sound in the terminal by one clock](2026-10-12-picture-and-sound-in-the-terminal-by-one-clock.md)
 - 2026-10-12 [The Opus decoder that overflows, set against libopus](2026-10-12-the-opus-decoder-that-overflows-set-against-libopus.md)
+- 2026-10-12 [The terminal viewer asks for a delivery timeout](2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)
 - 2026-10-12 [The terminal viewer at 720p and 1080p](2026-10-12-the-terminal-viewer-at-720p-and-1080p.md)
 - 2026-10-12 [The terminal viewer finds its tracks in the catalog](2026-10-12-the-terminal-viewer-finds-its-tracks-in-the-catalog.md)
+- 2026-10-12 [The terminal viewer has the page's automatic buffer](2026-10-12-the-terminal-viewer-has-the-pages-automatic-buffer.md)
 - 2026-10-12 [The underruns of the terminal viewer](2026-10-12-the-underruns-of-the-terminal-viewer.md)
-- 2026-10-13 [A viewer that comes before the broadcast](2026-10-13-a-viewer-that-comes-before-the-broadcast.md)
 - 2026-10-21 [Opus decoders in Rust set against libopus](2026-10-21-opus-decoders-in-rust-set-against-libopus.md)
-- 2026-10-24 [One video track to many viewers on Linux, and with a track of the shape of sound](2026-10-24-one-video-track-to-many-viewers-on-linux.md)
 - 2026-10-24 [The terminal viewer decodes its sound with opus-rs](2026-10-24-the-terminal-viewer-decodes-its-sound-with-opus-rs.md)
 - 2026-10-24 [The terminal viewer refuses the requests of the relay](2026-10-24-the-terminal-viewer-refuses-the-requests-of-the-relay.md)
 
@@ -195,51 +198,51 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-24 [The gatherer of the chat](2026-10-24-chat-gatherer.md)
 - 2026-10-24 [The demo's pages chat over the tracks](2026-10-24-demo-chat-over-tracks.md)
 - 2026-10-24 [Namespace discovery through the relays](2026-10-24-namespace-discovery-through-the-relays.md)
-- 2026-10-24 [Ten rooms of a hundred viewers](2026-10-24-ten-rooms-of-a-hundred-viewers.md)
 - 2026-10-24 [The chat off the room's WebSocket](2026-10-24-the-chat-off-the-rooms-websocket.md)
 - 2026-10-24 [The gatherer asks a participant again](2026-10-24-the-gatherer-asks-a-participant-again.md)
+- 2026-10-25 [A reader of the room for an agent](2026-10-25-a-reader-of-the-room-for-an-agent.md)
+- 2026-10-25 [An agent takes a seat in a room's meeting](2026-10-25-an-agent-takes-a-seat-in-a-rooms-meeting.md)
+- 2026-10-25 [The chat of a room before its broadcast](2026-10-25-the-chat-of-a-room-before-its-broadcast.md)
+- 2026-10-25 [The chat with tokens through the gatherer](2026-10-25-the-chat-with-tokens-through-the-gatherer.md)
+- 2026-10-25 [The room lets 49 into a meeting](2026-10-25-the-room-lets-49-into-a-meeting.md)
+- 2026-10-25 [The room names its transcript](2026-10-25-the-room-names-its-transcript.md)
+- 2026-10-25 [The room names two transcripts](2026-10-25-the-room-names-two-transcripts.md)
+
+### Phase 5 — An agent follows a broadcast
+
+- 2026-10-25 [A reader joins a room that starts later](2026-10-25-a-reader-joins-a-room-that-starts-later.md)
+- 2026-10-25 [agent-demo starts and stops](2026-10-25-agent-demo-starts-and-stops.md)
+- 2026-10-25 [An agent reads the demo with xmoq-agent](2026-10-25-an-agent-reads-the-demo-with-xmoq-agent.md)
+- 2026-10-25 [One rule for the next session](2026-10-25-one-rule-for-the-next-session.md)
+- 2026-10-25 [Pictures of a broadcast for an agent](2026-10-25-pictures-of-a-broadcast-for-an-agent.md)
+- 2026-10-25 [The reader for agents asks for its video again](2026-10-25-the-reader-for-agents-asks-for-its-video-again.md)
+- 2026-10-25 [The reader for agents reads the transcript](2026-10-25-the-reader-for-agents-reads-the-transcript.md)
+- 2026-10-25 [The reader says its counts before it ends](2026-10-25-the-reader-says-its-counts-before-it-ends.md)
+- 2026-10-25 [The transcriber reads a voice](2026-10-25-the-transcriber-reads-a-voice.md)
+
+### Phase 6 — Meetings
+
+- 2026-10-25 [A meeting of pages](2026-10-25-a-meeting-of-pages.md)
+- 2026-10-25 [A page of a meeting writes for Claude Code](2026-10-25-a-page-writes-for-claude-code.md)
+- 2026-10-25 [A voice longer than a piece](2026-10-25-a-voice-longer-than-a-piece.md)
+- 2026-10-25 [agent-demo with a meeting](2026-10-25-agent-demo-with-a-meeting.md)
+- 2026-10-25 [An agent in a meeting](2026-10-25-an-agent-in-a-meeting.md)
+- 2026-10-25 [An agent keeps the meeting over a GOAWAY](2026-10-25-an-agent-keeps-the-meeting-over-a-goaway.md)
+- 2026-10-25 [How many voices one transcriber reads at once](2026-10-25-how-many-voices-one-transcriber-reads.md)
+- 2026-10-25 [moqtail's relay and the Joining FETCH of a page's catalog](2026-10-25-moqtail-relay-joining-fetch-of-a-catalog.md)
+- 2026-10-25 [SUBSCRIBE_NAMESPACE from a page](2026-10-25-subscribe-namespace-from-a-page.md)
+- 2026-10-25 [The demo has a meeting page](2026-10-25-the-demo-has-a-meeting-page.md)
+- 2026-10-25 [Who speaks in a meeting, for an agent](2026-10-25-who-speaks-in-a-meeting.md)
+
+### Phase 7 — Future
+
+- 2026-10-24 [One video track to many viewers on Linux, and with a track of the shape of sound](2026-10-24-one-video-track-to-many-viewers-on-linux.md)
+- 2026-10-24 [Ten rooms of a hundred viewers](2026-10-24-ten-rooms-of-a-hundred-viewers.md)
 - 2026-10-24 [The relay on cores of its own, and the writers of a session in one task](2026-10-24-the-relay-alone-and-the-writers-of-a-session-in-one-task.md)
 - 2026-10-24 [The relay in the VM and the viewers on the Mac](2026-10-24-the-relay-in-the-vm-and-the-viewers-on-the-mac.md)
 - 2026-10-24 [The relay's socket drops what comes in, and the Objects of the publishers come late to the hub](2026-10-24-the-relays-socket-drops-what-comes-in.md)
 - 2026-10-24 [Where the relay spends its time on a track of an Object a stream](2026-10-24-where-the-relay-spends-its-time-on-a-track-of-an-object-a-stream.md)
 - 2026-10-24 [Why a run of 1,000 viewers with sound falls behind with cores to spare: what it is not](2026-10-24-why-a-run-of-1000-viewers-with-sound-falls-behind-with-cores-to-spare.md)
-- 2026-10-25 [A meeting of pages](2026-10-25-a-meeting-of-pages.md)
-- 2026-10-25 [A reader joins a room that starts later](2026-10-25-a-reader-joins-a-room-that-starts-later.md)
-- 2026-10-25 [A reader of the room for an agent](2026-10-25-a-reader-of-the-room-for-an-agent.md)
-- 2026-10-25 [agent-demo starts and stops](2026-10-25-agent-demo-starts-and-stops.md)
-- 2026-10-25 [agent-demo with a meeting](2026-10-25-agent-demo-with-a-meeting.md)
-- 2026-10-25 [An agent in a meeting](2026-10-25-an-agent-in-a-meeting.md)
-- 2026-10-25 [An agent reads the demo with xmoq-agent](2026-10-25-an-agent-reads-the-demo-with-xmoq-agent.md)
-- 2026-10-25 [An agent takes a seat in a room's meeting](2026-10-25-an-agent-takes-a-seat-in-a-rooms-meeting.md)
-- 2026-10-25 [moqtail's relay and the Joining FETCH of a page's catalog](2026-10-25-moqtail-relay-joining-fetch-of-a-catalog.md)
-- 2026-10-25 [Objects before their SUBSCRIBE_OK](2026-10-25-objects-before-their-subscribe-ok.md)
-- 2026-10-25 [Pictures of a broadcast for an agent](2026-10-25-pictures-of-a-broadcast-for-an-agent.md)
-- 2026-10-25 [SUBSCRIBE_NAMESPACE from a page](2026-10-25-subscribe-namespace-from-a-page.md)
-- 2026-10-25 [The chat of a room before its broadcast](2026-10-25-the-chat-of-a-room-before-its-broadcast.md)
-- 2026-10-25 [The chat with tokens through the gatherer](2026-10-25-the-chat-with-tokens-through-the-gatherer.md)
-- 2026-10-25 [The demo has a meeting page](2026-10-25-the-demo-has-a-meeting-page.md)
-- 2026-10-25 [The reader for agents asks for its video again](2026-10-25-the-reader-for-agents-asks-for-its-video-again.md)
-- 2026-10-25 [The reader for agents reads the transcript](2026-10-25-the-reader-for-agents-reads-the-transcript.md)
-- 2026-10-25 [The reader says its counts before it ends](2026-10-25-the-reader-says-its-counts-before-it-ends.md)
-- 2026-10-25 [The room lets 49 into a meeting](2026-10-25-the-room-lets-49-into-a-meeting.md)
-- 2026-10-25 [The room names its transcript](2026-10-25-the-room-names-its-transcript.md)
-- 2026-10-25 [The room names two transcripts](2026-10-25-the-room-names-two-transcripts.md)
-- 2026-10-25 [Who speaks in a meeting, for an agent](2026-10-25-who-speaks-in-a-meeting.md)
-
-### Phase 5 — An agent follows a broadcast
-
-- 2026-10-25 [How many voices one transcriber reads at once](2026-10-25-how-many-voices-one-transcriber-reads.md)
-- 2026-10-25 [One rule for the next session](2026-10-25-one-rule-for-the-next-session.md)
-- 2026-10-25 [The transcriber reads a voice](2026-10-25-the-transcriber-reads-a-voice.md)
-
-### Phase 6 — Meetings
-
-- 2026-10-25 [A page of a meeting writes for Claude Code](2026-10-25-a-page-writes-for-claude-code.md)
-- 2026-10-25 [A voice longer than a piece](2026-10-25-a-voice-longer-than-a-piece.md)
-- 2026-10-25 [An agent keeps the meeting over a GOAWAY](2026-10-25-an-agent-keeps-the-meeting-over-a-goaway.md)
-
-### Phase 7 — Future
-
 - 2026-10-25 [A full relay sends the next session away](2026-10-25-a-full-relay-sends-the-next-session-away.md)
 - 2026-10-25 [A relay below another relay](2026-10-25-a-relay-below-another-relay.md)
 - 2026-10-25 [A relay below another, when the one above goes](2026-10-25-a-relay-below-another-when-the-one-above-goes.md)
@@ -255,7 +258,6 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 
 ### Not tied to a Phase
 
-- 2026-10-10 [2026-10-10 — moqtail: one Object between browser and Rust (MOQT draft 18)](2026-10-10-moqtail-object-transfer.md)
 - 2026-10-11 [`test.each` of Bun 1.3.12 loses its table](2026-10-11-bun-test-each-loses-its-table.md)
 - 2026-10-11 [The demo with the publishing page in a background tab: a frame a second, and no sound](2026-10-11-demo-in-a-background-tab.md)
 - 2026-10-11 [The demo in Playwright's Firefox and WebKit](2026-10-11-demo-in-firefox-and-webkit.md)
@@ -264,12 +266,10 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-12 [One, five or ten pieces of sound a Group, measured again](2026-10-12-one-five-or-ten-pieces-of-sound-a-group.md)
 - 2026-10-12 [The demo at 720 and 1080 lines](2026-10-12-the-demo-at-720-and-1080-lines.md)
 - 2026-10-12 [The first picture of a viewer who comes late: fetch the Group, or wait for the next](2026-10-12-the-first-picture-of-a-viewer-who-comes-late-fetch-or-wait.md)
-- 2026-10-13 [An hour of the demo](2026-10-13-an-hour-of-the-demo.md)
 - 2026-10-14 [The page that crashed when the relay came back: with #226 and without it](2026-10-14-the-page-that-crashed-when-the-relay-came-back.md)
 - 2026-10-24 [A limit on the payload of Objects for each subscription](2026-10-24-a-limit-on-objects-for-each-subscription.md)
 - 2026-10-24 [A silent subgroup stream is stopped, in Rust](2026-10-24-a-silent-subgroup-stream-is-stopped-in-rust.md)
 - 2026-10-24 [A silent subgroup stream is stopped](2026-10-24-a-silent-subgroup-stream-is-stopped.md)
-- 2026-10-24 [Datagrams read by the browser client](2026-10-24-datagrams-read-by-the-browser-client.md)
 - 2026-10-24 [GOAWAY and moqtail](2026-10-24-goaway-and-moqtail.md)
 - 2026-10-24 [Immutable Properties in the browser client](2026-10-24-immutable-properties-in-the-browser-client.md)
 - 2026-10-24 [The demo's chat with tokens: the pages' side](2026-10-24-the-demo-chat-with-tokens.md)

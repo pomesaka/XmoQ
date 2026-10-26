@@ -1,6 +1,8 @@
 # `test.each` of Bun 1.3.12 loses its table
 
-Date: 2026-10-11. Checked on `main` at `59d76ab`.
+- Date: 2026-10-11
+- Commit SHA: 59d76ab, on `main`, where it was checked
+- Roadmap item: none; the CI of the TypeScript packages
 
 ## What happened
 

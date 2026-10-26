@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Commit SHA: the commit that adds this record
-- Roadmap item: Phase 4, meetings; the reader for agents.
+- Roadmap item: Phase 6, meetings; the reader for agents.
 
 ## Objective
 
