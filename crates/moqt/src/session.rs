@@ -1483,8 +1483,13 @@ fn check_redirect(role: Role, request: &Request, error: &RequestError) -> Result
             "redirect with a connect URI sent to a server",
         ));
     }
-    if matches!(request, Request::PublishNamespace { .. })
-        && !redirect.full_track_name.name().is_empty()
+    // "Track Name is not meaningful for namespace-scoped requests
+    // (SUBSCRIBE_NAMESPACE, PUBLISH_NAMESPACE) and MUST be empty".
+    // `fixtures/redirect/` has the rows both implementations read.
+    if matches!(
+        request,
+        Request::PublishNamespace { .. } | Request::SubscribeNamespace { .. }
+    ) && !redirect.full_track_name.name().is_empty()
     {
         return Err(Error::ProtocolViolation(
             "redirect with a track name for a namespace request",
@@ -2490,6 +2495,37 @@ mod tests {
                 .map(|_| ()),
             Err(UsageError("parameter not allowed in this message"))
         );
+    }
+
+    /// The contract `fixtures/redirect/answers.tsv` pins for both
+    /// implementations: what a client makes of a `REQUEST_ERROR`, with a
+    /// Redirect or without, to each kind of request (§10.6.1).
+    #[test]
+    fn a_redirect_is_taken_or_closes_the_session_as_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<4>("redirect/answers.tsv");
+        // As many as the README has.
+        assert_eq!(rows.len(), 15);
+        for [name, request, bytes, outcome] in &rows {
+            let mut session = client();
+            let (asked, _) = match request.as_str() {
+                "subscribe" => session.subscribe(track(b"a"), vec![]),
+                "publish-namespace" => session.publish_namespace(namespace(), vec![]),
+                "subscribe-namespace" => session.subscribe_namespace(namespace(), vec![]),
+                other => panic!("{name}: a request the test does not know: {other}"),
+            }
+            .unwrap();
+            let bytes = crate::test_util::from_hex(bytes);
+            let Ok(Some((message, read))) = ControlMessage::decode(&bytes) else {
+                panic!("{name}: not one whole message");
+            };
+            assert_eq!(read, bytes.len(), "{name}");
+            let got = match session.feed(asked, message) {
+                Ok(RequestEvent::Rejected(_)) => "rejected".to_string(),
+                Err(error) => closed(&error),
+                other => panic!("{name}: {other:?}"),
+            };
+            assert_eq!(&got, outcome, "{name}");
+        }
     }
 
     #[test]

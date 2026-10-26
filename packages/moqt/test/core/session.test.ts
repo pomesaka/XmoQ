@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	decodeControlMessage,
 	type FetchRange,
@@ -1405,19 +1407,74 @@ describe("Session", () => {
 		).toMatchObject({ type: "close-session", code: 3 });
 	});
 
-	test("a Redirect with a Track Name for PUBLISH_NAMESPACE closes the session (§10.6.1)", () => {
-		const session = started();
-		session.publishNamespace({ trackNamespace: NAMESPACE });
-		expect(
-			session
-				.receiveRequestStreamData(
-					1,
-					hex("05 00 07 34 01 00 00 00 01 63"),
-					false,
-				)
-				.at(-1),
-		).toMatchObject({ type: "close-session", code: 3 });
+	/** The rows of `fixtures/redirect/answers.tsv`: name, request, bytes, outcome. */
+	const REDIRECTS = readFileSync(
+		join(
+			import.meta.dir,
+			"..",
+			"..",
+			"..",
+			"..",
+			"fixtures",
+			"redirect",
+			"answers.tsv",
+		),
+		"utf8",
+	)
+		.split("\n")
+		.filter((line) => line.length > 0)
+		.map((line) => {
+			const [name, request, bytes, outcome, ...rest] = line.split("\t");
+			if (
+				name === undefined ||
+				request === undefined ||
+				bytes === undefined ||
+				outcome === undefined ||
+				rest.length > 0
+			) {
+				throw new Error(`a row of answers.tsv does not have 4 fields: ${line}`);
+			}
+			return { name, request, bytes, outcome };
+		});
+
+	test("redirect/answers.tsv has the 15 rows of its README", () => {
+		expect(REDIRECTS.length).toBe(15);
 	});
+
+	// The contract the Rust session reads too
+	// (`a_redirect_is_taken_or_closes_the_session_as_the_shared_table_says`):
+	// a REQUEST_ERROR, with a Redirect or without, to each kind of request
+	// (§10.6.1).
+	test.each(REDIRECTS)(
+		"$name: $outcome, as the shared table says",
+		({ request, bytes, outcome }) => {
+			const session = started();
+			const ASK: Record<string, () => unknown> = {
+				subscribe: () => session.subscribe(TRACK),
+				"publish-namespace": () =>
+					session.publishNamespace({ trackNamespace: NAMESPACE }),
+				"subscribe-namespace": () =>
+					session.subscribeNamespace({ trackNamespacePrefix: NAMESPACE }),
+			};
+			const ask = ASK[request];
+			if (ask === undefined)
+				throw new Error(`a request the test does not know: ${request}`);
+			ask();
+			const outputs = session.receiveRequestStreamData(1, hex(bytes), false);
+			const closed = outputs.find((output) => output.type === "close-session");
+			const got =
+				closed?.type === "close-session"
+					? `closed 0x${closed.code.toString(16)}`
+					: outputs.some(
+								(output) =>
+									output.type === "event" &&
+									output.event.type === "request-error",
+							)
+						? "rejected"
+						: "neither";
+			expect(got).toBe(outcome);
+		},
+	);
 
 	// The draft has no rule for it. It is read like a stream that ends
 	// inside an Object (§11.4), as the Rust implementation reads it.
