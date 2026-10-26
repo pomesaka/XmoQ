@@ -675,12 +675,14 @@ fn parse_publisher_priority(text: &str) -> Result<Option<u8>> {
 /// The mode `--mode` names, with what that mode needs of the other flags.
 fn read_mode(
     mode: Option<String>,
-    payload_hex: Option<&str>,
+    payload: Option<&[u8]>,
     objects: u64,
     fetch: &FetchFlags,
 ) -> Result<Mode> {
     let payload = || -> Result<Vec<u8>> {
-        hex::decode(payload_hex.context("--payload-hex is required to publish")?)
+        payload
+            .map(<[u8]>::to_vec)
+            .context("--payload-hex or --payload-zeros is required to publish")
     };
     let mode = mode.context("--mode is required")?;
     if let Some(misuse) = fetch.misuse(&mode) {
@@ -830,8 +832,43 @@ fn millis(flag: &str, value: &str) -> Result<u64> {
     value.parse().with_context(|| flag.to_string())
 }
 
+/// The payload of what is published: `--payload-hex` (its bytes) or
+/// `--payload-zeros` (as many zero bytes).
+///
+/// WHY a payload by its size: a driver that wants a large one cannot pass
+/// its hex, as one argument of a process holds at most 128 KiB on Linux
+/// (`MAX_ARG_STRLEN`, E2BIG).
+#[derive(Default)]
+struct PayloadFlags {
+    hex: Option<String>,
+    zeros: Option<String>,
+}
+
+impl PayloadFlags {
+    /// Takes the flag where it is one of these.
+    fn read(&mut self, flag: &str, value: &str) -> bool {
+        let to = match flag {
+            "--payload-hex" => &mut self.hex,
+            "--payload-zeros" => &mut self.zeros,
+            _ => return false,
+        };
+        *to = Some(value.to_string());
+        true
+    }
+
+    /// The payload the flags name; `None` for neither.
+    fn payload(&self) -> Result<Option<Vec<u8>>> {
+        Ok(match (&self.hex, &self.zeros) {
+            (Some(_), Some(_)) => bail!("--payload-hex and --payload-zeros both name the payload"),
+            (Some(text), None) => Some(hex::decode(text)?),
+            (None, Some(size)) => Some(vec![0; size.parse().context("--payload-zeros")?]),
+            (None, None) => None,
+        })
+    }
+}
+
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
-    let (mut mode, mut payload_hex) = (None, None);
+    let (mut mode, mut payload) = (None, PayloadFlags::default());
     let (mut objects, mut video) = (1, video::VideoFlags::default());
     let (mut url, mut cert_sha256) = (None, None);
     let (mut namespace, mut track_name) = (None, None);
@@ -867,7 +904,6 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             .ok_or_else(|| anyhow!("missing value for {flag}"))?;
         match flag.as_str() {
             "--mode" => mode = Some(value),
-            "--payload-hex" => payload_hex = Some(value),
             "--objects" => objects = value.parse().context("--objects")?,
             "--url" => url = Some(value),
             "--cert-sha256" => cert_sha256 = Some(value),
@@ -891,7 +927,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
             "--fetch-answer-delay-ms" => answer_delay_ms = millis(&flag, &value)?,
             "--subscription-filter" => subscription_filter = parse_subscription_filter(&value)?,
             other => {
-                if !(fetch.read(other, &value)?
+                if !(payload.read(other, &value)
+                    || fetch.read(other, &value)?
                     || video.read(other, &value)?
                     || auth.read(other, &value)?
                     || waits.read(other, &value)?
@@ -903,7 +940,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args> {
         }
     }
 
-    let mode = read_mode(mode, payload_hex.as_deref(), objects, &fetch)?;
+    let mode = read_mode(mode, payload.payload()?.as_deref(), objects, &fetch)?;
 
     Ok(Args {
         mode,
