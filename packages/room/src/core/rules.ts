@@ -2,6 +2,10 @@
 // asks it answers, the prefixes of its transcripts, and a meeting's seats.
 // Why each is so is at the top of `src/worker.ts`.
 
+// WHY the names alone: what the room decides does no input or output, and
+// the package itself brings its connections.
+import { type ChatRoom, roomFields } from "@xmoq/chat/room-names";
+
 /** The participants of a meeting, the agents among them (decided on 2026-10-25). */
 export const MOST_IN_A_MEETING = 49;
 
@@ -45,10 +49,10 @@ export function broadcastNamespaces(setting: string | undefined): string[][] {
 	return namespaces;
 }
 
-/** What a room gives tokens in, besides its meeting (join-meeting's). */
+/** What a room gives tokens in, besides the seats of its meeting. */
 export interface RoomNamespaces {
-	/** The room's name. */
-	room: string;
+	/** The room's chat: of a broadcast or of a meeting, by the room's name. */
+	chat: ChatRoom;
 	/** The namespaces of the broadcasts (`broadcastNamespaces`). */
 	broadcasts: readonly (readonly string[])[];
 	/** The prefixes of the room's transcripts (`transcriptPrefix`), those that are there. */
@@ -61,12 +65,12 @@ const sameFields = (a: readonly string[], b: readonly string[]): boolean =>
 /**
  * The namespace a token-for asks for, where the room makes a token for it;
  * undefined where it makes none (and answers with token null). Only namespaces of the room
- * are answered (provisional: the user's answer to Q65 is awaited):
+ * are answered (decided on 2026-10-26):
  *
  * | Role | Namespace |
  * |---|---|
- * | `sub` | `xmoq/chat/<room>`; `xmoq/transcript/<prefix>` of a transcript of the room; a broadcast's |
- * | `pub` | `xmoq/chat/<room>/<one field>`; a broadcast's |
+ * | `sub` | `xmoq/chat/<kind>/<room>`; `xmoq/transcript/<prefix>` of a transcript of the room; a broadcast's |
+ * | `pub` | `xmoq/chat/<kind>/<room>/<one field>`; a broadcast's |
  *
  * WHY only these: a token for `sub` in `xmoq` allows a SUBSCRIBE_NAMESPACE
  * for that prefix (transport §10.18; the relay checks its prefix as a
@@ -84,8 +88,8 @@ export function tokenForNamespace(
 	const namespace = asked.map(String);
 	if (!namespace.every(fieldOfANamespace)) return undefined;
 	if (meetingNamespace(namespace)) return undefined;
-	if (!fieldOfANamespace(of.room) || of.room === "") return undefined;
-	const chat = ["xmoq", "chat", of.room];
+	if (!fieldOfANamespace(of.chat.name) || of.chat.name === "") return undefined;
+	const chat = roomFields(of.chat);
 	const ofTheRoom =
 		of.broadcasts.some((broadcast) => sameFields(namespace, broadcast)) ||
 		(role === "sub"

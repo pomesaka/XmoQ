@@ -28,6 +28,7 @@ import {
 	RateWindow,
 } from "../core/limits.ts";
 import {
+	type ChatRoom,
 	LINES_TRACK,
 	personNamespace,
 	roomNamespace,
@@ -118,11 +119,11 @@ export interface ChatStatus {
 }
 
 export interface JoinChatOptions {
-	room: string;
+	room: ChatRoom;
 	name: string;
 	/**
 	 * An AUTHORIZATION TOKEN (§10.2.2, the bytes of the Token structure) for
-	 * the PUBLISH_NAMESPACE of `xmoq/chat/<room>/<name>` alone: in the demo's
+	 * the PUBLISH_NAMESPACE of `xmoq/chat/<kind>/<room>/<name>` alone: in the demo's
 	 * relay, one that allows publishing in that namespace. Left out, the
 	 * PUBLISH_NAMESPACE carries none of its own.
 	 *
@@ -208,7 +209,7 @@ function described(end: SubscriptionEnd): string {
 }
 
 /**
- * Joins the room `room` as `name`: announces `xmoq/chat/<room>/<name>`
+ * Joins the room `room` as `name`: announces `xmoq/chat/<kind>/<room>/<name>`
  * (PUBLISH_NAMESPACE), serves the relay's SUBSCRIBE for `said` on it, and
  * subscribes to the room's `lines`, with a Joining FETCH for the newest
  * `HISTORY_LINES` where the room has lines. When the subscription ends it

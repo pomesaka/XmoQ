@@ -296,7 +296,7 @@ export class Room {
 		) {
 			const { room } = attachmentOf(socket);
 			const namespace = tokenForNamespace(said.role, said.namespace, {
-				room,
+				chat: { kind: "broadcast", name: room },
 				broadcasts: broadcastNamespaces(this.env.BROADCAST_NAMESPACES),
 				transcripts: [
 					transcriptPrefix(this.env.TRANSCRIPT_PREFIX, room),
@@ -496,7 +496,7 @@ export class MeetingRoom {
 				return json({ error: "a role and a namespace are expected" }, 400);
 			}
 			const namespace = tokenForNamespace(body.role, body.namespace, {
-				room: name,
+				chat: { kind: "meeting", name },
 				broadcasts: [],
 				transcripts: transcript === null ? [] : [transcript],
 			});

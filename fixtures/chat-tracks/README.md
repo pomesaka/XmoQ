@@ -33,7 +33,7 @@ Columns are separated by a tab. A text column holds a JSON string literal, so th
 
 ## `names.tsv`
 
-What a namespace, or a track, of the chat is read as: the participant whose `said` it is, the room whose `lines` it is, or nobody's. A room is `<kind>/<room>`, the kind `broadcast` or `meeting` (`Room`, `crates/chat-tracks/src/names.rs`). Read by `xmoq-chat-tracks` (`names.rs`); `@xmoq/chat` does not read it yet. A field that is not UTF-8 is nobody's, a case of the Rust test itself.
+What a namespace, or a track, of the chat is read as: the participant whose `said` it is, the room whose `lines` it is, or nobody's. A room is `<kind>/<room>`, the kind `broadcast` or `meeting` (`Room`, `crates/chat-tracks/src/names.rs`). Read by `xmoq-chat-tracks` (`names.rs`), and by `@xmoq/chat` (`test/names.test.ts`), which makes the names of the rows of a participant and of a room's lines and reads none. A field that is not UTF-8 is nobody's, a case of the Rust test itself.
 
 | Column | What it is |
 |---|---|

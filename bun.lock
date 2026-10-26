@@ -118,6 +118,7 @@
       "name": "@xmoq/room",
       "version": "0.0.0",
       "dependencies": {
+        "@xmoq/chat": "workspace:*",
         "@xmoq/room-client": "workspace:*",
       },
       "devDependencies": {

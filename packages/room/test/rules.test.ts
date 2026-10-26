@@ -12,7 +12,7 @@ import {
 
 /** The room "blue", the demo's broadcast, and the two transcripts of the demo. */
 const BLUE = {
-	room: "blue",
+	chat: { kind: "broadcast" as const, name: "blue" },
 	broadcasts: [["xmoq", "demo"]],
 	transcripts: [
 		["xmoq", "demo"],
@@ -29,14 +29,14 @@ test.each<{
 	{
 		name: "sub in the room's chat",
 		role: "sub",
-		asked: ["xmoq", "chat", "blue"],
-		namespace: ["xmoq", "chat", "blue"],
+		asked: ["xmoq", "chat", "broadcast", "blue"],
+		namespace: ["xmoq", "chat", "broadcast", "blue"],
 	},
 	{
 		name: "pub as one in the room's chat",
 		role: "pub",
-		asked: ["xmoq", "chat", "blue", "ann"],
-		namespace: ["xmoq", "chat", "blue", "ann"],
+		asked: ["xmoq", "chat", "broadcast", "blue", "ann"],
+		namespace: ["xmoq", "chat", "broadcast", "blue", "ann"],
 	},
 	{
 		name: "sub in a transcript of the broadcast",
@@ -65,8 +65,8 @@ test.each<{
 	{
 		name: "fields that are not text are made text",
 		role: "pub",
-		asked: ["xmoq", "chat", "blue", 7],
-		namespace: ["xmoq", "chat", "blue", "7"],
+		asked: ["xmoq", "chat", "broadcast", "blue", 7],
+		namespace: ["xmoq", "chat", "broadcast", "blue", "7"],
 	},
 	{
 		name: "not sub in xmoq, which tells of every room",
@@ -83,31 +83,43 @@ test.each<{
 	{
 		name: "not in another room's chat",
 		role: "sub",
-		asked: ["xmoq", "chat", "red"],
+		asked: ["xmoq", "chat", "broadcast", "red"],
 		namespace: undefined,
 	},
 	{
 		name: "not pub as one in another room's chat",
 		role: "pub",
-		asked: ["xmoq", "chat", "red", "ann"],
+		asked: ["xmoq", "chat", "broadcast", "red", "ann"],
 		namespace: undefined,
 	},
 	{
 		name: "not pub in the room's chat itself",
 		role: "pub",
-		asked: ["xmoq", "chat", "blue"],
+		asked: ["xmoq", "chat", "broadcast", "blue"],
 		namespace: undefined,
 	},
 	{
 		name: "not pub under one in the chat",
 		role: "pub",
-		asked: ["xmoq", "chat", "blue", "ann", "x"],
+		asked: ["xmoq", "chat", "broadcast", "blue", "ann", "x"],
+		namespace: undefined,
+	},
+	{
+		name: "not in the chat of a meeting of the same name",
+		role: "sub",
+		asked: ["xmoq", "chat", "meeting", "blue"],
+		namespace: undefined,
+	},
+	{
+		name: "not in the chat of the old form, without the kind",
+		role: "sub",
+		asked: ["xmoq", "chat", "blue"],
 		namespace: undefined,
 	},
 	{
 		name: "not sub as one in the chat",
 		role: "sub",
-		asked: ["xmoq", "chat", "blue", "ann"],
+		asked: ["xmoq", "chat", "broadcast", "blue", "ann"],
 		namespace: undefined,
 	},
 	{
@@ -131,7 +143,7 @@ test.each<{
 	{
 		name: "not with a field *",
 		role: "sub",
-		asked: ["xmoq", "chat", "*"],
+		asked: ["xmoq", "chat", "broadcast", "*"],
 		namespace: undefined,
 	},
 	{
@@ -152,7 +164,10 @@ test.each<{
 
 test("token-for: nothing in a room whose name has a /", () => {
 	expect(
-		tokenForNamespace("sub", ["xmoq", "demo"], { ...BLUE, room: "a/b" }),
+		tokenForNamespace("sub", ["xmoq", "demo"], {
+			...BLUE,
+			chat: { kind: "broadcast", name: "a/b" },
+		}),
 	).toBeUndefined();
 });
 
