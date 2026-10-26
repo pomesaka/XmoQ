@@ -31,11 +31,11 @@ import {
 } from "@xmoq/moqt";
 import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
 import { showCaptions, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
-import { MARK, WIDTH } from "./picture.ts";
-import { joinRoom } from "./room.ts";
 import { AGAIN, every, perSecond, say } from "../lib/page.ts";
 import { connectToRelay, firstBytes, through, why } from "../lib/relay.ts";
 import { namespace, SAMPLE_RATE } from "../lib/tracks.ts";
+import { MARK, WIDTH } from "./picture.ts";
+import { joinRoom } from "./room.ts";
 
 declare const XMOQ_DEMO: { transcript: boolean };
 

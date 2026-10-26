@@ -7,16 +7,18 @@
 		// WHY interop/ file by file: "interop/**" would take in generated output (.dist/, .cert/)
 		// and interop/peers/. The peers are copies of code written for moqtail, kept as they
 		// came so that a diff against their source stays readable; reformatting or relinting
-		// them would bury that diff. WHY demo/ file by file as well: demo/.chat/ holds the
-		// gatherer's store of a run, and demo/node_modules/ what Bun installed.
+		// them would bury that diff. WHY demo/ by its .ts and .json files, under every
+		// directory (the applications are in demo/broadcast/ and demo/meeting/): demo/.chat/
+		// holds the gatherer's store of a run, and demo/node_modules/ what Bun installed.
 		"includes": [
 			"package.json",
 			"packages/**",
 			"interop/*.ts",
 			"interop/*.json",
 			"interop/*.html",
-			"demo/*.ts",
-			"demo/*.json"
+			"demo/**/*.ts",
+			"demo/**/*.json",
+			"!demo/node_modules"
 		]
 	},
 	"linter": {

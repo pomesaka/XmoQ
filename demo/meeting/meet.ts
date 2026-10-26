@@ -39,7 +39,13 @@ import { keepFollowingTranscript, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
 import { startChat } from "../lib/chat.ts";
 import { every, say } from "../lib/page.ts";
 import { type Broadcast, connectToRelay, tokenOf, why } from "../lib/relay.ts";
-import { AUDIO_TRACK, DECODER_CODEC, ENCODER_CODEC, SAMPLE_RATE, TRACK } from "../lib/tracks.ts";
+import {
+	AUDIO_TRACK,
+	DECODER_CODEC,
+	ENCODER_CODEC,
+	SAMPLE_RATE,
+	TRACK,
+} from "../lib/tracks.ts";
 
 declare const XMOQ_DEMO: { roomsUrl: string | null; mostWatched: number };
 

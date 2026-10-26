@@ -23,6 +23,7 @@
 		"check.ts",
 		"open-publish.ts",
 		"*/pages.ts",
+		"*/scripts/*.ts",
 		"lib/shell.ts"
 	]
 }
