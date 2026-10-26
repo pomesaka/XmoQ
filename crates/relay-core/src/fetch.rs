@@ -519,7 +519,7 @@ enum AnswerEnd {
 
 /// The relay's FETCH to a publisher, as the publisher's session holds it.
 #[derive(Debug)]
-pub(crate) struct OwnFetch {
+pub(crate) struct AskedFetch {
     id: RequestId,
     /// The session and request stream of the subscriber's FETCH.
     subscriber: (SessionKey, StreamKey),
@@ -1122,7 +1122,7 @@ impl Relay {
                     .map_err(|_| request_error_code::INTERNAL_ERROR)
             },
             |state, own, id| {
-                state.own_fetches.insert(own, OwnFetch { id, subscriber });
+                state.own_fetches.insert(own, AskedFetch { id, subscriber });
             },
             actions,
         )
