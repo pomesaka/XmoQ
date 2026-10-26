@@ -5,8 +5,8 @@
 /// 3840x2160. **Provisional.**
 ///
 /// WHY: a picture's size is what its stream says, and 3 bytes are kept for
-/// every pixel of it. The largest the demo's publisher sends is 1920x1080;
-/// four times that is as far as a terminal's window goes.
+/// every pixel of it. 3840x2160 is four times 1080p, and as far as a
+/// terminal's window goes.
 pub const MOST_PIXELS: usize = 3840 * 2160;
 
 /// Whether a picture of this size is more than is handled

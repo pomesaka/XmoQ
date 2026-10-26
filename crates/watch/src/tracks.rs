@@ -56,8 +56,11 @@ pub enum VideoVersion {
 /// for.
 ///
 /// WHY the first where nothing is asked, though a catalog can have
-/// several: the demo's publisher puts its main version first and a small
-/// one after it, and nothing here measures the path to choose by.
+/// several: MSF-01 gives the order of a catalog's tracks no meaning, and
+/// leaves the choice among the versions of one picture to the subscriber
+/// (§5.2.12, "differ in their selection properties"). Nothing here measures
+/// the path to choose by, so the version taken unasked is the first, and a
+/// publisher that wants one taken so lists it first.
 ///
 /// With a limit, the versions are measured by what the catalog says of
 /// them (`height`, `bitrate`), and **where none is within the limit the
