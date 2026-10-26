@@ -22,7 +22,7 @@ use xmoq_moqt::session::{
 };
 use xmoq_moqt_io::memory::{
     MemoryConnection, MemoryRecv, MemorySend, STREAM_WINDOW, pair, pair_that_delivers_when_told,
-    pair_with_stream_limit,
+    pair_with_stream_limit, pair_with_window,
 };
 use xmoq_moqt_io::{
     Connection, FetchBody, FetchChunk, FetchStreamWriter, IdleSubgroupStreamTimeout,
@@ -622,6 +622,36 @@ async fn stopping_the_relays_control_stream_closes_the_session() {
         .await
         .expect("the session is closed");
     // PROTOCOL_VIOLATION (0x3).
+    assert_eq!(
+        peer.connection.close_info().map(|close| close.code),
+        Some(0x3)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_of_the_control_stream_while_the_relay_writes_on_it_is_one_like_between_writes() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    // WHY a window of one byte: the relay's SETUP is then being written, held
+    // back by a peer that reads nothing, when the stop comes.
+    let (local, remote) = pair_with_window(1);
+    let peer = Peer::connect_over(&hub, local, remote, false, Arrival::First).await;
+    let control = timeout(SOON, peer.connection.accept_uni())
+        .await
+        .expect("the relay opens its control stream")
+        .unwrap();
+    tokio::time::sleep(SOON).await;
+    control.stop(0x0);
+
+    // The relay waits the 200 ms a peer that leaves has, and then closes the
+    // session with PROTOCOL_VIOLATION (0x3).
+    assert!(
+        timeout(Duration::from_millis(150), peer.connection.closed())
+            .await
+            .is_err()
+    );
+    timeout(SOON, peer.connection.closed())
+        .await
+        .expect("the session is closed");
     assert_eq!(
         peer.connection.close_info().map(|close| close.code),
         Some(0x3)
@@ -2613,6 +2643,49 @@ async fn a_publisher_that_answers_a_fetch_and_opens_no_stream_costs_the_subscrib
         (held.relay.fetches, held.own_requests, held.timers),
         (0, 0, 0)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_stream_the_subscriber_gives_no_credit_for_is_reset_all_the_same() {
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut publisher = Peer::connect(&hub, true).await;
+    let _publication = publisher.publish().await;
+    // WHY one request stream at a time: what the subscriber can see of the
+    // relay's half without reading it, which would give the credit, is
+    // whether the half still holds the stream's place.
+    let (local, remote) = pair_with_stream_limit(1);
+    let mut alice = Peer::connect_over(&hub, local, remote, true, Arrival::First).await;
+    let request = alice.start_fetching(vec![]).await;
+    let mut upstream = publisher.relay_fetch().await;
+    // A FETCH_OK that is longer than the window of the stream: the relay's
+    // write of it waits for a subscriber that reads nothing.
+    let properties = vec![KeyValuePair::bytes(0x0d, vec![9; 4 * STREAM_WINDOW]).unwrap()];
+    let (ok, _) = publisher
+        .session
+        .accept_fetch(upstream.id, false, at(2, 0), properties)
+        .unwrap();
+    send_message(&mut upstream.send, &ok, &Trace::default(), "relay")
+        .await
+        .unwrap();
+    // The publisher opens no stream in the 5 seconds it has, and the relay
+    // gives the fetch up with UNKNOWN_OBJECT_STATUS (0x6).
+    // WHY the reader is kept: a half that is let go of stops the stream,
+    // which takes the relay's write out of its wait.
+    let OpenRequest {
+        mut send,
+        reader: _reader,
+        ..
+    } = request;
+    assert_eq!(
+        timeout(Duration::from_secs(6), send.stopped()).await,
+        Ok(WriteError::Stopped(Some(0x6)))
+    );
+    send.finish();
+
+    // The relay's half is reset as well: the place is back, and the next
+    // request gets through.
+    let next = timeout(SOON, alice.start_fetching(vec![])).await;
+    assert!(next.is_ok(), "the stream still holds its place");
 }
 
 #[tokio::test(start_paused = true)]
