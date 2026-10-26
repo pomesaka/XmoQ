@@ -17,6 +17,7 @@ use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, RequestId, Session};
 use xmoq_moqt::stream_reset_code;
+use xmoq_moqt_io::refuse::{Refusal, refusal};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream,
@@ -703,10 +704,8 @@ pub async fn setup(
 }
 
 /// What the peer does on a request stream it opened, where none is served:
-/// each is refused (`Session::refuse_peer_request`: `NOT_SUPPORTED` and a
-/// FIN, §3.3.2), as the Rust client does in its modes that serve none. What
-/// still comes on a refused stream goes to the session, which checks the
-/// Request ID of a `REQUEST_UPDATE` among it (§10.1).
+/// each is refused, by the rule of `refuse` of `xmoq-moqt-io`
+/// (`NOT_SUPPORTED` and a FIN, §3.3.2), which the Rust client keeps too.
 ///
 /// # Errors
 ///
@@ -718,35 +717,21 @@ pub async fn refuse_peer_request<S: std::hash::BuildHasher>(
     refused: &mut HashMap<u64, PeerRequestId, S>,
     event: PeerRequestStreamEvent<Send>,
 ) -> Result<()> {
-    match event {
-        PeerRequestStreamEvent::Opened {
-            stream,
-            mut send,
-            first,
+    match refusal(session, refused, event) {
+        Refusal::Answer {
+            mut send, response, ..
         } => {
-            let (response, request) = session.refuse_peer_request(first)?;
-            if let Some(request) = request {
-                refused.insert(stream, request);
-            }
             // An error means the peer is gone or stopped the stream.
             let _ = send_message(&mut send, &response, &Trace::default(), "request").await;
             send.finish();
+            Ok(())
         }
-        PeerRequestStreamEvent::Message { stream, message } => {
-            // None where the session keeps nothing of it (`MAX_PEER_REQUESTS`).
-            if let Some(request) = refused.get(&stream) {
-                session.on_peer_request_message(*request, message)?;
-            }
-        }
-        PeerRequestStreamEvent::Closed { stream, .. } => {
-            if let Some(request) = refused.remove(&stream) {
-                session.on_peer_request_closed(request);
-            }
-        }
-        PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
-        PeerRequestStreamEvent::ReaderPanicked => bail!("a reader of a request stream panicked"),
+        Refusal::Nothing => Ok(()),
+        Refusal::Close {
+            error: Some(error), ..
+        } => Err(error.into()),
+        Refusal::Close { why, .. } => Err(anyhow!(why)),
     }
-    Ok(())
 }
 
 /// Where a GOAWAY says to go: its New Session URI, or `None` for the URL of

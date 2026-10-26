@@ -16,6 +16,7 @@ use xmoq_moqt::session::{
     PeerRequest, PeerRequestEvent, PeerRequestId, PeerRequestOpened, Session,
 };
 use xmoq_moqt::{RequestFault, UsageError};
+use xmoq_moqt_io::refuse::{on_refused_closed, on_refused_message};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, PeerRequestStreamEvent, SendStream as _, StreamStops, Trace, send_message,
@@ -184,16 +185,13 @@ impl PeerRequests {
                         let to_do = self.fetches.updated(stream, response);
                         apply(to_do, session, stops);
                     }
-                } else if let Some(request) = self.refused.get(&stream) {
-                    // What crossed the refusal: the session has to see it, a
-                    // REQUEST_UPDATE uses up a Request ID (§10.1).
-                    session.on_peer_request_message(*request, message)?;
+                } else {
+                    // What crossed the refusal.
+                    on_refused_message(session, &self.refused, stream, message)?;
                 }
             }
             PeerRequestStreamEvent::Closed { stream, how } => {
-                if let Some(request) = self.refused.remove(&stream) {
-                    session.on_peer_request_closed(request);
-                }
+                on_refused_closed(session, &mut self.refused, stream);
                 let to_do = self.fetches.closed(stream, how);
                 apply(to_do, session, stops);
             }
