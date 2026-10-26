@@ -5,7 +5,7 @@
 
 import {
 	type GoAwayNotice,
-	keepMoving,
+	keepSessions,
 	type MoqtConnection,
 	type SessionClose,
 	sessionMovingOutcome,
@@ -82,10 +82,9 @@ export async function keepInTheRoom(
 	options: KeepInTheRoomOptions,
 ): Promise<void> {
 	const signal = options.signal ?? new AbortController().signal;
-	let sessions = 0;
-	await keepMoving<ChatConnection, SessionClose>({
+	await keepSessions<ChatConnection, SessionClose>({
 		connect: options.connect,
-		async run({ connection, publishNamespaceToken }) {
+		async run({ connection, publishNamespaceToken }, _running, began) {
 			const participant = await joinChat(connection, {
 				...options.join(),
 				...(publishNamespaceToken === undefined
@@ -93,18 +92,13 @@ export async function keepInTheRoom(
 					: { publishNamespaceToken }),
 				signal,
 			});
-			sessions += 1;
-			options.onState?.({ type: "joined", session: sessions, participant });
+			options.onState?.({ type: "joined", session: began(), participant });
 			return connection.closed;
 		},
 		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
 		signal,
-		onAttempt: (attempt) => options.onState?.({ type: "connecting", attempt }),
-		onOutcome(outcome) {
-			const state = sessionMovingOutcome(outcome);
-			// A session the caller's `signal` closed is the caller's end.
-			if (state.type !== "moved" && signal.aborted) return;
-			options.onState?.(state);
-		},
+		onConnecting: (attempt) =>
+			options.onState?.({ type: "connecting", attempt }),
+		onOutcome: (outcome) => options.onState?.(sessionMovingOutcome(outcome)),
 	});
 }

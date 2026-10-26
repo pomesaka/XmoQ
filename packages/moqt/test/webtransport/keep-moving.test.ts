@@ -4,6 +4,7 @@ import type { GoAwayNotice } from "../../src/webtransport/connection.ts";
 import { RequestFailedError } from "../../src/webtransport/endings.ts";
 import {
 	keepMoving,
+	keepSessions,
 	type MovingConnection,
 	type MovingOutcome,
 } from "../../src/webtransport/keep-moving.ts";
@@ -299,4 +300,59 @@ test("aborting the signal while it waits makes no session after it", async () =>
 		onOutcome: (outcome) => seen.push(outcomeOf(outcome)),
 	});
 	expect(seen).toEqual(["attempt 1", "close", "done over", "wait 1000"]);
+});
+
+// `keepSessions`: the sessions are numbered as they begin, once each
+// however often `began` is called, and the end of a session the caller's
+// `signal` closed is not told; an end before that is.
+test.each<{
+	name: string;
+	sessions: ("cannot-connect" | "runs" | "runs-not" | "caller-stops")[];
+	/** The numbers `began` gave, and the outcomes told, in order. */
+	log: string[];
+}>([
+	{
+		name: "two sessions that began, and the third the caller stops",
+		sessions: ["runs", "runs", "caller-stops"],
+		log: [
+			"began 1",
+			"began 1",
+			"done over",
+			"began 2",
+			"began 2",
+			"done over",
+			"began 3",
+		],
+	},
+	{
+		name: "a session that could not be made, or did not begin, gets no number",
+		sessions: ["cannot-connect", "runs-not", "runs", "caller-stops"],
+		log: ["failed", "done over", "began 1", "began 1", "done over", "began 2"],
+	},
+])("keepSessions: $name", async ({ sessions, log }) => {
+	const told: string[] = [];
+	const stop = new AbortController();
+	const queue = [...sessions];
+	await keepSessions<{ connection: FakeConnection; does: string }, string>({
+		async connect() {
+			const does = queue.shift() ?? "caller-stops";
+			if (does === "cannot-connect") throw new Error("no connection");
+			return { connection: connectionOf([]), does };
+		},
+		async run({ connection, does }, _signal, began) {
+			if (does === "runs-not") return "over";
+			told.push(`began ${began()}`);
+			if (does === "caller-stops") {
+				stop.abort();
+				await connection.closed;
+				return "stopped";
+			}
+			told.push(`began ${began()}`);
+			return "over";
+		},
+		againMs: 1,
+		signal: stop.signal,
+		onOutcome: (outcome) => told.push(outcomeOf(outcome)),
+	});
+	expect(told).toEqual(log);
 });

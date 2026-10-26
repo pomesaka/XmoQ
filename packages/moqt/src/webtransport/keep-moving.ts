@@ -233,6 +233,61 @@ export async function keepMoving<S extends MovingSession, R>(
 	}
 }
 
+export interface KeepSessionsOptions<S extends MovingSession, R> {
+	/** As `KeepMovingOptions.connect`. */
+	connect(goAway?: GoAwayNotice): Promise<S>;
+	/**
+	 * As `KeepMovingOptions.run`. `began` gives the number of this session
+	 * among those that began, from 1, the same number however often it is
+	 * called on one session: a caller calls it where its session does what
+	 * it is for (it publishes, it plays), and says so with that number.
+	 */
+	run(session: S, signal: AbortSignal, began: () => number): Promise<R>;
+	/** As `KeepMovingOptions.movedBy`. */
+	movedBy?(result: R): GoAwayNotice | undefined;
+	/** As `KeepMovingOptions.againMs`. */
+	againMs?: number;
+	/** Aborting it closes the session and ends the trying. */
+	signal?: AbortSignal;
+	/** Before every try at a session. */
+	onConnecting?(attempt: number): void;
+	/** After every session, but for one that ended because `signal` was aborted, which the caller knows of: it ended it. A GOAWAY is told all the same. */
+	onOutcome?(outcome: MovingOutcome<R>): void;
+}
+
+/**
+ * `keepMoving` as the clients of the packages above use it: the sessions
+ * are numbered as they begin, and a session the caller's `signal` closed is
+ * not told as an end. WHY one place: the players and publishers of
+ * `@xmoq/media`, the chat's participant, the transcript's reader and the
+ * meeting each did both by hand, and two of them told the caller of the
+ * end it made itself.
+ */
+export function keepSessions<S extends MovingSession, R>(
+	options: KeepSessionsOptions<S, R>,
+): Promise<void> {
+	const signal = options.signal ?? new AbortController().signal;
+	let sessions = 0;
+	return keepMoving<S, R>({
+		connect: options.connect,
+		run(session, running) {
+			let number: number | undefined;
+			return options.run(session, running, () => {
+				number ??= ++sessions;
+				return number;
+			});
+		},
+		...(options.movedBy === undefined ? {} : { movedBy: options.movedBy }),
+		...(options.againMs === undefined ? {} : { againMs: options.againMs }),
+		signal,
+		onAttempt: (attempt) => options.onConnecting?.(attempt),
+		onOutcome(outcome) {
+			if (outcome.type !== "moved" && signal.aborted) return;
+			options.onOutcome?.(outcome);
+		},
+	});
+}
+
 /**
  * The outcome of a session whose `run` resolves with its end
  * (`connection.closed`), as the callers that keep one say it: `done` is
