@@ -5,6 +5,7 @@ pub const USAGE: &str = "\
 xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file>
           [--room <kind>/<room>]... [--text-bytes <n>] [--lines-per-second <n>] [--fetch-lines <n>]
           [--ask-again-times <n>] [--ask-again-ms <ms>] [--auth-key-hex <hex>]
+          [--reaction-batch-ms <ms>] [--reactions-per-second <n>] [--reaction-kinds <n>]
 
 --store             the SQLite file of the history, this gatherer's alone; made where it is not there
 --room              a room to gather, broadcast/<room> or meeting/<room>, up to 8; every room of both
@@ -16,6 +17,12 @@ xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file
                     without one that was established (30; 0 never; up to 10000)
 --ask-again-ms      the pause before it is, after an end or a refusal that names no time or 0
                     (1000; 100 to 60000)
+--reaction-batch-ms     the while a room's reactions are counted over before they are published on
+                        `reactions` (100; 10 to 60000)
+--reactions-per-second  the most reactions one person may send in any second; the one over it is
+                        dropped (5; 1 to 1000)
+--reaction-kinds        the most emoji one while of a room counts; a reaction with one more is
+                        dropped (16; 1 to 256)
 --auth-key-hex      the key the relay checks tokens with; the gatherer makes its own tokens (where the relay shares its key with it)";
 
 use xmoq_chat_tracks::names::Room;
@@ -23,7 +30,8 @@ use xmoq_chat_tracks::names::Room;
 use crate::said_again::{PAUSE_MS_LEAST, PAUSE_MS_MOST, Settings, TIMES_MOST};
 
 pub use xmoq_chat_tracks::limits::{
-    FETCH_LINES_MOST, LINES_PER_SECOND_MOST, Limits, TEXT_BYTES_MOST,
+    FETCH_LINES_MOST, LINES_PER_SECOND_MOST, Limits, REACTION_BATCH_MS_LEAST,
+    REACTION_BATCH_MS_MOST, REACTION_KINDS_MOST, REACTIONS_PER_SECOND_MOST, TEXT_BYTES_MOST,
 };
 
 /// The most bytes the gatherer holds of one stream of `said` before it has
@@ -164,6 +172,21 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
                 limits.lines_per_second = number_within(&flag, &value, LINES_PER_SECOND_MOST)?;
             }
             "--fetch-lines" => limits.fetch_lines = number_within(&flag, &value, FETCH_LINES_MOST)?,
+            "--reaction-batch-ms" => {
+                limits.reaction_batch_ms = number_from(
+                    &flag,
+                    &value,
+                    REACTION_BATCH_MS_LEAST,
+                    REACTION_BATCH_MS_MOST,
+                )?;
+            }
+            "--reactions-per-second" => {
+                limits.reactions_per_second =
+                    number_within(&flag, &value, REACTIONS_PER_SECOND_MOST)?;
+            }
+            "--reaction-kinds" => {
+                limits.reaction_kinds = number_within(&flag, &value, REACTION_KINDS_MOST)?;
+            }
             "--ask-again-times" => ask_again.times = number_from(&flag, &value, 0, TIMES_MOST)?,
             "--ask-again-ms" => {
                 ask_again.pause_ms = number_from(&flag, &value, PAUSE_MS_LEAST, PAUSE_MS_MOST)?;
@@ -389,7 +412,7 @@ mod tests {
             "--store",
             "s",
         ];
-        let cases: [(&str, &[&str], Result<Args, String>); 9] = [
+        let cases: [(&str, &[&str], Result<Args, String>); 12] = [
             ("the defaults", &[], Ok(with(Limits::default()))),
             (
                 "every limit",
@@ -400,12 +423,36 @@ mod tests {
                     "2",
                     "--fetch-lines",
                     "3",
+                    "--reaction-batch-ms",
+                    "250",
+                    "--reactions-per-second",
+                    "3",
+                    "--reaction-kinds",
+                    "8",
                 ],
                 Ok(with(Limits {
                     text_bytes: 100,
                     lines_per_second: 2,
                     fetch_lines: 3,
+                    reaction_batch_ms: 250,
+                    reactions_per_second: 3,
+                    reaction_kinds: 8,
                 })),
+            ),
+            (
+                "a while too short",
+                &["--reaction-batch-ms", "9"],
+                Err("--reaction-batch-ms is a number from 10 to 60000, not \"9\"".to_string()),
+            ),
+            (
+                "no reactions at all",
+                &["--reactions-per-second", "0"],
+                Err("--reactions-per-second is a number from 1 to 1000, not \"0\"".to_string()),
+            ),
+            (
+                "too many kinds",
+                &["--reaction-kinds", "257"],
+                Err("--reaction-kinds is a number from 1 to 256, not \"257\"".to_string()),
             ),
             (
                 "the largest text",

@@ -48,11 +48,14 @@ use xmoq_moqt::params::SubscriptionFilter;
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+use tokio::time::MissedTickBehavior;
 use xmoq_chat::gather::{Admitted, Gatherer};
+use xmoq_chat::react::{Reacting, ReactionDropped};
 use xmoq_chat_tracks::names::{
-    self, Person, Room, lines_track, person_of, room_of_lines, said_track,
+    self, ChatTrack, Person, PersonTrack, Room, RoomTrack, person_of, person_track, room_track,
+    track_of,
 };
-use xmoq_chat_tracks::payloads::Line;
+use xmoq_chat_tracks::reactions::Present;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::immutable::TrackRefusal;
@@ -114,6 +117,41 @@ const HEARD_QUEUE: usize = 256;
 /// sent live; it is in the store, and a FETCH gets it. Provisional.
 const LINES_WAITING_FOR_A_ROOM: usize = 64;
 
+/// The Objects of a room's `reactions` or `present` that wait for its
+/// `PUBLISH_OK`, the oldest dropped first. WHY fewer than of `lines`: each
+/// says the state of a while or of the room, which the next says anew.
+/// **Provisional.**
+const COUNTS_WAITING_FOR_A_ROOM: usize = 4;
+
+/// An Object of a room's track that waits for its `PUBLISH_OK`: its Group
+/// ID and its payload.
+type Waiting = (u64, Vec<u8>);
+
+/// The tracks the gatherer publishes for a room.
+const ROOM_TRACKS: [RoomTrack; 3] = [RoomTrack::Lines, RoomTrack::Reactions, RoomTrack::Present];
+
+/// The tracks the gatherer subscribes to of a participant.
+const PERSON_TRACKS: [PersonTrack; 2] = [PersonTrack::Said, PersonTrack::Reacted];
+
+/// What the log calls a track of a room. WHY `lines` is `ROOM`: what the log
+/// said before the room had other tracks, which the interop runs wait for.
+fn room_word(track: RoomTrack) -> &'static str {
+    match track {
+        RoomTrack::Lines => "ROOM",
+        RoomTrack::Reactions => "REACTIONS",
+        RoomTrack::Present => "PRESENT",
+    }
+}
+
+/// What the log puts before the words of a participant's track. WHY none for
+/// `said`: as for `ROOM`.
+fn person_word(track: PersonTrack) -> &'static str {
+    match track {
+        PersonTrack::Said => "",
+        PersonTrack::Reacted => "REACTED_",
+    }
+}
+
 /// Subgroup streams of lines being written at once. Past it a line is not
 /// sent live; as above. WHY a limit: a relay that takes nothing would have
 /// a task for every line. Provisional.
@@ -142,12 +180,47 @@ pub enum SessionEnd {
     Moved(Option<String>),
 }
 
-/// A participant that is followed in this session.
+/// A participant that is followed in this session: its `said` and its
+/// `reacted`.
 struct Followed {
+    said: Subscription,
+    reacted: Subscription,
+}
+
+/// The subscription to one track of a followed participant.
+struct Subscription {
     /// The token of its SUBSCRIBE, while it has one.
-    said: Option<u64>,
-    /// When it is asked again after its subscription is over.
+    token: Option<u64>,
+    /// When it is asked again after it is over.
     again: SaidAgain,
+}
+
+impl Followed {
+    /// Neither track is subscribed to yet.
+    fn new(settings: AskAgain) -> Self {
+        let subscription = || Subscription {
+            token: None,
+            again: SaidAgain::new(settings),
+        };
+        Self {
+            said: subscription(),
+            reacted: subscription(),
+        }
+    }
+
+    fn of(&self, track: PersonTrack) -> &Subscription {
+        match track {
+            PersonTrack::Said => &self.said,
+            PersonTrack::Reacted => &self.reacted,
+        }
+    }
+
+    fn of_mut(&mut self, track: PersonTrack) -> &mut Subscription {
+        match track {
+            PersonTrack::Said => &mut self.said,
+            PersonTrack::Reacted => &mut self.reacted,
+        }
+    }
 }
 
 /// What a request of the gatherer is for.
@@ -156,10 +229,10 @@ enum Purpose {
     /// A `SUBSCRIBE_NAMESPACE`: for `xmoq/chat`, or for `xmoq/chat/<room>`
     /// of each `--room`, by its place in [`Gathering::watches`].
     Watch(usize),
-    /// The SUBSCRIBE for `said` of a participant.
-    Said(Person),
-    /// The PUBLISH of `lines` of a room.
-    Lines(Room),
+    /// The SUBSCRIBE for a track of a participant.
+    Person(Person, PersonTrack),
+    /// The PUBLISH of a track of a room.
+    Room(Room, RoomTrack),
 }
 
 /// A request of the gatherer, by the token its task reports with.
@@ -200,15 +273,20 @@ struct Gathering<'a> {
     own: HashMap<u64, Own>,
     next_token: u64,
     heard: mpsc::Sender<(u64, Heard)>,
-    /// The `lines` of each room the gatherer numbers.
-    rooms: HashMap<Room, Publication<Line>>,
+    /// The tracks of each room the gatherer numbers, with the Objects that
+    /// wait for their `PUBLISH_OK` by Group ID.
+    published: HashMap<(Room, RoomTrack), Publication<Waiting>>,
+    /// The last Group ID of each room's `reactions` and `present`.
+    last_group: HashMap<(Room, RoomTrack), u64>,
+    /// The reactions of the while under way.
+    reacting: Reacting,
     next_track_alias: u64,
     /// Each participant that is followed.
     people: HashMap<Person, Followed>,
-    /// The participants whose `said` is to be asked for again, and when.
+    /// The tracks of participants that are to be asked for again, and when.
     /// WHY apart from [`Self::people`]: the loop looks for the earliest
     /// with every event, and few wait at once out of up to 4,096 followed.
-    asking_again: HashMap<Person, Instant>,
+    asking_again: HashMap<(Person, PersonTrack), Instant>,
     /// `--ask-again-times`, `--ask-again-ms`.
     ask_again: AskAgain,
     /// Objects of `said` read before the `SUBSCRIBE_OK` that gives their
@@ -218,8 +296,9 @@ struct Gathering<'a> {
     /// those refused.
     requests: PeerRequests,
     /// The PUBLISH requests that wait for their streams to be closed, by
-    /// token, with their room, and where the loop is told that they are.
-    ending: HashMap<u64, (Room, Ending)>,
+    /// token, with their room and track, and where the loop is told that
+    /// they are.
+    ending: HashMap<u64, ((Room, RoomTrack), Ending)>,
     drained: mpsc::Sender<u64>,
     watches: Vec<Watch>,
     /// The rooms the gatherer takes (`--room`).
@@ -296,6 +375,7 @@ pub async fn gather(
     kept.readers.extend([uni_readers, request_readers]);
     let (heard, mut heard_by_loop) = mpsc::channel(HEARD_QUEUE);
     let (drained, mut drained_rooms) = mpsc::channel(PEER_REQUEST_QUEUE);
+    let reacting = Reacting::new(gatherer.limits());
     let mut gathering = Gathering {
         connection,
         store,
@@ -305,7 +385,9 @@ pub async fn gather(
         own: HashMap::new(),
         next_token: 0,
         heard,
-        rooms: HashMap::new(),
+        published: HashMap::new(),
+        last_group: HashMap::new(),
+        reacting,
         next_track_alias: FIRST_TRACK_ALIAS,
         people: HashMap::new(),
         asking_again: HashMap::new(),
@@ -361,10 +443,14 @@ pub async fn gather(
         gathering.watch(index)?;
     }
 
+    let batch_ms = gathering.gatherer.limits().reaction_batch_ms;
+    let mut batch = tokio::time::interval(Duration::from_millis(batch_ms));
+    // A loop that was held up counts one longer while, not several at once.
+    batch.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let ended = loop {
         // WHY taken before the select: its arms borrow parts of the state
         // mutably, the task notes of the FETCH answers among them.
-        let (next_watch, next_said) = (gathering.next_watch(), gathering.next_said());
+        let (next_watch, next_asked) = (gathering.next_watch(), gathering.next_asked());
         tokio::select! {
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
@@ -389,7 +475,8 @@ pub async fn gather(
             note = gathering.requests.next_note() => gathering.fetch_noted(note),
             Some(token) = drained_rooms.recv() => gathering.publish_done(token)?,
             () = sleep_until(next_watch) => gathering.watch_again()?,
-            () = sleep_until(next_said) => gathering.said_again()?,
+            () = sleep_until(next_asked) => gathering.ask_again()?,
+            _ = batch.tick() => gathering.send_reactions()?,
             Some(_) = gathering.sends.join_next() => {}
         }
     };
@@ -541,17 +628,25 @@ impl Gathering<'_> {
         Some(own.purpose)
     }
 
-    // FIXME: take the steps of a PUBLISH (`publish` to `publish_done`,
-    // `send_live`) and of the gatherer's own requests (`open`, `tell`,
-    // `let_go`, `watch`, `watch_again`) from `xmoq-publisher`; the
-    // transcriber has a copy of each.
-    /// Publishes the `lines` of a room, unless they are published or wait
-    /// to be published again.
-    fn publish(&mut self, room: &Room) -> Result<()> {
+    /// Publishes every track of a room ([`ROOM_TRACKS`]).
+    fn publish_room(&mut self, room: &Room) -> Result<()> {
+        for track in ROOM_TRACKS {
+            self.publish(room, track)?;
+        }
+        Ok(())
+    }
+
+    /// Publishes a track of a room, unless it is published or waits to be
+    /// published again.
+    fn publish(&mut self, room: &Room, track: RoomTrack) -> Result<()> {
+        let most_waiting = match track {
+            RoomTrack::Lines => LINES_WAITING_FOR_A_ROOM,
+            RoomTrack::Reactions | RoomTrack::Present => COUNTS_WAITING_FOR_A_ROOM,
+        };
         let entry = self
-            .rooms
-            .entry(room.clone())
-            .or_insert_with(|| Publication::new(LINES_WAITING_FOR_A_ROOM));
+            .published
+            .entry((room.clone(), track))
+            .or_insert_with(|| Publication::new(most_waiting));
         if !entry.to_publish(Instant::now()) {
             return Ok(());
         }
@@ -559,51 +654,75 @@ impl Gathering<'_> {
         self.next_track_alias += 1;
         // §10.2.11: the largest line the gatherer has, which the relay gives
         // its subscribers in SUBSCRIBE_OK, and where a Joining FETCH ends.
-        let parameters: Vec<Parameter> = self
-            .gatherer
-            .rooms
-            .largest(room)
+        // WHY none for the counts: nothing of them is kept, and no FETCH
+        // gets any (decided on 2026-10-26).
+        let largest = match track {
+            RoomTrack::Lines => self.gatherer.rooms.largest(room),
+            RoomTrack::Reactions | RoomTrack::Present => None,
+        };
+        let parameters: Vec<Parameter> = largest
             .map(|group| Parameter::LargestObject(Location { group, object: 0 }))
             .into_iter()
             .chain(self.token_parameter(TokenRole::Pub))
             .collect();
-        let published =
-            self.session
-                .publish(lines_track(room)?, track_alias, parameters.clone(), vec![]);
+        let published = self.session.publish(
+            room_track(room, track)?,
+            track_alias,
+            parameters.clone(),
+            vec![],
+        );
         let Ok((request, message)) = published else {
             // The PUBLISH before it still waits for its streams to be
             // closed; it is published again once that is over.
             println!(
-                "ROOM_NOT_PUBLISHED room={room:?} why=\"the PUBLISH before is ending\"",
+                "{}_NOT_PUBLISHED room={room:?} why=\"the PUBLISH before is ending\"",
+                room_word(track),
                 room = room.to_string()
             );
             return Ok(());
         };
-        let token = self.open(Purpose::Lines(room.clone()), request, message, &parameters);
-        if let Some(entry) = self.rooms.get_mut(room) {
+        let purpose = Purpose::Room(room.clone(), track);
+        let token = self.open(purpose, request, message, &parameters);
+        if let Some(entry) = self.published.get_mut(&(room.clone(), track)) {
             entry.published(token, track_alias);
         }
         Ok(())
     }
 
-    /// The PUBLISH of a room is over; the next line publishes it again.
-    /// Does nothing where `token` is no longer the room's PUBLISH.
-    fn unpublish(&mut self, room: &Room, token: u64, failed: bool) {
-        if let Some(entry) = self.rooms.get_mut(room)
+    /// The PUBLISH of a room's track is over; the next Object publishes it
+    /// again. Does nothing where `token` is no longer its PUBLISH.
+    fn unpublish(&mut self, room: &Room, track: RoomTrack, token: u64, failed: bool) {
+        if let Some(entry) = self.published.get_mut(&(room.clone(), track))
             && entry.unpublished(token, failed, Instant::now())
         {
-            println!("ROOM_UNPUBLISHED room={room:?}", room = room.to_string());
+            println!(
+                "{}_UNPUBLISHED room={room:?}",
+                room_word(track),
+                room = room.to_string()
+            );
         }
     }
 
-    /// Ends the PUBLISH of a room with `status`: no line is sent on it from
-    /// now on, and its `PUBLISH_DONE` goes once the streams being sent are
-    /// closed ([`Self::publish_done`]). `forget`: the room is numbered no
-    /// more, and its state goes.
-    fn end_publish(&mut self, room: &Room, status: u64, forget: bool) {
-        let ending = self.rooms.get_mut(room).and_then(|entry| entry.end(status));
+    /// Ends the PUBLISH of every track of a room ([`Self::end_publish`]).
+    fn end_room(&mut self, room: &Room, status: u64, forget: bool) {
+        for track in ROOM_TRACKS {
+            self.end_publish(room, track, status, forget);
+        }
+    }
+
+    /// Ends the PUBLISH of a room's track with `status`: no Object is sent
+    /// on it from now on, and its `PUBLISH_DONE` goes once the streams being
+    /// sent are closed ([`Self::publish_done`]). `forget`: the room is
+    /// numbered no more, and its state goes.
+    fn end_publish(&mut self, room: &Room, track: RoomTrack, status: u64, forget: bool) {
+        let key = (room.clone(), track);
+        let ending = self
+            .published
+            .get_mut(&key)
+            .and_then(|entry| entry.end(status));
         if forget {
-            self.rooms.remove(room);
+            self.published.remove(&key);
+            self.last_group.remove(&key);
         }
         let Some(ending) = ending else {
             return;
@@ -613,14 +732,14 @@ impl Gathering<'_> {
         tokio::spawn(async move {
             let _ = drained.send(when_drained.await).await;
         });
-        self.ending.insert(ending.token, (room.clone(), ending));
+        self.ending.insert(ending.token, (key, ending));
     }
 
     /// Every stream of an ending PUBLISH is closed: its `PUBLISH_DONE`, with
     /// the number of streams it opened (§10.11), and a FIN. Where the room
     /// is numbered again meanwhile, it is published anew.
     fn publish_done(&mut self, token: u64) -> Result<()> {
-        let Some((room, ending)) = self.ending.remove(&token) else {
+        let Some(((room, track), ending)) = self.ending.remove(&token) else {
             return Ok(());
         };
         if let Some(own) = self.own.get(&token) {
@@ -634,21 +753,23 @@ impl Gathering<'_> {
             self.tell(token, Command::Say(done));
             self.let_go(token, Command::Finish);
             println!(
-                "ROOM_DONE room={room:?} status={:#x} streams={streams}",
+                "{}_DONE room={room:?} status={:#x} streams={streams}",
+                room_word(track),
                 ending.status,
                 room = room.to_string()
             );
         }
         if self.gatherer.rooms.knows(&room) {
-            if let Some(entry) = self.rooms.get_mut(&room) {
+            if let Some(entry) = self.published.get_mut(&(room.clone(), track)) {
                 entry.may_publish_again();
             }
-            self.publish(&room)?;
+            self.publish(&room, track)?;
         }
         Ok(())
     }
 
-    /// Subscribes to what a participant says.
+    /// Subscribes to a track of a participant: what it says, or its
+    /// reactions.
     ///
     /// WHY the Largest Object filter (§5.1.2: "The filter Start Location is
     /// {Largest Object.Group, Largest Object.Object + 1}"): without a filter
@@ -657,11 +778,12 @@ impl Gathering<'_> {
     /// from SUBSCRIBE ... the subscription is unfiltered"), and a relay that
     /// still has a participant's lines would pass them again to a gatherer
     /// that connects anew, which numbers what comes and would keep each
-    /// twice. WHY NOT remember the Group IDs taken of each participant:
-    /// a participant that comes again numbers its Groups anew (the own Rust
-    /// client from 0), and its new lines would be taken for old ones. What
-    /// a participant said while the gatherer was away is lost either way.
-    fn subscribe(&mut self, person: &Person) -> Result<()> {
+    /// twice; a reaction would be counted again. WHY NOT remember the Group
+    /// IDs taken of each participant: a participant that comes again numbers
+    /// its Groups anew (the own Rust client from 0), and its new lines would
+    /// be taken for old ones. What a participant said while the gatherer was
+    /// away is lost either way.
+    fn subscribe(&mut self, person: &Person, track: PersonTrack) -> Result<()> {
         let mut parameters = vec![
             Parameter::SubscriptionFilter(SubscriptionFilter::LargestObject),
             Parameter::Forward(true),
@@ -669,32 +791,35 @@ impl Gathering<'_> {
             Parameter::GroupOrder(GroupOrder::Ascending),
         ];
         parameters.extend(self.token_parameter(TokenRole::Sub));
-        self.asking_again.remove(person);
+        self.asking_again.remove(&(person.clone(), track));
         let Ok((request, message)) = self
             .session
-            .subscribe(said_track(person)?, parameters.clone())
+            .subscribe(person_track(person, track)?, parameters.clone())
         else {
             // A subscription to the track is there already.
             println!(
-                "NOT_SUBSCRIBED room={:?} name={:?} why=\"a subscription is there already\"",
+                "{}NOT_SUBSCRIBED room={:?} name={:?} why=\"a subscription is there already\"",
+                person_word(track),
                 person.room.to_string(),
                 person.name
             );
             return Ok(());
         };
-        let token = self.open(Purpose::Said(person.clone()), request, message, &parameters);
+        let purpose = Purpose::Person(person.clone(), track);
+        let token = self.open(purpose, request, message, &parameters);
         if let Some(followed) = self.people.get_mut(person) {
-            followed.said = Some(token);
+            followed.of_mut(track).token = Some(token);
         }
         Ok(())
     }
 
-    /// The `said` of a participant that stays announced is over: it is
-    /// asked for again after a pause, or not until its NAMESPACE comes
-    /// again ([`SaidAgain`]).
-    fn said_over(&mut self, person: &Person, over: SubscriptionEnd, why: &str) {
+    /// A track of a participant that stays announced is over: it is asked
+    /// for again after a pause, or not until its NAMESPACE comes again
+    /// ([`SaidAgain`]).
+    fn track_over(&mut self, person: &Person, track: PersonTrack, end: SubscriptionEnd, why: &str) {
+        let word = person_word(track);
         println!(
-            "NOT_SUBSCRIBED room={:?} name={:?} why={why:?}",
+            "{word}NOT_SUBSCRIBED room={:?} name={:?} why={why:?}",
             person.room.to_string(),
             person.name
         );
@@ -702,37 +827,39 @@ impl Gathering<'_> {
         let Some(followed) = self.people.get_mut(person) else {
             return;
         };
-        followed.said = None;
-        match followed.again.over(over) {
+        let subscription = followed.of_mut(track);
+        subscription.token = None;
+        match subscription.again.over(end) {
             Some(pause) => {
                 println!(
-                    "ASKING_AGAIN room={:?} name={:?} in_ms={pause}",
+                    "{word}ASKING_AGAIN room={:?} name={:?} in_ms={pause}",
                     person.room.to_string(),
                     person.name
                 );
                 self.asking_again.insert(
-                    person.clone(),
+                    (person.clone(), track),
                     Instant::now() + Duration::from_millis(pause),
                 );
             }
             None => println!(
-                "NOT_ASKING_AGAIN room={:?} name={:?}",
+                "{word}NOT_ASKING_AGAIN room={:?} name={:?}",
                 person.room.to_string(),
                 person.name
             ),
         }
     }
 
-    /// The subscription to a participant's `said` is established: the
+    /// The subscription to a track of a participant is established: the
     /// Objects that came before it are taken.
-    fn said_established(&mut self, person: &Person) -> Result<()> {
+    fn track_established(&mut self, person: &Person, track: PersonTrack) -> Result<()> {
         println!(
-            "SUBSCRIBED room={:?} name={:?}",
+            "{}SUBSCRIBED room={:?} name={:?}",
+            person_word(track),
             person.room.to_string(),
             person.name
         );
         if let Some(followed) = self.people.get_mut(person) {
-            followed.again.subscribed();
+            followed.of_mut(track).again.subscribed();
         }
         self.settle_early()
     }
@@ -749,41 +876,33 @@ impl Gathering<'_> {
             self.stops.stop(stream, code);
         }
         for (track_alias, payload) in settled.released {
-            let person = match self.session.subscribed_alias(track_alias) {
-                SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
-                    person_of(track.namespace())
-                }
-                SubscribedAlias::Unknown | SubscribedAlias::Retired => None,
-            };
-            if let Some(person) = person {
-                self.on_said(&person, &payload)?;
-            }
+            self.on_object(track_alias, &payload)?;
         }
         Ok(())
     }
 
-    /// When the next participant is to be asked for again.
-    fn next_said(&self) -> Option<Instant> {
+    /// When the next track of a participant is to be asked for again.
+    fn next_asked(&self) -> Option<Instant> {
         self.asking_again.values().min().copied()
     }
 
-    /// Asks again for every participant whose time has come.
-    fn said_again(&mut self) -> Result<()> {
+    /// Asks again for every track of a participant whose time has come.
+    fn ask_again(&mut self) -> Result<()> {
         let now = Instant::now();
-        let due: Vec<Person> = self
+        let due: Vec<(Person, PersonTrack)> = self
             .asking_again
             .iter()
             .filter(|(_, at)| **at <= now)
-            .map(|(person, _)| person.clone())
+            .map(|(asked, _)| asked.clone())
             .collect();
-        for person in due {
-            self.asking_again.remove(&person);
+        for (person, track) in due {
+            self.asking_again.remove(&(person.clone(), track));
             if self
                 .people
                 .get(&person)
-                .is_some_and(|followed| followed.said.is_none())
+                .is_some_and(|followed| followed.of(track).token.is_none())
             {
-                self.subscribe(&person)?;
+                self.subscribe(&person, track)?;
             }
         }
         Ok(())
@@ -807,15 +926,18 @@ impl Gathering<'_> {
                 return Ok(());
             }
         }
-        self.publish(&person.room)?;
+        self.publish_room(&person.room)?;
         let admitted = self.gatherer.admit(&person);
         if matches!(admitted, Admitted::Now | Admitted::Already) {
             // A NAMESPACE that comes again counts the times anew.
-            let again = SaidAgain::new(self.ask_again);
-            self.people
+            let settings = self.ask_again;
+            let followed = self
+                .people
                 .entry(person.clone())
-                .and_modify(|followed| followed.again = again.clone())
-                .or_insert(Followed { said: None, again });
+                .or_insert_with(|| Followed::new(settings));
+            for track in PERSON_TRACKS {
+                followed.of_mut(track).again = SaidAgain::new(settings);
+            }
         }
         match admitted {
             Admitted::Now => {
@@ -824,18 +946,24 @@ impl Gathering<'_> {
                     person.room.to_string(),
                     person.name
                 );
-                self.subscribe(&person)
+                for track in PERSON_TRACKS {
+                    self.subscribe(&person, track)?;
+                }
+                self.send_present(&person.room)
             }
-            // Followed, and with no subscription in this session.
-            Admitted::Already
-                if self
-                    .people
-                    .get(&person)
-                    .is_some_and(|followed| followed.said.is_none()) =>
-            {
-                self.subscribe(&person)
+            // Followed: the tracks with no subscription in this session.
+            Admitted::Already => {
+                for track in PERSON_TRACKS {
+                    if self
+                        .people
+                        .get(&person)
+                        .is_some_and(|followed| followed.of(track).token.is_none())
+                    {
+                        self.subscribe(&person, track)?;
+                    }
+                }
+                Ok(())
             }
-            Admitted::Already => Ok(()),
             Admitted::TooManyPeople | Admitted::NoRoom => {
                 println!(
                     "PARTICIPANT_IGNORED room={:?} name={:?} why=too-many-people",
@@ -848,35 +976,36 @@ impl Gathering<'_> {
     }
 
     /// A `NAMESPACE_DONE` under `xmoq/chat`: the participant is gone.
-    fn on_namespace_done(&mut self, namespace: &TrackNamespace) {
+    fn on_namespace_done(&mut self, namespace: &TrackNamespace) -> Result<()> {
         let Some(person) = person_of(namespace) else {
-            return;
+            return Ok(());
         };
-        self.asking_again.remove(&person);
-        if let Some(Followed {
-            said: Some(token), ..
-        }) = self.people.remove(&person)
-        {
-            self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
+        for track in PERSON_TRACKS {
+            self.asking_again.remove(&(person.clone(), track));
         }
-        match self.gatherer.leave(&person) {
-            Left::NotFollowed => {}
-            Left::RoomStays => {
-                println!(
-                    "PARTICIPANT_GONE room={:?} name={:?}",
-                    person.room.to_string(),
-                    person.name
-                );
-            }
-            Left::RoomEmpty => {
-                println!(
-                    "PARTICIPANT_GONE room={:?} name={:?}",
-                    person.room.to_string(),
-                    person.name
-                );
-                self.end_publish(&person.room, publish_done_status::TRACK_ENDED, true);
+        if let Some(followed) = self.people.remove(&person) {
+            for token in [followed.said.token, followed.reacted.token]
+                .into_iter()
+                .flatten()
+            {
+                self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
             }
         }
+        self.reacting.leave(&person);
+        let left = self.gatherer.leave(&person);
+        if left != Left::NotFollowed {
+            println!(
+                "PARTICIPANT_GONE room={:?} name={:?}",
+                person.room.to_string(),
+                person.name
+            );
+            self.send_present(&person.room)?;
+        }
+        if left == Left::RoomEmpty {
+            self.reacting.forget(&person.room);
+            self.end_room(&person.room, publish_done_status::TRACK_ENDED, true);
+        }
+        Ok(())
     }
 
     /// An Object of `said`: a line.
@@ -911,35 +1040,84 @@ impl Gathering<'_> {
             line.name,
             line.text.len()
         );
-        self.send_live(&person.room, line)
+        self.send_live(&person.room, RoomTrack::Lines, line.number, line.payload())
     }
 
-    /// Sends a line that is kept on the `lines` of its room, or has it wait
-    /// for the room's `PUBLISH_OK`.
-    fn send_live(&mut self, room: &Room, line: Line) -> Result<()> {
-        let is_live = self.rooms.get(room).is_some_and(Publication::live);
+    /// An Object of `reacted`: a reaction, counted in its room's while.
+    fn on_reacted(&mut self, person: &Person, payload: &[u8]) {
+        let now_ms = u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let counted = if self.gatherer.follows(person) {
+            self.reacting.react(person, payload, now_ms)
+        } else {
+            Err(ReactionDropped::NotFollowed)
+        };
+        if let Err(dropped) = counted {
+            println!(
+                "REACTION_DROPPED room={:?} name={:?} why={}",
+                person.room.to_string(),
+                person.name,
+                dropped.word()
+            );
+        }
+    }
+
+    /// An Object of a track the gatherer subscribed to under `track_alias`.
+    fn on_object(&mut self, track_alias: u64, payload: &[u8]) -> Result<()> {
+        let track = match self.session.subscribed_alias(track_alias) {
+            SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
+                track_of(track)
+            }
+            SubscribedAlias::Unknown | SubscribedAlias::Retired => None,
+        };
+        match track {
+            Some(ChatTrack::OfPerson(person, PersonTrack::Said)) => self.on_said(&person, payload),
+            Some(ChatTrack::OfPerson(person, PersonTrack::Reacted)) => {
+                self.on_reacted(&person, payload);
+                Ok(())
+            }
+            // The gatherer subscribes to no track of a room.
+            Some(ChatTrack::OfRoom(..)) | None => Ok(()),
+        }
+    }
+
+    /// Sends Group `group_id` of a room's track, one Object of `payload`,
+    /// or has it wait for the track's `PUBLISH_OK`.
+    fn send_live(
+        &mut self,
+        room: &Room,
+        track: RoomTrack,
+        group_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let key = (room.clone(), track);
+        let is_live = self.published.get(&key).is_some_and(Publication::live);
         if !is_live {
-            self.publish(room)?;
-            if let Some(entry) = self.rooms.get_mut(room) {
-                entry.wait(line);
+            self.publish(room, track)?;
+            if let Some(entry) = self.published.get_mut(&key) {
+                entry.wait((group_id, payload));
             }
             return Ok(());
         }
-        let Some(entry) = self.rooms.get(room) else {
+        let Some(entry) = self.published.get(&key) else {
             return Ok(());
+        };
+        // What the log calls an Object of each track; `LINE` as before.
+        let what = match track {
+            RoomTrack::Lines => "LINE",
+            RoomTrack::Reactions => "REACTIONS",
+            RoomTrack::Present => "PRESENT",
         };
         if self.sends.len() >= LINES_BEING_SENT {
             println!(
-                "LINE_NOT_SENT room={room:?} number={} why=too-many-at-once",
-                line.number,
+                "{what}_NOT_SENT room={room:?} number={group_id} why=too-many-at-once",
                 room = room.to_string()
             );
             return Ok(());
         }
         let sending = GroupToSend {
             track_alias: entry.track_alias(),
-            group_id: line.number,
-            payload: line.payload(),
+            group_id,
+            payload,
             opened: Arc::clone(entry.opened()),
         };
         let counted = Sending::begin(entry.sending());
@@ -949,9 +1127,58 @@ impl Gathering<'_> {
             let _counted = counted;
             let number = sending.group_id;
             if let Err(why) = send_group(connection, sending).await {
-                println!("LINE_NOT_SENT room={room:?} number={number} why={why:?}");
+                println!("{what}_NOT_SENT room={room:?} number={number} why={why:?}");
             }
         });
+        Ok(())
+    }
+
+    /// The next Group ID of a room's `reactions` or `present`: the
+    /// gatherer's clock in milliseconds, or one more than the last where
+    /// that is not more. WHY the clock: a PUBLISH of a later session numbers
+    /// on above what this one sent, with nothing kept, while the clock does
+    /// not go back; a relay would take Groups below those it has for old.
+    fn next_group(&mut self, room: &Room, track: RoomTrack) -> u64 {
+        let key = (room.clone(), track);
+        let next = self
+            .last_group
+            .get(&key)
+            .map_or(0, |last| last.saturating_add(1))
+            .max(wall_ms());
+        self.last_group.insert(key, next);
+        next
+    }
+
+    /// Publishes how many are in a room on its `present`.
+    fn send_present(&mut self, room: &Room) -> Result<()> {
+        let present = Present {
+            count: self.gatherer.present(room),
+            at: wall_ms(),
+        };
+        println!(
+            "PRESENT room={room:?} count={}",
+            present.count,
+            room = room.to_string()
+        );
+        let group_id = self.next_group(room, RoomTrack::Present);
+        self.send_live(room, RoomTrack::Present, group_id, present.payload())
+    }
+
+    /// The end of a while: what each room counted goes on its `reactions`.
+    fn send_reactions(&mut self) -> Result<()> {
+        for (room, reactions) in self.reacting.take(wall_ms()) {
+            if !self.gatherer.rooms.knows(&room) {
+                continue;
+            }
+            println!(
+                "REACTIONS room={room:?} kinds={} reactions={}",
+                reactions.counts.len(),
+                reactions.counts.iter().map(|(_, count)| count).sum::<u64>(),
+                room = room.to_string()
+            );
+            let group_id = self.next_group(&room, RoomTrack::Reactions);
+            self.send_live(&room, RoomTrack::Reactions, group_id, reactions.payload())?;
+        }
         Ok(())
     }
 
@@ -986,15 +1213,7 @@ impl Gathering<'_> {
                         return Ok(None);
                     }
                 };
-                let person = match self.session.subscribed_alias(alias) {
-                    SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
-                        person_of(track.namespace())
-                    }
-                    SubscribedAlias::Unknown | SubscribedAlias::Retired => None,
-                };
-                if let Some(person) = person {
-                    self.on_said(&person, &payload)?;
-                }
+                self.on_object(alias, &payload)?;
             }
             UniEvent::SubgroupClosed {
                 stream,
@@ -1062,7 +1281,7 @@ impl Gathering<'_> {
             }
             // §5.1: a subscriber that only finishes its direction of a
             // PUBLISH's stream has not ended the subscription.
-            Heard::Closed(RequestClose::Fin) if matches!(purpose, Purpose::Lines(_)) => {
+            Heard::Closed(RequestClose::Fin) if matches!(purpose, Purpose::Room(..)) => {
                 println!("PUBLISH_PEER_FINISHED_ITS_DIRECTION");
                 Ok(None)
             }
@@ -1096,14 +1315,14 @@ impl Gathering<'_> {
     /// specified URI"); the gatherer keeps one session.
     fn request_moved(&mut self, token: u64, purpose: &Purpose) {
         match purpose {
-            Purpose::Lines(room) => {
+            Purpose::Room(room, track) => {
                 if self
-                    .rooms
-                    .get(room)
+                    .published
+                    .get(&(room.clone(), *track))
                     .is_some_and(|entry| entry.publish() == Some(token))
                 {
                     let room = room.clone();
-                    self.end_publish(&room, publish_done_status::GOING_AWAY, false);
+                    self.end_publish(&room, *track, publish_done_status::GOING_AWAY, false);
                 }
             }
             purpose => {
@@ -1133,14 +1352,17 @@ impl Gathering<'_> {
                     watch_again_in(watch, wait, why);
                 }
             }
-            Purpose::Said(person) => self.said_over(person, SubscriptionEnd::Ended, why),
-            Purpose::Lines(room) => {
+            Purpose::Person(person, track) => {
+                self.track_over(person, *track, SubscriptionEnd::Ended, why);
+            }
+            Purpose::Room(room, track) => {
                 let room = room.clone();
                 println!(
-                    "ROOM_NOT_PUBLISHED room={room:?} why={why:?}",
+                    "{}_NOT_PUBLISHED room={room:?} why={why:?}",
+                    room_word(*track),
                     room = room.to_string()
                 );
-                self.unpublish(&room, token, true);
+                self.unpublish(&room, *track, token, true);
                 self.ending.remove(&token);
             }
         }
@@ -1162,11 +1384,43 @@ impl Gathering<'_> {
             return;
         };
         match &purpose {
-            Purpose::Said(person) => {
-                self.said_over(person, SubscriptionEnd::Malformed, "the track is malformed");
+            Purpose::Person(person, track) => {
+                let end = SubscriptionEnd::Malformed;
+                self.track_over(person, *track, end, "the track is malformed");
             }
             purpose => self.request_over(token, purpose, "the track is malformed"),
         }
+    }
+
+    /// The `PUBLISH_OK` of a room's track: what waited for it is sent.
+    fn room_published(
+        &mut self,
+        token: u64,
+        room: &Room,
+        track: RoomTrack,
+        forward: bool,
+    ) -> Result<()> {
+        let waiting = self
+            .published
+            .get_mut(&(room.clone(), track))
+            .map(|entry| entry.established(token, forward))
+            .unwrap_or_default();
+        let shown = room.to_string();
+        let word = room_word(track);
+        match track {
+            RoomTrack::Lines => {
+                let largest = self.gatherer.rooms.largest(room);
+                let largest = largest.map_or_else(|| "none".to_string(), |at| at.to_string());
+                println!("{word}_PUBLISHED room={shown:?} forward={forward} largest={largest}");
+            }
+            RoomTrack::Reactions | RoomTrack::Present => {
+                println!("{word}_PUBLISHED room={shown:?} forward={forward}");
+            }
+        }
+        for (group_id, payload) in waiting {
+            self.send_live(room, track, group_id, payload)?;
+        }
+        Ok(())
     }
 
     /// The meaning of a message on a request stream of the gatherer.
@@ -1191,49 +1445,43 @@ impl Gathering<'_> {
                 self.on_namespace(&namespace)?;
             }
             (Purpose::Watch(_), RequestEvent::NamespaceDone(namespace)) => {
-                self.on_namespace_done(&namespace);
+                self.on_namespace_done(&namespace)?;
             }
-            (Purpose::Said(person), RequestEvent::SubscribeEstablished { .. }) => {
-                self.said_established(person)?;
+            (Purpose::Person(person, track), RequestEvent::SubscribeEstablished { .. }) => {
+                self.track_established(person, *track)?;
             }
-            (Purpose::Lines(room), RequestEvent::PublishEstablished { forward, .. }) => {
-                let room = room.clone();
-                let waiting = self
-                    .rooms
-                    .get_mut(&room)
-                    .map(|entry| entry.established(token, forward))
-                    .unwrap_or_default();
-                let largest = self.gatherer.rooms.largest(&room);
-                let largest = largest.map_or_else(|| "none".to_string(), |at| at.to_string());
-                let shown = room.to_string();
-                println!("ROOM_PUBLISHED room={shown:?} forward={forward} largest={largest}");
-                for line in waiting {
-                    self.send_live(&room, line)?;
-                }
+            (Purpose::Room(room, track), RequestEvent::PublishEstablished { forward, .. }) => {
+                let (room, track) = (room.clone(), *track);
+                self.room_published(token, &room, track, forward)?;
             }
-            (Purpose::Lines(_), RequestEvent::SubscriptionUpdated { response, .. }) => {
+            (Purpose::Room(..), RequestEvent::SubscriptionUpdated { response, .. }) => {
                 self.tell(token, Command::Say(response));
             }
             // §10.9.1: the update is refused, and the subscription ends with
             // UPDATE_FAILED.
             // The PUBLISH_DONE goes once the streams of the room being sent
             // are closed (§10.11), and the room is published again then.
-            (Purpose::Lines(room), RequestEvent::UpdateRefused { response }) => {
-                let room = room.clone();
+            (Purpose::Room(room, track), RequestEvent::UpdateRefused { response }) => {
+                let (room, track) = (room.clone(), *track);
                 self.tell(token, Command::Say(response));
                 if self
-                    .rooms
-                    .get(&room)
+                    .published
+                    .get(&(room.clone(), track))
                     .is_some_and(|entry| entry.publish() == Some(token))
                 {
-                    self.end_publish(&room, publish_done_status::UPDATE_FAILED, false);
+                    self.end_publish(&room, track, publish_done_status::UPDATE_FAILED, false);
                 }
             }
-            (Purpose::Said(person), RequestEvent::Rejected(error)) => {
+            (Purpose::Person(person, track), RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
                 let why = format!("refused with {:#x}", error.error_code);
-                let end = SubscriptionEnd::Refused(error.retry_wait_ms());
-                self.said_over(person, end, &why);
+                let not_there = error.error_code == request_error_code::DOES_NOT_EXIST;
+                let end = if *track == PersonTrack::Reacted && not_there {
+                    SubscriptionEnd::NotPublished
+                } else {
+                    SubscriptionEnd::Refused(error.retry_wait_ms())
+                };
+                self.track_over(person, *track, end, &why);
             }
             (Purpose::Watch(index), RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
@@ -1248,15 +1496,16 @@ impl Gathering<'_> {
                 let why = format!("refused with {:#x}", error.error_code);
                 self.request_over(token, purpose, &why);
             }
-            (Purpose::Said(person), RequestEvent::SubscriptionDone(done)) => {
+            (Purpose::Person(person, track), RequestEvent::SubscriptionDone(done)) => {
                 println!(
-                    "SUBSCRIPTION_DONE room={:?} name={:?} status={:#x}",
+                    "{}SUBSCRIPTION_DONE room={:?} name={:?} status={:#x}",
+                    person_word(*track),
                     person.room.to_string(),
                     person.name,
                     done.status_code
                 );
                 self.let_go(token, Command::Finish);
-                self.said_over(person, SubscriptionEnd::Ended, "PUBLISH_DONE");
+                self.track_over(person, *track, SubscriptionEnd::Ended, "PUBLISH_DONE");
             }
             (
                 _,
@@ -1309,8 +1558,16 @@ impl Gathering<'_> {
         else {
             return self.refuse(asked, request_error_code::NOT_SUPPORTED);
         };
-        let Some(room) = room_of_lines(&full_track_name).filter(|room| self.taken.has(room)) else {
-            return self.refuse(asked, request_error_code::DOES_NOT_EXIST);
+        let room = match track_of(&full_track_name) {
+            Some(ChatTrack::OfRoom(room, RoomTrack::Lines)) if self.taken.has(&room) => room,
+            // WHY refused: nothing of the counts is kept (decided on
+            // 2026-10-26), and the next Object says the state anew.
+            Some(ChatTrack::OfRoom(room, RoomTrack::Reactions | RoomTrack::Present))
+                if self.taken.has(&room) =>
+            {
+                return self.refuse(asked, request_error_code::NOT_SUPPORTED);
+            }
+            _ => return self.refuse(asked, request_error_code::DOES_NOT_EXIST),
         };
         if self.requests.full() {
             return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);

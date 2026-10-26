@@ -12,3 +12,10 @@ another track of a room	["xmoq","chat","broadcast","demo"]	said	none
 lines of a participant	["xmoq","chat","broadcast","demo","alice"]	lines	none
 lines of a kind this side does not know	["xmoq","chat","talk","demo"]	lines	none
 lines without a kind: the old form	["xmoq","chat","demo"]	lines	none
+the present of a broadcast's room	["xmoq","chat","broadcast","demo"]	present	present broadcast/demo
+the reactions of a meeting's room	["xmoq","chat","meeting","m1"]	reactions	reactions meeting/m1
+the reacted of a participant	["xmoq","chat","broadcast","demo","alice"]	reacted	reacted broadcast/demo alice
+the said of a participant	["xmoq","chat","meeting","m1","bob"]	said	said meeting/m1 bob
+reactions of a participant	["xmoq","chat","broadcast","demo","alice"]	reactions	none
+reacted of a room	["xmoq","chat","broadcast","demo"]	reacted	none
+present of a kind this side does not know	["xmoq","chat","talk","demo"]	present	none
