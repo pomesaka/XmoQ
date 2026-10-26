@@ -2,7 +2,7 @@
 
 The MOQT Streaming Format, written from the text of `draft-ietf-moq-msf-01`. Section numbers below are of that draft.
 
-Status: partly implemented. The catalog (§5) is read and written as bytes, read over a connection and published over one. In Chromium: a page read the catalog of `moqlivemock`'s publisher; a page published a catalog through the own relay, which another page and `moqlivemock`'s subscriber read. No media is published with it yet.
+Status: partly implemented. The catalog (§5) is read and written as bytes, read over a connection and published over one. In Chromium: a page read the catalog of `moqlivemock`'s publisher; a page published a catalog through the own relay, which another page and `moqlivemock`'s subscriber read. The demo's publishing and meeting pages publish their catalogs with it, beside the video and sound of `@xmoq/media`.
 
 ## Scope
 
