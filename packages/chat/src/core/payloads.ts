@@ -8,7 +8,12 @@
 // in that order. `sentAt` is the sender's clock and `at` the gatherer's, in
 // milliseconds since the Unix epoch.
 
-import { type JsonValue, readJson } from "@xmoq/json";
+import {
+	type JsonValue,
+	membersOf,
+	readJsonPayload,
+	wholeNumberOf,
+} from "@xmoq/json";
 
 /**
  * The largest time taken: 2^53 - 1, the largest integer a JavaScript number
@@ -57,42 +62,18 @@ export interface Line {
 
 export type Read<T> = { ok: true; value: T } | { ok: false; why: Malformed };
 
-// WHY `fatal` and `ignoreBOM`: `serde_json` reads bytes that are not UTF-8,
-// and a byte order mark, as no JSON. Without `fatal` the decoder puts
-// U+FFFD in place of the first, and without `ignoreBOM` it drops the second.
-const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const encoder = new TextEncoder();
 
-function members(payload: Uint8Array): Map<string, JsonValue> | undefined {
-	let text: string;
-	try {
-		text = decoder.decode(payload);
-	} catch {
-		return undefined;
-	}
-	const read = readJson(text);
-	return read?.kind === "object" ? read.members : undefined;
-}
+const members = (payload: Uint8Array): Map<string, JsonValue> | undefined =>
+	membersOf(readJsonPayload(payload));
 
 function string(value: JsonValue | undefined): string | undefined {
 	return value?.kind === "string" ? value.value : undefined;
 }
 
-/**
- * A time: a number written as an integer from 0 to `MAX_TIME`, with no
- * fraction, exponent or sign, as `as_u64` of `serde_json` takes it (it has
- * a float for `-0`, `1.0` and `1e3`).
- */
-function time(value: JsonValue | undefined): number | undefined {
-	if (value?.kind !== "number" || !/^(?:0|[1-9][0-9]*)$/.test(value.text)) {
-		return undefined;
-	}
-	// WHY by the text's length first: a longer one would lose its last
-	// digits in a number, and could come out at MAX_TIME.
-	if (value.text.length > String(MAX_TIME).length) return undefined;
-	const read = Number(value.text);
-	return read <= MAX_TIME ? read : undefined;
-}
+/** A time: a whole number from 0 to `MAX_TIME`, as `as_u64` of `serde_json` takes it. */
+const time = (value: JsonValue | undefined): number | undefined =>
+	wholeNumberOf(value, MAX_TIME);
 
 /**
  * Reads a payload of `said`. Members other than the two are passed over, so

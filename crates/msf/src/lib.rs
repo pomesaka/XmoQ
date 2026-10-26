@@ -419,7 +419,7 @@ mod tests {
             assert_eq!(outcome, expected, "{name}");
             read += 1;
         }
-        assert_eq!(read, 76);
+        assert_eq!(read, 80);
     }
 
     /// The rows of `fixtures/msf-01/catalogs.tsv` on the sample rate and

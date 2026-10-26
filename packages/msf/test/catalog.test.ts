@@ -104,9 +104,9 @@ describe("fixtures/msf-01/catalogs.tsv: what a payload is read as", () => {
 			return { name, outcome, json };
 		});
 
-	test("the table has 76 rows, each with a name of its own", () => {
-		expect(rows.length).toBe(76);
-		expect(new Set(rows.map((row) => row.name)).size).toBe(76);
+	test("the table has 80 rows, each with a name of its own", () => {
+		expect(rows.length).toBe(80);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(80);
 	});
 
 	// §5.2.28 has a JSON Number and no more; `crates/msf` reads the same
@@ -162,7 +162,7 @@ describe("readCatalog", () => {
 	])("$name is no catalog", ({ bytes }) => {
 		expect(readCatalog(new Uint8Array(bytes))).toEqual({
 			type: "invalid",
-			reason: "the payload is not JSON in UTF-8",
+			reason: "the payload is no JSON in UTF-8 that serde_json reads",
 		});
 	});
 
@@ -171,7 +171,7 @@ describe("readCatalog", () => {
 		bytes[bytes.indexOf(0x3f)] = 0xff;
 		expect(readCatalog(bytes)).toEqual({
 			type: "invalid",
-			reason: "the payload is not JSON in UTF-8",
+			reason: "the payload is no JSON in UTF-8 that serde_json reads",
 		});
 	});
 
@@ -184,30 +184,32 @@ describe("readCatalog", () => {
 		});
 	});
 
-	test("a number that is too large for a double makes the document no catalog", () => {
-		expect(
-			readCatalog(
-				utf8('{"version":"draft-01","generatedAt":1e999,"tracks":[]}'),
+	// One reason for each: the JSON reader says no more than that it reads
+	// no JSON there, as `serde_json` does not.
+	test.each<{ name: string; payload: Uint8Array }>([
+		{
+			name: "a number that is too large for a double",
+			payload: utf8('{"version":"draft-01","generatedAt":1e999,"tracks":[]}'),
+		},
+		{
+			name: "a byte order mark before the document",
+			payload: new Uint8Array([
+				0xef,
+				0xbb,
+				0xbf,
+				...utf8('{"version":"draft-01","tracks":[]}'),
+			]),
+		},
+		{
+			name: "half of a surrogate pair in a name",
+			payload: utf8(
+				'{"version":"draft-01","tracks":[{"name":"\\udc00x","packaging":"x","isLive":true}]}',
 			),
-		).toEqual({
+		},
+	])("$name makes the document no catalog", ({ payload }) => {
+		expect(readCatalog(payload)).toEqual({
 			type: "invalid",
-			reason: "a number is too large for a double",
-		});
-	});
-
-	test("a byte order mark before the document makes it no catalog", () => {
-		expect(
-			readCatalog(
-				new Uint8Array([
-					0xef,
-					0xbb,
-					0xbf,
-					...utf8('{"version":"draft-01","tracks":[]}'),
-				]),
-			),
-		).toEqual({
-			type: "invalid",
-			reason: "the payload is not JSON in UTF-8",
+			reason: "the payload is no JSON in UTF-8 that serde_json reads",
 		});
 	});
 
@@ -236,16 +238,14 @@ describe("readCatalog", () => {
 		expect(readCatalog(utf8(json))).toEqual({ type: "invalid", reason });
 	});
 
-	test("half of a surrogate pair in a name makes the document no catalog, and a whole pair does not", () => {
-		const named = (name: string): Uint8Array =>
-			utf8(
-				`{"version":"draft-01","tracks":[{"name":"${name}","packaging":"x","isLive":true}]}`,
-			);
-		expect(readCatalog(named("\\udc00x"))).toEqual({
-			type: "invalid",
-			reason: "a string has half of a surrogate pair",
-		});
-		expect(readCatalog(named("\\ud83d\\ude00")).type).toBe("catalog");
+	test("a whole surrogate pair in a name is text", () => {
+		expect(
+			readCatalog(
+				utf8(
+					'{"version":"draft-01","tracks":[{"name":"\\ud83d\\ude00","packaging":"x","isLive":true}]}',
+				),
+			).type,
+		).toBe("catalog");
 	});
 
 	// 34 bytes.

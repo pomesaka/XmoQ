@@ -10,7 +10,12 @@
 // and ends, and `at` the transcriber's clock when it had read the piece, in
 // milliseconds since the Unix epoch.
 
-import { type JsonValue, readJson } from "@xmoq/json";
+import {
+	type JsonValue,
+	membersOf,
+	readJsonPayload,
+	wholeNumberOf,
+} from "@xmoq/json";
 
 /** The largest number taken: 2^53 - 1, as on the Rust side (`MAX_NUMBER`). */
 export const MAX_NUMBER = Number.MAX_SAFE_INTEGER;
@@ -44,36 +49,14 @@ export interface Speech {
 
 export type Read<T> = { ok: true; value: T } | { ok: false; why: Malformed };
 
-// WHY `fatal` and `ignoreBOM`: as for the chat's payloads, so that bytes
-// that are not UTF-8, and a byte order mark, are no JSON as for `serde_json`.
-const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const encoder = new TextEncoder();
 
-function members(payload: Uint8Array): Map<string, JsonValue> | undefined {
-	let text: string;
-	try {
-		text = decoder.decode(payload);
-	} catch {
-		return undefined;
-	}
-	const read = readJson(text);
-	return read?.kind === "object" ? read.members : undefined;
-}
+const members = (payload: Uint8Array): Map<string, JsonValue> | undefined =>
+	membersOf(readJsonPayload(payload));
 
-/**
- * A number written as an integer from 0 to `MAX_NUMBER`, with no fraction,
- * exponent or sign, as `as_u64` of `serde_json` takes it.
- */
-function integer(value: JsonValue | undefined): number | undefined {
-	if (value?.kind !== "number" || !/^(?:0|[1-9][0-9]*)$/.test(value.text)) {
-		return undefined;
-	}
-	// WHY by the text's length first: a longer one would lose its last
-	// digits in a number, and could come out at MAX_NUMBER.
-	if (value.text.length > String(MAX_NUMBER).length) return undefined;
-	const read = Number(value.text);
-	return read <= MAX_NUMBER ? read : undefined;
-}
+/** A whole number from 0 to `MAX_NUMBER`, as `as_u64` of `serde_json` takes it. */
+const integer = (value: JsonValue | undefined): number | undefined =>
+	wholeNumberOf(value, MAX_NUMBER);
 
 function fields(value: JsonValue | undefined): string[] | undefined {
 	if (value?.kind !== "array" || value.items.length === 0) return undefined;

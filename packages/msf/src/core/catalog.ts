@@ -1,6 +1,8 @@
 // The catalog of draft-ietf-moq-msf-01 §5: a JSON document that names the
 // tracks of a broadcast. Section numbers are of that draft.
 
+import { plainOf, readJsonPayload } from "@xmoq/json";
+
 /**
  * The one MSF version that is written and read. §5.1.1 has "follow the
  * convention of specifying the version as "draft-XX"". The examples of the
@@ -367,14 +369,6 @@ function check(value: unknown): CatalogRead {
 	}
 }
 
-// WHY fatal: a catalog is JSON (§5), which is UTF-8 between systems
-// (RFC 8259 §8.1). Bytes that are not would be read as other text.
-// WHY the byte order mark is kept, so that `JSON.parse` refuses it: the same
-// section has "MUST NOT add a byte order mark" for a writer and only "MAY
-// ignore" for a parser, and parsers differ (serde_json of Rust refuses one).
-// A document that one implementation of ours reads and the other does not
-// is worse than one both refuse.
-const utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const utf8Encoder = new TextEncoder();
 
 /**
@@ -415,7 +409,8 @@ export function checkMaxLength(maxLength: number): void {
  * is no length (`checkMaxLength`).
  *
  * `null` is a value of another type in every field, and never "absent". A
- * key that comes twice is not noticed: `JSON.parse` keeps the later one.
+ * key that comes twice is not noticed: the later one is kept, as by
+ * `serde_json`.
  *
  * Not looked at: compression (§12.1; a compressed payload is `invalid`, as
  * bytes that are no JSON), and where `initDataList` stands in the document
@@ -443,41 +438,22 @@ export function readCatalog(
 				"the payload begins like a GZIP stream; compressed catalogs are not read",
 		};
 	}
-	let value: unknown;
-	try {
-		value = JSON.parse(utf8Decoder.decode(payload), refuseWhatParsersDiffOn);
-	} catch (error) {
-		if (error instanceof Refused) {
-			return { type: "invalid", reason: error.message };
-		}
-		return { type: "invalid", reason: "the payload is not JSON in UTF-8" };
+	// WHY `@xmoq/json` and not `JSON.parse`: the same bytes are to be read
+	// alike by `crates/msf`, which reads with `serde_json`. The JSON reader
+	// refuses what `serde_json` refuses and `JSON.parse` takes: half of a
+	// surrogate pair in a key or a string (RFC 8259 §8.2: "the behavior of
+	// software that receives JSON texts containing such values is
+	// unpredictable"), a number too large for a double (§6), a byte order
+	// mark, and nesting of 128 and more. A document that one reader of ours
+	// reads and the other does not is worse than one both refuse.
+	const value = readJsonPayload(payload);
+	if (value === undefined) {
+		return {
+			type: "invalid",
+			reason: "the payload is no JSON in UTF-8 that serde_json reads",
+		};
 	}
-	return check(value);
-}
-
-/**
- * A reviver of `JSON.parse` that refuses, anywhere in the document, a key or
- * a string with half of a surrogate pair and a number too large for a
- * double. WHY: RFC 8259 §8.2 has "the behavior of software that receives
- * JSON texts containing such values is unpredictable" of a string like
- * that, and §6 a number beyond a double as one that does not interoperate:
- * parsers differ on both, and serde_json, which `crates/msf` reads with,
- * refuses the whole document for either. A document that one reader of
- * ours reads and the other does not is worse than one both refuse. WHY NOT
- * read such a document in Rust as `JSON.parse` does: that would take a
- * JSON parser of our own there.
- */
-function refuseWhatParsersDiffOn(key: string, value: unknown): unknown {
-	if (HALF_A_PAIR.test(key)) {
-		throw new Refused("a key has half of a surrogate pair");
-	}
-	if (typeof value === "string" && HALF_A_PAIR.test(value)) {
-		throw new Refused("a string has half of a surrogate pair");
-	}
-	if (typeof value === "number" && !Number.isFinite(value)) {
-		throw new Refused("a number is too large for a double");
-	}
-	return value;
+	return check(plainOf(value));
 }
 
 /**
