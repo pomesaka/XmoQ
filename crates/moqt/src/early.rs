@@ -36,9 +36,9 @@ pub const MOST_HELD_BYTES: usize = 1024 * 1024;
 
 /// What a held Object is counted at besides its payload, so that Objects
 /// without one are bounded too; as `@xmoq/moqt` counts.
-const OBJECT_OVERHEAD: usize = 64;
+pub const OBJECT_OVERHEAD: usize = 64;
 /// What each Object Property is counted at besides the bytes of its value.
-const PROPERTY_OVERHEAD: usize = 16;
+pub const PROPERTY_OVERHEAD: usize = 16;
 
 /// The bytes `object` is counted at while it is held.
 #[must_use]

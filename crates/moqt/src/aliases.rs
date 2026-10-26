@@ -13,7 +13,7 @@ use crate::name::FullTrackName;
 /// WHY NOT keep all of them, or keep them for a time: this crate has no clock,
 /// and §10.11 lets a subscriber discard subscription state early. A fixed count
 /// keeps the memory of a long session bounded.
-pub(crate) const RETIRED_ALIAS_LIMIT: usize = 64;
+pub const RETIRED_ALIAS_LIMIT: usize = 64;
 
 /// Track Aliases without a subscription whose ended data streams are held,
 /// oldest dropped first.
@@ -23,7 +23,7 @@ pub(crate) const RETIRED_ALIAS_LIMIT: usize = 64;
 /// ahead, and a relay handles control and data in different tasks). Dropping
 /// the count would leave `PUBLISH_DONE` waiting for a stream that already ended.
 /// WHY a limit: a peer can open streams under aliases it never assigns.
-pub(crate) const EARLY_CLOSED_ALIAS_LIMIT: usize = 64;
+pub const EARLY_CLOSED_ALIAS_LIMIT: usize = 64;
 
 /// What a Track Alias from a Subgroup Header refers to on the subscribing side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

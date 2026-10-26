@@ -5,6 +5,10 @@ import type { SubgroupStreamLimits } from "./subgroup.ts";
  * The limits an application can set. The fixed limits of the implementation
  * (how many Track Aliases are remembered, how many Key-Value-Pairs a message
  * may hold) are constants next to the code they bound.
+ *
+ * FIXME: bound the bytes all subgroup streams of the session hold together,
+ * as the Rust session does (`session-subgroup-bytes` of `fixtures/limits/`);
+ * each stream holds up to one Object of `maxObjectPayloadLength` meanwhile.
  */
 export interface SessionLimits extends SubgroupStreamLimits {
 	/**

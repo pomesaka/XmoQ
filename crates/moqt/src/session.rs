@@ -17,8 +17,8 @@ pub use peer::{
     PeerRequestOpened, REQUEST_IDS_AHEAD_LIMIT,
 };
 
-pub use crate::aliases::SubscribedAlias;
 use crate::aliases::SubscribedAliases;
+pub use crate::aliases::{EARLY_CLOSED_ALIAS_LIMIT, RETIRED_ALIAS_LIMIT, SubscribedAlias};
 use crate::immutable::{TrackRefusal, track_properties_refusal};
 use crate::kvp::KeyValuePair;
 use crate::message::{
@@ -63,7 +63,7 @@ pub enum Transport {
 /// their stream is reported gone, oldest dropped first. A caller that never
 /// reports the stream gone cannot make the session grow without bound; a
 /// message for a request that was dropped is then a protocol violation.
-const ENDED_BY_PUBLISH_DONE_LIMIT: usize = 64;
+pub const ENDED_BY_PUBLISH_DONE_LIMIT: usize = 64;
 
 /// Gives every [`Session`] of the process a number of its own, which its
 /// request handles carry.
