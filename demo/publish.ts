@@ -13,6 +13,7 @@ import {
 } from "@xmoq/media";
 import { createCatalogPublisher } from "@xmoq/msf";
 import {
+	AGAIN,
 	AUDIO_TRACK,
 	audioTrackName,
 	connectToRelay,
@@ -365,7 +366,7 @@ async function main(): Promise<void> {
 	let link = "connecting";
 	// One session after the other (`keepPublishing` of @xmoq/media): the
 	// encoders go on, and when the session ends the page connects again
-	// after two seconds and announces anew.
+	// after `AGAIN` and announces anew.
 	const room = joinRoom("publisher");
 	// The catalog of MSF says which tracks the broadcast has; a viewer finds
 	// them there and is told no name. It is made before a media Object is
@@ -448,10 +449,10 @@ async function main(): Promise<void> {
 					link = `publishing (session ${state.session})`;
 					return;
 				case "session-ended":
-					link = `the session ended (${state.close.type}) at ${new Date().toISOString().slice(11, 19)}; connecting again every 2 s`;
+					link = `the session ended (${state.close.type}) at ${new Date().toISOString().slice(11, 19)}; connecting again every ${AGAIN}`;
 					break;
 				case "failed":
-					link = `could not publish (${why(state.error)}); trying again every 2 s`;
+					link = `could not publish (${why(state.error)}); trying again every ${AGAIN}`;
 					break;
 			}
 			document.body.dataset.link = link;

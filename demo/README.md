@@ -64,11 +64,11 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 **A room** comes with it: the spike in `spikes/durable-objects-room`, a Durable Object run locally with Miniflare (`mise run demo` installs it there the first time). Under the picture is how many are connected, and the watching page learns from the room where the broadcast is; `?room=NAME` on both pages is another room. The broadcast is known to the room as long as the publishing page is open.
 
-**A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again every 2 seconds (`keepPublishing` and `keepPlaying` of `@xmoq/media`).
+**A session that ends** (the relay stopped, the link gone for more than 6 seconds): both pages say so in their first line and connect again after `DEFAULT_RECONNECT_DELAY_MS` of `@xmoq/moqt` (`keepPublishing` and `keepPlaying` of `@xmoq/media`).
 
 **With tokens** (an experiment; how the relay authorizes is undecided): `bun demo/serve.ts --auth` makes a key for the run and gives it to the relay and to the rooms. The relay then refuses a request without a token; the pages ask the room for one (`pub` to publish, `sub` to watch) and give it to their connection, which puts it into every request. The relay looks at the token in SETUP as well, and closes a session without one: `?token=no` on a page asks for none, and the page says that the relay closed the session as not authorized.
 
-No catalog. The times are compared on one machine, where the two pages have the same clock.
+The times are compared on one machine, where the two pages have the same clock.
 
 ## Every flag
 
@@ -101,7 +101,7 @@ Read off the code on 2026-10-13 (`demo/watch.ts`, `demo/publish.ts`, `demo/share
 | publish | `mapping=stream-per-object` | Every Object of the video on a stream of its own | A stream for a Group |
 | publish | `ladder=1` | Trial: a second, small version of the video | One version |
 | publish | `dynamic=MS` | Trial: the video has dynamic Groups, the shortest MS long; a viewer that asks for a new Group gets one | No dynamic Groups |
-| watch | `buffer=N`, `buffer=auto` | The playout buffer in milliseconds; `auto` (trial) follows how late Objects come | 50 |
+| watch | `buffer=N`, `buffer=auto` | The playout buffer in milliseconds; `auto` (trial) follows how late Objects come | 150 (`DEFAULT_PLAYOUT_BUFFER_MS` of `@xmoq/media`) |
 | watch | `autoMax=MS`, `autoShare=F` | With `buffer=auto`: its limit, and the share of the Objects it covers | 400, 0.99 |
 | watch | `autoDown=quarter`, `autoWindow=MS` | Trials, with `buffer=auto`: it comes down a quarter of the way at a time, and looks back so far | 10 ms at a time; 10000 |
 | watch | `audioMin=MS` | The least the sound waits where the buffer is shorter | 30 |
