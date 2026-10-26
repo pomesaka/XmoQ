@@ -1051,19 +1051,23 @@ fn what_the_upstream_refuses_for_its_load_is_sent_again_after_its_retry_interval
     for (request, _) in &sent[..5] {
         assert_eq!(answer_upstream(&mut relay, *request, accepted()), []);
     }
-    // The sixth and the seventh are refused: one timer, of the Retry
-    // Interval less one, for both.
+    // The sixth and the seventh are refused, and their requests finished:
+    // one timer, of the Retry Interval less one, for both.
     let timer = Action::StartUpstreamAnnouncementTimer {
         session: UPSTREAM,
         wait_ms: 1_000,
     };
+    let finished = |request| Action::FinishOwnRequest {
+        session: UPSTREAM,
+        request,
+    };
     assert_eq!(
         answer_upstream(&mut relay, sent[5].0, refused_for_its_load()),
-        std::slice::from_ref(&timer)
+        [finished(sent[5].0), timer.clone()]
     );
     assert_eq!(
         answer_upstream(&mut relay, sent[6].0, refused_for_its_load()),
-        []
+        [finished(sent[6].0)]
     );
     // An eighth comes meanwhile: it waits.
     let waits = announce_by(&mut relay, BOB, 8, &[b"xmoq", b"chat", b"r", b"h"]);
@@ -1075,7 +1079,7 @@ fn what_the_upstream_refuses_for_its_load_is_sent_again_after_its_retry_interval
     let mut actions = relay.step(Event::UpstreamAnnouncementTimeout { session: UPSTREAM });
     let answers = [accepted(), refused_for_its_load(), accepted(), accepted()];
     for answer in answers {
-        if actions == [timer.clone()] {
+        if actions.contains(&timer) {
             actions = relay.step(Event::UpstreamAnnouncementTimeout { session: UPSTREAM });
         }
         let next = announcements_upstream(&actions);
@@ -1101,8 +1105,98 @@ fn what_the_upstream_refuses_with_no_retry_interval_is_not_sent_again() {
     // UNAUTHORIZED (0x1): Retry Interval 0, "SHOULD NOT be retried".
     assert_eq!(
         answer_upstream(&mut relay, sent[0].0, request_error(0x1)),
-        []
+        [Action::FinishOwnRequest {
+            session: UPSTREAM,
+            request: sent[0].0,
+        }]
     );
     let next = announce_by(&mut relay, PUBLISHER, 4, &[b"xmoq", b"chat", b"r", b"b"]);
     assert_eq!(announcements_upstream(&next).len(), 1);
+}
+
+#[test]
+fn an_announcement_the_upstream_refuses_or_ends_is_closed_once() {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Closed {
+        Finished,
+        Cancelled,
+    }
+    enum Answer {
+        Message(ControlMessage),
+        Ended(OwnRequestEnd),
+    }
+    // `cancelled_when_withdrawn`: the CancelOwnRequest when the namespace is
+    // withdrawn here afterwards.
+    let cases: [(&str, Answer, &[Closed], usize); 5] = [
+        (
+            "refused with a Retry Interval",
+            Answer::Message(refused_for_its_load()),
+            &[Closed::Finished],
+            0,
+        ),
+        (
+            "refused with none",
+            Answer::Message(request_error(0x1)),
+            &[Closed::Finished],
+            0,
+        ),
+        (
+            "its stream finished",
+            Answer::Ended(OwnRequestEnd::Fin),
+            &[Closed::Cancelled],
+            0,
+        ),
+        (
+            "its stream reset",
+            Answer::Ended(OwnRequestEnd::Reset),
+            &[Closed::Cancelled],
+            0,
+        ),
+        (
+            "the relay's direction stopped",
+            Answer::Ended(OwnRequestEnd::Stopped),
+            &[],
+            1,
+        ),
+    ];
+    for (name, answer, closed, cancelled_when_withdrawn) in cases {
+        let mut relay = edge(&[]);
+        upstream_opened(&mut relay);
+        let sent = announcements_upstream(&announce_by(
+            &mut relay,
+            PUBLISHER,
+            0,
+            &[b"xmoq", b"chat", b"r", b"a"],
+        ));
+        let request = sent[0].0;
+        let actions = match answer {
+            Answer::Message(message) => answer_upstream(&mut relay, request, message),
+            Answer::Ended(how) => relay.step(Event::OwnRequestClosed {
+                session: UPSTREAM,
+                request,
+                how,
+            }),
+        };
+        let closes: Vec<Closed> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::FinishOwnRequest {
+                    session: UPSTREAM,
+                    request: closed,
+                } if *closed == request => Some(Closed::Finished),
+                Action::CancelOwnRequest {
+                    session: UPSTREAM,
+                    request: closed,
+                    code: xmoq_moqt::stream_reset_code::CANCELLED,
+                } if *closed == request => Some(Closed::Cancelled),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closes, closed, "{name}");
+        assert_eq!(
+            cancelled_upstream(&withdraw(&mut relay, PUBLISHER, 0)),
+            cancelled_when_withdrawn,
+            "{name}"
+        );
+    }
 }

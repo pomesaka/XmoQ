@@ -319,6 +319,12 @@ impl Relay {
                     if let Some(state) = self.sessions.get_mut(&session) {
                         state.moqt.cancel(id);
                     }
+                    // What is left open of the stream is the relay's direction.
+                    actions.push(Action::CancelOwnRequest {
+                        session,
+                        request,
+                        code: stream_reset_code::CANCELLED,
+                    });
                     self.answered_one_at_a_time(session, request, actions);
                 }
                 None
@@ -341,10 +347,14 @@ impl Relay {
             return;
         };
         match state.moqt.on_request_message(id, message) {
+            // The session ended the request with the answer; the stream is
+            // still open until the relay finishes its direction.
             Ok(RequestEvent::Rejected(error)) if error.retry_interval > 0 => {
+                actions.push(Action::FinishOwnRequest { session, request });
                 self.refused_for_now(session, request, error.retry_interval - 1, actions);
             }
             Ok(RequestEvent::Rejected(_)) => {
+                actions.push(Action::FinishOwnRequest { session, request });
                 if let Some(passed) = self.passed_of(session, request) {
                     passed.over = true;
                 }
