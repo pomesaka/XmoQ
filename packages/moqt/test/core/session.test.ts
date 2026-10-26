@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { decodeControlMessage } from "../../src/core/control-message.ts";
+import {
+	decodeControlMessage,
+	type FetchRange,
+} from "../../src/core/control-message.ts";
 import type { SessionLimits } from "../../src/core/limits.ts";
 import type { SubgroupOptions } from "../../src/core/outgoing-subgroups.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
@@ -728,6 +731,46 @@ describe("Session", () => {
 			},
 			{ type: "reset", stream: 1, code: 18 },
 		]);
+	});
+
+	test("a malformed track cancels its subscription and the FETCH requests of its track, and no other, as the Rust session does (§2.4.2)", () => {
+		const session = subscribed();
+		const range = (trackName: Uint8Array): FetchRange => ({
+			fetchType: "Standalone",
+			trackNamespace: NAMESPACE,
+			trackName,
+			startLocation: { group: 0n, object: 0n },
+			endLocation: { group: 1n, object: 0n },
+		});
+		// Request IDs 2, 4 and 6.
+		session.fetch({
+			range: {
+				fetchType: "RelativeJoining",
+				joiningRequestId: 0n,
+				joiningStart: 1n,
+			},
+		});
+		session.fetch({ range: range(TRACK_NAME) });
+		session.fetch({ range: range(utf8("other")) });
+		const outputs = session.receivePeerUniStreamData(
+			0,
+			hex("15 09 00 00 00 00 04 c0 40 00 01 01 61"),
+			false,
+		);
+		const closed = outputs.flatMap((output) =>
+			output.type === "event" && output.event.type === "request-closed"
+				? [`${output.event.requestId} ${output.event.reason}`]
+				: [],
+		);
+		expect(closed).toEqual([
+			"0 malformed-track",
+			"2 malformed-track",
+			"4 malformed-track",
+		]);
+		const resets = outputs.flatMap((output) =>
+			output.type === "reset" ? [output.code] : [],
+		);
+		expect(resets).toEqual([18, 18, 18]);
 	});
 
 	test("PUBLISH_OK with FORWARD 0 resets open subgroup streams and stops Objects (§5.1, §11.4.3)", () => {

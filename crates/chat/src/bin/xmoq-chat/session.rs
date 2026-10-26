@@ -60,7 +60,8 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{Location, TrackNamespace};
 use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{
-    ControlEvent, RequestEvent, RequestId, Role, Session, SubscribedAlias, Transport,
+    ControlEvent, MalformedRequest, RequestEvent, RequestId, Role, Session, SubscribedAlias,
+    Transport,
 };
 use xmoq_moqt::token::Token;
 use xmoq_moqt::{RequestFault, stream_reset_code};
@@ -964,6 +965,15 @@ impl Gathering<'_> {
                     "TRACK_MALFORMED track_alias={} error={error}",
                     header.track_alias
                 );
+                for cancelled in self.session.cancel_malformed(header.track_alias) {
+                    match cancelled {
+                        MalformedRequest::Subscribe(request) | MalformedRequest::Fetch(request) => {
+                            self.malformed(request);
+                        }
+                        // It takes no PUBLISH of the relay.
+                        MalformedRequest::Publish(_) => {}
+                    }
+                }
             }
             // The gatherer sends no FETCH: the session says what such a
             // stream is (`Session::on_fetch_stream`), and it is stopped.
@@ -1061,6 +1071,29 @@ impl Gathering<'_> {
         }
     }
 
+    /// The track of `request` is malformed, and the session ended the
+    /// request: §2.4.2, "it MUST cancel any corresponding subscription or
+    /// fetches for that Track". Its stream is reset with `MALFORMED_TRACK`.
+    fn malformed(&mut self, request: RequestId) {
+        let token = self
+            .own
+            .iter()
+            .find_map(|(token, own)| (own.request == request).then_some(*token));
+        let Some(token) = token else {
+            return;
+        };
+        let Some(purpose) = self.let_go(token, Command::Cancel(stream_reset_code::MALFORMED_TRACK))
+        else {
+            return;
+        };
+        match &purpose {
+            Purpose::Said(person) => {
+                self.said_over(person, Over::Malformed, "the track is malformed");
+            }
+            purpose => self.request_over(token, purpose, "the track is malformed"),
+        }
+    }
+
     /// The meaning of a message on a request stream of the gatherer.
     fn on_answer(
         &mut self,
@@ -1146,13 +1179,9 @@ impl Gathering<'_> {
                     ..
                 },
             ) => {
-                // §2.4.2: "it MUST cancel any corresponding subscription".
-                self.let_go(token, Command::Cancel(stream_reset_code::MALFORMED_TRACK));
-                match purpose {
-                    Purpose::Said(person) => {
-                        self.said_over(person, Over::Malformed, "the track is malformed");
-                    }
-                    _ => self.request_over(token, purpose, "the track is malformed"),
+                let request = self.own.get(&token).map(|own| own.request);
+                if let Some(request) = request {
+                    self.malformed(request);
                 }
             }
             (

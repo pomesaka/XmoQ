@@ -41,8 +41,8 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{
-    ControlEvent, FetchStreamOpened, RequestEvent, RequestId, Role, Session, SubscribedAlias,
-    Transport,
+    ControlEvent, FetchStreamOpened, MalformedRequest, RequestEvent, RequestId, Role, Session,
+    SubscribedAlias, Transport,
 };
 use xmoq_moqt::token::Token;
 use xmoq_moqt::{RequestFault, stream_reset_code};
@@ -1127,6 +1127,15 @@ impl Transcribing<'_> {
                     "TRACK_MALFORMED track_alias={} error={error}",
                     header.track_alias
                 );
+                for cancelled in self.session.cancel_malformed(header.track_alias) {
+                    match cancelled {
+                        MalformedRequest::Subscribe(request) | MalformedRequest::Fetch(request) => {
+                            self.malformed(request);
+                        }
+                        // It takes no PUBLISH of the relay.
+                        MalformedRequest::Publish(_) => {}
+                    }
+                }
             }
             UniEvent::FetchOpened { stream, header } => {
                 let body = self.stops.take_fetch_body(stream);
@@ -1205,6 +1214,39 @@ impl Transcribing<'_> {
     }
 
     /// A request of the transcriber is over, and was let go of.
+    /// The track of `request` is malformed, and the session ended the
+    /// request: §2.4.2, "it MUST cancel any corresponding subscription or
+    /// fetches for that Track". Its stream is reset with `MALFORMED_TRACK`.
+    fn malformed(&mut self, request: RequestId) {
+        const WHY: &str = "the track is malformed";
+        self.catalog_fetches.remove(&request.value());
+        let token = self
+            .own
+            .iter()
+            .find_map(|(token, own)| (own.request == request).then_some(*token));
+        let Some(token) = token else {
+            return;
+        };
+        let Some(purpose) = self.let_go(token, Command::Cancel(stream_reset_code::MALFORMED_TRACK))
+        else {
+            return;
+        };
+        match &purpose {
+            // §2.4.2: the same catalog would be malformed again, and is not
+            // asked for again; the broadcast comes back with its next
+            // NAMESPACE.
+            Purpose::Catalog(namespace) => {
+                let namespace = namespace.clone();
+                println!(
+                    "CATALOG_NOT_SUBSCRIBED namespace={} why={WHY:?}",
+                    shown(&namespace)
+                );
+                self.listen_no_more(&namespace);
+            }
+            purpose => self.request_over(token, purpose, WHY),
+        }
+    }
+
     fn request_over(&mut self, token: u64, purpose: &Purpose, why: &str) {
         match purpose {
             Purpose::Watch(index) => {
@@ -1420,22 +1462,9 @@ impl Transcribing<'_> {
                     ..
                 },
             ) => {
-                const WHY: &str = "the track is malformed";
-                // §2.4.2: "it MUST cancel any corresponding subscription".
-                self.let_go(token, Command::Cancel(stream_reset_code::MALFORMED_TRACK));
-                match purpose {
-                    // §2.4.2: the same catalog would be malformed again, and
-                    // is not asked for again; the broadcast comes back with
-                    // its next NAMESPACE.
-                    Purpose::Catalog(namespace) => {
-                        let namespace = namespace.clone();
-                        println!(
-                            "CATALOG_NOT_SUBSCRIBED namespace={} why={WHY:?}",
-                            shown(&namespace)
-                        );
-                        self.listen_no_more(&namespace);
-                    }
-                    _ => self.request_over(token, purpose, WHY),
+                let request = self.own.get(&token).map(|own| own.request);
+                if let Some(request) = request {
+                    self.malformed(request);
                 }
             }
             (

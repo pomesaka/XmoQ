@@ -1341,6 +1341,29 @@ impl Session {
         }
     }
 
+    /// The PUBLISH requests of the peer for `track` that this session still
+    /// holds, in the order of their Request IDs.
+    pub(super) fn peer_publishes_of(&self, track: &FullTrackName) -> Vec<PeerRequestId> {
+        let mut ids: Vec<u64> = self
+            .peer
+            .live
+            .iter()
+            .filter_map(|(id, state)| match state {
+                PeerRequestState::Publish {
+                    full_track_name, ..
+                } if full_track_name == track => Some(*id),
+                _ => None,
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .map(|id| PeerRequestId {
+                session: self.tag,
+                id,
+            })
+            .collect()
+    }
+
     /// Requests of the peer this session holds state for: open ones, and ones
     /// this endpoint ended whose stream is not yet reported gone.
     #[must_use]
@@ -3451,6 +3474,20 @@ mod tests {
         // Both tracks can be subscribed to again.
         opened(&mut session, subscribe(4, b"a"));
         opened(&mut session, publish(6, b"b", 7));
+    }
+
+    /// §2.4.2, for a subscription a PUBLISH made: the PUBLISH is cancelled.
+    #[test]
+    fn a_malformed_track_cancels_the_publish_it_came_on() {
+        let mut session = server();
+        let request = opened(&mut session, publish(0, b"a", 7));
+        session.accept_publish(request, vec![]).unwrap();
+        assert_eq!(
+            session.cancel_malformed(7),
+            vec![crate::session::MalformedRequest::Publish(request)]
+        );
+        assert_eq!(session.subscribed_alias(7), SubscribedAlias::Retired);
+        assert_eq!(session.peer_request_count(), 0);
     }
 
     #[test]
