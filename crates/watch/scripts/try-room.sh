@@ -7,8 +7,8 @@
 #
 #   crates/watch/scripts/try-room.sh [seconds, 15]            # from the repository root
 #
-# Needs `mise run interop` once (Playwright's Chromium), and npm for the rooms' dependencies
-# (installed into spikes/durable-objects-room where they are missing, as `mise run demo` does).
+# Needs `mise run interop` once (Playwright's Chromium); the rooms' dependencies are the
+# workspace's, installed here as `mise run demo` does.
 # PORT (48910) and two more are used.
 set -eu
 seconds=${1:-15}
@@ -18,8 +18,8 @@ port=${PORT:-48910}
 name="try-$$"
 work=$(mktemp -d)
 (cd "$root" && cargo build --release --quiet --locked -p xmoq-watch && cargo build --quiet --locked -p xmoq-relay)
-[ -d "$root/spikes/durable-objects-room/node_modules" ] ||
-  npm ci --prefix "$root/spikes/durable-objects-room" --no-audit --no-fund > /dev/null
+# The rooms' dependencies, Miniflare among them, are the workspace's.
+(cd "$root" && mise exec -- bun install --frozen-lockfile > /dev/null)
 # WHY the binary and not `mise exec`: the signal at the end has to reach bun itself.
 bun=$(cd "$root/interop" && mise which bun)
 (cd "$root" && exec "$bun" demo/serve.ts --auth --relay-port "$port" --port "$((port + 1))" --rooms-port "$((port + 2))") > "$work/demo.log" 2>&1 &

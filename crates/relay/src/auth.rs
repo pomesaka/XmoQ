@@ -245,7 +245,7 @@ impl Authorizer for RoomTokens {
 }
 
 /// How long a token the relay makes for itself runs: as long as one the
-/// room makes (`TOKEN_SECONDS` of `spikes/durable-objects-room/worker.js`)
+/// room makes (`TOKEN_SECONDS` of `packages/room/src/token.ts`)
 /// and one the gatherer makes. Provisional.
 const OWN_TOKEN_SECONDS: u64 = 600;
 

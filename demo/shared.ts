@@ -82,7 +82,7 @@ export const HERE: Broadcast = {
 	namespace: NAMESPACE,
 };
 
-/** What a room says on its WebSocket (`spikes/durable-objects-room/worker.js`). */
+/** What a room says on its WebSocket (`packages/room/src/worker.ts`). */
 type RoomMessage =
 	| { type: "hello"; connected: number; broadcast: Broadcast | null }
 	| { type: "connected"; connected: number }
@@ -194,7 +194,7 @@ export function joinRoom(as: string): Room | undefined {
 			return undefined;
 		}
 		// The room says nothing for a namespace with a `*` or a `/` in a
-		// field (`spikes/durable-objects-room/worker.js`), and the answers
+		// field (`tokenForNamespace` of `packages/room/src/core/rules.ts`), and the answers
 		// are matched to the askers by their order: one asked for and never
 		// answered would have every later asker take the answer of the one
 		// before it.

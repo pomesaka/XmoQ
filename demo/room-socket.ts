@@ -1,4 +1,4 @@
-// The WebSocket of a room (`spikes/durable-objects-room/worker.js`) as the
+// The WebSocket of a room (`packages/room/src/worker.ts`) as the
 // pages of the demo hold it: opened again whenever it closes, and what is
 // asked of the room matched to its answer.
 //

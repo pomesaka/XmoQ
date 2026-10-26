@@ -1195,7 +1195,7 @@ export function spawnAgent(
  * the relay is given (`--auth-key-hex`), good for 10 minutes: the Token
  * structure in hex, Alias Type USE_VALUE (0x3), Token Type 0, the value
  * (§10.2.2). The form is the one `crates/room-token` reads and writes and
- * `spikes/durable-objects-room/worker.js` makes.
+ * `packages/room/src/token.ts` makes.
  */
 export function roomToken(
 	keyHex: string,

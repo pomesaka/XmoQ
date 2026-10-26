@@ -88,7 +88,7 @@ use crate::storage::Store;
 type Send = <WtConnection as Connection>::Send;
 
 /// How long a token the gatherer makes runs, in seconds: as long as one of
-/// the room (`TOKEN_SECONDS` of `spikes/durable-objects-room/worker.js`).
+/// the room (`TOKEN_SECONDS` of `packages/room/src/token.ts`).
 const TOKEN_SECONDS: u64 = 600;
 
 /// How long a request may wait for the relay to allow its stream, as the

@@ -191,9 +191,6 @@ start() {
 	cargo build --locked -p xmoq-relay -p xmoq-chat
 	cargo build --release --locked -p xmoq-transcriber -p xmoq-agent
 	bun install --frozen-lockfile
-	if [[ ! -d spikes/durable-objects-room/node_modules ]]; then
-		npm ci --prefix spikes/durable-objects-room --no-audit --no-fund
-	fi
 	local say="${out}/say"
 	if [[ ! -p ${say} ]]; then
 		[[ ! -e ${say} ]] || {

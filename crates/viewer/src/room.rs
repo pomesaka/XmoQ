@@ -1,5 +1,5 @@
 //! What a room says, and what is said to it: the messages of the room's
-//! WebSocket (`spikes/durable-objects-room`), as text.
+//! WebSocket (`packages/room`), as text.
 
 use serde_json::{Value, json};
 
@@ -19,7 +19,7 @@ pub struct Broadcast {
 
 /// Where the relay of the rooms is, as a room says it in its hello with a
 /// broadcast and without one (decided on 2026-10-25; why, at the top of
-/// `spikes/durable-objects-room/worker.js`).
+/// `packages/room/src/worker.ts`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay {
     /// The address of the relay.
@@ -44,7 +44,7 @@ pub enum Said {
         /// The prefix a transcriber listens under for the room's broadcast,
         /// its fields, where the room says it: its transcript is `speech` of
         /// `xmoq/transcript/<prefix>` (decided on 2026-10-25; why, at the top
-        /// of `spikes/durable-objects-room/worker.js`).
+        /// of `packages/room/src/worker.ts`).
         transcript: Option<Vec<String>>,
         /// The same for the room's meeting (`meetingTranscript`).
         meeting_transcript: Option<Vec<String>>,
@@ -495,7 +495,7 @@ mod tests {
                 subscribe_token: token.map(str::to_string),
             })
         };
-        // (the message, as `spikes/durable-objects-room/worker.js` sends it;
+        // (the message, as `packages/room/src/worker.ts` sends it;
         // what it is read as)
         let cases = [
             (

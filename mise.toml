@@ -79,7 +79,7 @@ run = "crates/speech/scripts/fetch-model.sh"
 
 [tasks.demo]
 description = "Start the own relay, the gatherer of the chat, the transcriber and the pages of the demo: one publishes video, others watch"
-run = "cargo build --locked -p xmoq-relay -p xmoq-chat && cargo build --release --locked -p xmoq-transcriber && bun install --frozen-lockfile && (test -d spikes/durable-objects-room/node_modules || npm ci --prefix spikes/durable-objects-room --no-audit --no-fund) && bun demo/serve.ts"
+run = "cargo build --locked -p xmoq-relay -p xmoq-chat && cargo build --release --locked -p xmoq-transcriber && bun install --frozen-lockfile && bun demo/serve.ts"
 
 [tasks.fmt]
 description = "Apply formatting and safe lint fixes, and write the generated parts of the documents again"
