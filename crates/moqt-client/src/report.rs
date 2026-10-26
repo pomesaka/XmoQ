@@ -187,6 +187,12 @@ pub fn namespace_published() {
     println!("NAMESPACE_PUBLISHED");
 }
 
+/// The peer withdrew its acceptance of this client's `PUBLISH_NAMESPACE`
+/// (§6.2), by a reset or a `STOP_SENDING`.
+pub fn namespace_withdrawn(how: &RequestClose) {
+    println!("NAMESPACE_WITHDRAWN how={how}");
+}
+
 pub fn published(track_alias: u64, forward: bool) {
     println!("PUBLISHED track_alias={track_alias} forward={forward}");
 }

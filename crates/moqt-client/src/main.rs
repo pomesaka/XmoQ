@@ -1128,6 +1128,24 @@ struct Serving {
     done_due: Option<u64>,
 }
 
+/// The `PUBLISH_NAMESPACE` of this client, once it is answered with
+/// `REQUEST_OK`, and its stream while the namespace is published.
+struct Announced {
+    request: RequestId,
+    stream: Option<RequestStream>,
+}
+
+impl Announced {
+    /// What comes on the stream, or a `STOP_SENDING` for this client's
+    /// direction; never, once the namespace is withdrawn.
+    async fn next_event(&mut self) -> Result<RequestStreamEvent> {
+        match &mut self.stream {
+            Some(stream) => stream.next_event_or_stopped().await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
 /// Completes with the code of the `STOP_SENDING` the subscriber sent on the
 /// stream of the subscription that is being served; never, when none is.
 async fn stopped(serving: &mut Option<Serving>) -> Option<u32> {
@@ -1923,7 +1941,7 @@ impl Client<'_> {
         &mut self,
         stdin: &mut DriverLines,
         peer_requests: &mut io::PeerRequests,
-    ) -> Result<(RequestStream, RequestId, RequestStream)> {
+    ) -> Result<(Announced, RequestId, RequestStream)> {
         let (namespace_request, message) = self
             .session
             .publish_namespace(self.args.track_namespace()?, self.args.auth.with(vec![]))?;
@@ -1985,7 +2003,11 @@ impl Client<'_> {
                 return Err(refused("PUBLISH", other));
             }
         }
-        Ok((namespace_stream, publish_request, publish_stream))
+        let announced = Announced {
+            request: namespace_request,
+            stream: Some(namespace_stream),
+        };
+        Ok((announced, publish_request, publish_stream))
     }
 
     /// Sends one Object as Object 0 of a new Group, on a new subgroup stream;
@@ -2090,13 +2112,17 @@ impl Client<'_> {
         Ok(true)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the mode's one loop: the driver's lines, the peer's requests, and the streams of the PUBLISH_NAMESPACE and the PUBLISH"
+    )]
     async fn publish(&mut self, payload: &[u8]) -> Result<()> {
         let mut stdin = BufReader::new(tokio::io::stdin()).lines();
         let mut peer_requests = self
             .peer_requests
             .take()
             .context("the readers were not started to answer requests")?;
-        let (_namespace_stream, mut publish_request, mut publish_stream) =
+        let (mut announced, mut publish_request, mut publish_stream) =
             self.offer_track(&mut stdin, &mut peer_requests).await?;
 
         // The driver writes a line for every Object it wants sent, once the
@@ -2179,6 +2205,7 @@ impl Client<'_> {
                 turned = attention(&mut peer_requests, &mut self.answers, &mut self.objects) => {
                     self.attend(turned?, &track, &mut None, None).await?;
                 }
+                event = announced.next_event() => self.on_announced(&mut announced, event?)?,
                 // This client has no subgroup stream open between Objects, so a
                 // subscriber that ends the subscription leaves none to reset
                 // (§5.1.1).
@@ -2403,6 +2430,10 @@ impl Client<'_> {
                 return Err(refused("PUBLISH_NAMESPACE", other));
             }
         }
+        let mut announced = Announced {
+            request: namespace_request,
+            stream: Some(namespace_stream),
+        };
         // Each Object is a Group of its own, numbered from 0 across
         // subscriptions.
         let track = self.args.full_track_name()?;
@@ -2444,6 +2475,7 @@ impl Client<'_> {
                     }
                     None => break,
                 },
+                event = announced.next_event() => self.on_announced(&mut announced, event?)?,
                 turned = attention(&mut peer_requests, &mut self.answers, &mut self.objects) => {
                     self.attend(turned?, &track, &mut serving, Some(&mut stdin))
                         .await?;
@@ -2463,6 +2495,34 @@ impl Client<'_> {
         }
 
         self.end_serving(serving, peer_requests).await
+    }
+
+    /// What came on the stream of this client's `PUBLISH_NAMESPACE` after its
+    /// `REQUEST_OK`. A FIN gives nothing up: the namespace stays published
+    /// (§6.2: "A subscriber can cancel the request (see Section 3.3.2) to
+    /// revoke acceptance", and §3.3.2 cancels "by resetting or sending
+    /// `STOP_SENDING`"; §11.4.1 ends the request with the termination of the
+    /// bidirectional stream, which one direction's FIN is not). A reset or a
+    /// `STOP_SENDING` withdraws it: this client's direction is reset and the
+    /// mode goes on, its subscriptions with it (§6.2: "it is not a protocol
+    /// error for the subscriber to send a SUBSCRIBE ... after the namespace
+    /// is withdrawn").
+    fn on_announced(&mut self, announced: &mut Announced, event: RequestStreamEvent) -> Result<()> {
+        match event {
+            RequestStreamEvent::Message(message) => {
+                let event = on_request(&mut self.session, announced.request, message)?;
+                bail!("unexpected on the PUBLISH_NAMESPACE stream: {event:?}");
+            }
+            RequestStreamEvent::Closed(RequestClose::Fin) => {}
+            RequestStreamEvent::Closed(how) => {
+                report::namespace_withdrawn(&how);
+                self.session.cancel(announced.request);
+                if let Some(stream) = announced.stream.take() {
+                    stream.cancel();
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Ends the subscription that is served, if one is, with `PUBLISH_DONE`
