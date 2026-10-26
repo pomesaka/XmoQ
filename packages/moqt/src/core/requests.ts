@@ -1060,8 +1060,9 @@ export function createRequests(options: RequestsOptions): Requests {
 		const { requestId } = request;
 		if (message.type === "REQUEST_OK") {
 			// What a REQUEST_UPDATE_OK may carry: §10.2.10, §10.2.11.
-			const outside = Object.keys(message.parameters).filter(
-				(name) => name !== "expires" && name !== "largestObject",
+			const outside = parametersOutsideScope(
+				message.parameters,
+				"REQUEST_UPDATE_OK",
 			);
 			if (outside.length > 0) {
 				throw protocolViolation(
@@ -1207,7 +1208,8 @@ export function createRequests(options: RequestsOptions): Requests {
 			// No parameter of §10.2 lists this REQUEST_OK, and no Track Property
 			// belongs to it (§10.5).
 			if (
-				Object.keys(message.parameters).length > 0 ||
+				parametersOutsideScope(message.parameters, "SUBSCRIBE_NAMESPACE_OK")
+					.length > 0 ||
 				message.trackProperties.length > 0
 			) {
 				throw protocolViolation(
