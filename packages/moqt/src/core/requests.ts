@@ -500,6 +500,8 @@ interface PeerSubscribeEntry extends RequestCommon {
 
 interface SubscribeEntry extends RequestCommon {
 	kind: "SUBSCRIBE";
+	/** The track (`trackKey`). */
+	track: string;
 	/** Set by SUBSCRIBE_OK. */
 	trackAlias: bigint | undefined;
 	/** `SubscribeRequest.maxObjectPayloadLength`, resolved against the connection's limit. */
@@ -516,6 +518,8 @@ interface SubscribeEntry extends RequestCommon {
  */
 interface FetchEntry extends RequestCommon {
 	kind: "FETCH";
+	/** The track (`trackKey`): that of the FETCH, or of the SUBSCRIBE a Joining FETCH names. */
+	track: string;
 	/**
 	 * The Start Location, where this endpoint knows it: not for a Relative
 	 * Joining FETCH, whose start the publisher counts from the subscription.
@@ -593,6 +597,10 @@ const namespaceKey = (namespace: TrackNamespace): string =>
 			Array.from(field, (byte) => byte.toString(16).padStart(2, "0")).join(""),
 		)
 		.join(".");
+
+/** A key of a Full Track Name for comparing: its namespace's key, a slash, and its name in hex. */
+const trackKey = (namespace: TrackNamespace, name: Uint8Array): string =>
+	`${namespaceKey(namespace)}/${namespaceKey([name])}`;
 
 /** §10.2.12: FORWARD defaults to 1 wherever it is omitted, except in REQUEST_UPDATE. */
 const DEFAULT_FORWARD = true;
@@ -909,10 +917,23 @@ export function createRequests(options: RequestsOptions): Requests {
 		);
 	};
 
+	/**
+	 * §2.4.2: "When a subscriber detects a Malformed Track, it MUST cancel
+	 * any corresponding subscription or fetches for that Track from that
+	 * publisher". The subscription, then the FETCH requests of its track in
+	 * the order they were sent, as the Rust session (`cancel_malformed`).
+	 */
 	function onMalformedTrack(requestId: bigint, out: SessionOutput[]): void {
 		const request = requests.get(requestId);
-		// §2.4.2: the subscriber MUST cancel the subscription.
-		if (request !== undefined) abandonRequest(request, "malformed-track", out);
+		if (request === undefined) return;
+		const fetches =
+			request.kind === "SUBSCRIBE"
+				? [...requests.values()].filter(
+						(other) => other.kind === "FETCH" && other.track === request.track,
+					)
+				: [];
+		abandonRequest(request, "malformed-track", out);
+		for (const fetch of fetches) abandonRequest(fetch, "malformed-track", out);
 	}
 
 	/** §10.11: the subscription that received PUBLISH_DONE has nothing more to wait for. */
@@ -1866,6 +1887,7 @@ export function createRequests(options: RequestsOptions): Requests {
 				entry: {
 					...common,
 					kind: "SUBSCRIBE",
+					track: trackKey(request.trackNamespace, request.trackName),
 					trackAlias: undefined,
 					maxObjectPayloadLength,
 					updates: 0,
@@ -1891,15 +1913,18 @@ export function createRequests(options: RequestsOptions): Requests {
 			// A SUBSCRIBE that got its PUBLISH_DONE is over for this, though it
 			// is kept here for the streams still on their way (§10.11): the
 			// Rust session has dropped it by then, and refuses the same.
-			const refuseUnlessOpenSubscribe = (joiningRequestId: bigint): void => {
+			/** The track of the SUBSCRIBE a Joining FETCH names. */
+			const joinedTrack = (joiningRequestId: bigint): string => {
 				const joined = requests.get(joiningRequestId);
 				if (joined?.kind !== "SUBSCRIBE" || isDraining(joined)) {
 					throw new RangeError(
 						`Joining Request ID ${joiningRequestId} is not an open SUBSCRIBE of this session (§10.12.2)`,
 					);
 				}
+				return joined.track;
 			};
 			let start: Location | undefined;
+			let track: string;
 			switch (range.fetchType) {
 				case "Standalone":
 					if (endsBefore(range.startLocation, range.endLocation)) {
@@ -1908,19 +1933,20 @@ export function createRequests(options: RequestsOptions): Requests {
 						);
 					}
 					start = range.startLocation;
+					track = trackKey(range.trackNamespace, range.trackName);
 					break;
 				case "RelativeJoining":
-					refuseUnlessOpenSubscribe(range.joiningRequestId);
+					track = joinedTrack(range.joiningRequestId);
 					break;
 				case "AbsoluteJoining":
-					refuseUnlessOpenSubscribe(range.joiningRequestId);
+					track = joinedTrack(range.joiningRequestId);
 					// §10.12.2.1: "the publisher sets the Start Location to
 					// {Joining Start, 0}".
 					start = { group: range.joiningStart, object: 0n };
 					break;
 			}
 			return openRequest((common) => ({
-				entry: { ...common, kind: "FETCH", start, fetchStream: "none" },
+				entry: { ...common, kind: "FETCH", track, start, fetchStream: "none" },
 				message: {
 					type: "FETCH",
 					requestId: common.requestId,

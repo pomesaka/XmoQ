@@ -34,9 +34,9 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
 use xmoq_moqt::session::{
-    ControlEvent, FetchStreamOpened, PeerRequest, PeerRequestEvent, PeerRequestId,
-    PeerRequestOpened, RequestEvent, RequestId, RequestState, Role, Session, SubscribedAlias,
-    Transport,
+    ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequest, PeerRequestEvent,
+    PeerRequestId, PeerRequestOpened, RequestEvent, RequestId, RequestState, Role, Session,
+    SubscribedAlias, Transport,
 };
 
 use xmoq_moqt::{ErrorScope, stream_reset_code};
@@ -1675,6 +1675,31 @@ impl Client<'_> {
         }
     }
 
+    /// §2.4.2: the subscription and the FETCH requests of a malformed track
+    /// are cancelled, the FETCH requests here. Whether the subscription
+    /// `request_id` was among them.
+    fn cancel_malformed(
+        &mut self,
+        fetches: &mut Fetches,
+        track_alias: u64,
+        request_id: RequestId,
+    ) -> bool {
+        let mut subscription_over = false;
+        for cancelled in self.session.cancel_malformed(track_alias) {
+            match cancelled {
+                MalformedRequest::Subscribe(request) => subscription_over |= request == request_id,
+                MalformedRequest::Fetch(request) => {
+                    if let Some(index) = fetches.index_of(request) {
+                        self.fetch_happened(fetches, index, Happened::MalformedTrack);
+                    }
+                }
+                // The client takes no PUBLISH of the peer.
+                MalformedRequest::Publish(_) => {}
+            }
+        }
+        subscription_over
+    }
+
     /// The writer of `--annex-b-out`. Not for the catalog track (`wanted`
     /// is `None`): its Objects are no frames.
     fn video_writer(&self, wanted: Option<u64>) -> Result<Option<video::AnnexBWriter>> {
@@ -1743,12 +1768,10 @@ impl Client<'_> {
                         }
                     }
                     UniEvent::TrackMalformed { header, error, .. } => {
-                        let malformed = header.track_alias;
-                        report::track_malformed(malformed, &error);
-                        if malformed == track_alias {
-                            // §2.4.2: the subscription is cancelled. The session
-                            // is not at fault and is closed without an error.
-                            self.session.cancel(request_id);
+                        report::track_malformed(header.track_alias, &error);
+                        let subscription_over =
+                            self.cancel_malformed(fetches, header.track_alias, request_id);
+                        if subscription_over {
                             self.stop_streams_of(track_alias);
                             if let Some(stream) = stream.take() {
                                 stream.cancel();

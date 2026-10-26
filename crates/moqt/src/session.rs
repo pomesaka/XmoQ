@@ -4,12 +4,14 @@
 //! [`peer`] holds the requests the peer opens.
 
 mod fetch;
+mod malformed;
 mod peer;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use fetch::{FetchStreamOpened, NO_FETCH_FOR_THE_STREAM};
+pub use malformed::MalformedRequest;
 pub use peer::{
     AfterRefusal, MAX_PEER_REQUESTS, PeerRequest, PeerRequestEvent, PeerRequestId,
     PeerRequestOpened, REQUEST_IDS_AHEAD_LIMIT,
@@ -1494,7 +1496,7 @@ fn check_redirect(role: Role, request: &Request, error: &RequestError) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::Redirect;
+    use crate::message::{FetchRange, Redirect};
     use crate::params::GroupOrder;
     use crate::test_util::{closed, update_answer_steps};
 
@@ -3044,6 +3046,111 @@ mod tests {
                 }
             }
             assert_eq!(&done.join(" | "), &events, "{name}");
+        }
+    }
+
+    /// §2.4.2: what a malformed track cancels, by the alias its stream named.
+    #[test]
+    fn a_malformed_track_cancels_its_subscription_and_fetches() {
+        let at = |group| Location { group, object: 0 };
+        let standalone = |name: &[u8]| FetchRange::Standalone {
+            full_track_name: track(name),
+            start: at(0),
+            end: at(1),
+        };
+        // The SUBSCRIBE of "a" (Request ID 0) with the alias 7.
+        let subscribed = || {
+            let mut session = client();
+            let (subscribe, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+            session.feed(subscribe, subscribe_ok(7, vec![])).unwrap();
+            (session, subscribe)
+        };
+        // (the case; the session; the alias the stream named; what is
+        // cancelled, by Request ID; the requests that stay)
+        let cases: Vec<(&str, Session, u64, &str, Vec<RequestId>)> = vec![
+            {
+                let (mut session, subscribe) = subscribed();
+                session
+                    .fetch(
+                        FetchRange::RelativeJoining {
+                            joining_request_id: subscribe.value(),
+                            joining_start: 1,
+                        },
+                        vec![],
+                    )
+                    .unwrap();
+                session.fetch(standalone(b"a"), vec![]).unwrap();
+                let (other, _) = session.fetch(standalone(b"b"), vec![]).unwrap();
+                (
+                    "a subscription and the FETCH requests of its track",
+                    session,
+                    7,
+                    "subscribe 0, fetch 2, fetch 4",
+                    vec![other],
+                )
+            },
+            {
+                let (mut session, subscribe) = subscribed();
+                session.fetch(standalone(b"a"), vec![]).unwrap();
+                session
+                    .feed(subscribe, ControlMessage::PublishDone(publish_done()))
+                    .unwrap();
+                (
+                    "a subscription PUBLISH_DONE ended, whose FETCH goes on",
+                    session,
+                    7,
+                    "fetch 2",
+                    vec![],
+                )
+            },
+            {
+                let (session, subscribe) = subscribed();
+                ("an alias nobody gave", session, 9, "", vec![subscribe])
+            },
+            {
+                let (mut session, subscribe) = subscribed();
+                session.cancel(subscribe);
+                ("an alias that is retired", session, 7, "", vec![])
+            },
+        ];
+        for (name, mut session, alias, expected, staying) in cases {
+            let cancelled = session.cancel_malformed(alias);
+            let said: Vec<String> = cancelled
+                .iter()
+                .map(|request| match request {
+                    MalformedRequest::Subscribe(request) => {
+                        format!("subscribe {}", request.value())
+                    }
+                    MalformedRequest::Fetch(request) => format!("fetch {}", request.value()),
+                    MalformedRequest::Publish(_) => panic!("{name}: no PUBLISH here"),
+                })
+                .collect();
+            assert_eq!(said.join(", "), expected, "{name}");
+            for request in &cancelled {
+                if let MalformedRequest::Subscribe(request) | MalformedRequest::Fetch(request) =
+                    request
+                {
+                    assert_eq!(
+                        session.request_state(*request),
+                        Some(RequestState::Terminated),
+                        "{name}"
+                    );
+                }
+            }
+            for request in staying {
+                assert_ne!(
+                    session.request_state(request),
+                    Some(RequestState::Terminated),
+                    "{name}"
+                );
+            }
+            if !cancelled.is_empty() {
+                assert_eq!(
+                    session.subscribed_alias(alias),
+                    SubscribedAlias::Retired,
+                    "{name}"
+                );
+            }
         }
     }
 

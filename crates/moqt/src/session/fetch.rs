@@ -4,13 +4,16 @@
 use super::{Request, RequestEvent, RequestId, Session, check_own_parameters};
 use crate::immutable::track_properties_refusal;
 use crate::message::{ControlMessage, Fetch, FetchOk, FetchRange};
-use crate::name::Location;
+use crate::name::{FullTrackName, Location};
 use crate::params::{MessageKind, Parameter};
 use crate::{Error, UsageError};
 
 /// A FETCH this endpoint sent that is not over.
 #[derive(Debug)]
 pub(super) struct OwnFetch {
+    /// The track: that of the FETCH, or of the SUBSCRIBE a Joining FETCH
+    /// names.
+    pub(super) track: FullTrackName,
     /// The Start Location, where this endpoint knows it: not for a Relative
     /// Joining FETCH, whose start the publisher counts from the subscription.
     start: Option<Location>,
@@ -103,44 +106,41 @@ impl Session {
         parameters: Vec<Parameter>,
     ) -> Result<(RequestId, ControlMessage), UsageError> {
         check_own_parameters(&parameters, MessageKind::Fetch)?;
-        let joins_a_subscribe = |joining_request_id: &u64| {
-            matches!(
-                self.requests.get(joining_request_id),
-                Some(Request::Subscribe { .. })
-            )
+        let joined = |joining_request_id: &u64| match self.requests.get(joining_request_id) {
+            Some(Request::Subscribe {
+                full_track_name, ..
+            }) => Ok(full_track_name.clone()),
+            _ => Err(UsageError("a Joining FETCH names an open SUBSCRIBE")),
         };
-        let not_a_subscribe = UsageError("a Joining FETCH names an open SUBSCRIBE");
-        let start = match &range {
-            FetchRange::Standalone { start, end, .. } => {
+        let (track, start) = match &range {
+            FetchRange::Standalone {
+                full_track_name,
+                start,
+                end,
+            } => {
                 if ends_before(*start, *end) {
                     return Err(UsageError("the range ends before it starts"));
                 }
-                Some(*start)
+                (full_track_name.clone(), Some(*start))
             }
             FetchRange::RelativeJoining {
                 joining_request_id, ..
-            } => {
-                if !joins_a_subscribe(joining_request_id) {
-                    return Err(not_a_subscribe);
-                }
-                None
-            }
+            } => (joined(joining_request_id)?, None),
             FetchRange::AbsoluteJoining {
                 joining_request_id,
                 joining_start,
-            } => {
-                if !joins_a_subscribe(joining_request_id) {
-                    return Err(not_a_subscribe);
-                }
+            } => (
+                joined(joining_request_id)?,
                 // §10.12.2.1: "the publisher sets the Start Location to
                 // {Joining Start, 0}".
                 Some(Location {
                     group: *joining_start,
                     object: 0,
-                })
-            }
+                }),
+            ),
         };
         let request = self.open(Request::Fetch(OwnFetch {
+            track,
             start,
             answered: false,
             stream: StreamSeen::No,

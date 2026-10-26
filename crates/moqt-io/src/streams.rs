@@ -788,8 +788,9 @@ pub enum UniEvent {
         object_id: u64,
     },
     /// The track of a stream broke the object model (§2.4.2). The stream was
-    /// stopped; [`UniEvent::SubgroupClosed`] follows. The subscription has to
-    /// be cancelled; the session stays open.
+    /// stopped; [`UniEvent::SubgroupClosed`] follows. The subscription and the
+    /// FETCH requests of the track have to be cancelled
+    /// (`Session::cancel_malformed` of `xmoq-moqt`); the session stays open.
     TrackMalformed {
         /// The stream.
         stream: u64,
