@@ -12,7 +12,7 @@ export interface KeyValuePair {
 }
 
 /** §1.4.3: "The maximum length of a value is 2^16-1 bytes." */
-const MAX_VALUE_LENGTH = 0xffff;
+export const MAX_VALUE_LENGTH = 0xffff;
 
 /**
  * Most pairs accepted in one sequence. Provisional: the draft sets no

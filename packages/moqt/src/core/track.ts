@@ -14,9 +14,10 @@ export interface FullTrackName {
 	trackName: Uint8Array;
 }
 
-const MAX_TRACK_NAMESPACE_FIELDS = 32;
+/** §2.4.1: the most fields of a Track Namespace. */
+export const MAX_TRACK_NAMESPACE_FIELDS = 32;
 /** §2.4.1: maximum length of a Track Namespace and of a Full Track Name. */
-const MAX_FULL_TRACK_NAME_LENGTH = 4096;
+export const MAX_FULL_TRACK_NAME_LENGTH = 4096;
 
 /** Returns the namespace and the sum of its Track Namespace Field Lengths. */
 function decodeNamespaceWithLength(reader: ByteReader): {

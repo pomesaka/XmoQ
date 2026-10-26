@@ -153,21 +153,21 @@ const STREAM_COUNT_UNKNOWN = (1n << 62n) - 1n;
  * Objects are dropped at once instead of being held as an unknown alias
  * (§11.1). Provisional; the Rust implementation uses the same number.
  */
-const RETIRED_ALIAS_LIMIT = 64;
+export const RETIRED_ALIAS_LIMIT = 64;
 
 /**
  * Unknown Track Aliases for which streams that ended without an Object are
  * counted, until a SUBSCRIBE_OK establishes the alias. Provisional; the Rust
  * implementation uses the same number.
  */
-const EARLY_CLOSED_ALIAS_LIMIT = 64;
+export const EARLY_CLOSED_ALIAS_LIMIT = 64;
 
 /**
  * Bytes charged for a held Object on top of its content, so that Objects
  * with no payload still use up `maxHeldSubgroupBytes`.
  */
-const HELD_OBJECT_OVERHEAD = 64;
-const HELD_PROPERTY_OVERHEAD = 16;
+export const HELD_OBJECT_OVERHEAD = 64;
+export const HELD_PROPERTY_OVERHEAD = 16;
 
 /**
  * What a Track Alias is to the Objects of its streams, for the rule of

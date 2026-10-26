@@ -160,7 +160,7 @@ const identified = (peerStream: number): SessionOutput => ({
  * Request IDs remembered above the lowest one not seen yet, while requests
  * arrive out of order or leave a gap. Provisional.
  */
-const REQUEST_IDS_AHEAD_LIMIT = 1024;
+export const REQUEST_IDS_AHEAD_LIMIT = 1024;
 
 const NOT_SUPPORTED = {
 	code: RequestErrorCode.NOT_SUPPORTED,

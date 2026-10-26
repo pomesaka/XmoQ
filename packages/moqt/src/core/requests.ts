@@ -61,6 +61,8 @@ import {
 } from "./session-output.ts";
 import {
 	type FullTrackName,
+	MAX_FULL_TRACK_NAME_LENGTH,
+	MAX_TRACK_NAMESPACE_FIELDS,
 	sameFullTrackName,
 	type TrackNamespace,
 } from "./track.ts";
@@ -598,10 +600,6 @@ type RequestEntry =
  */
 export const MAX_NAMESPACES_OF_A_SUBSCRIPTION = 4096;
 
-/** §2.4.1: a Track Namespace has at most 32 fields, and with a Track Name at most 4,096 bytes. */
-const MAX_NAMESPACE_FIELDS = 32;
-const MAX_NAMESPACE_BYTES = 4096;
-
 /** A key of a namespace for a `Set`: the fields' bytes in hex, joined with dots. */
 const namespaceKey = (namespace: TrackNamespace): string =>
 	namespace
@@ -635,7 +633,7 @@ const REQUEST_OK = encodeControlMessage({
  * crates/relay-core/src/fetch.rs); the Rust session leaves it to its
  * caller. Provisional.
  */
-const MAX_HELD_FETCH_UPDATES = 64;
+export const MAX_HELD_FETCH_UPDATES = 64;
 
 /**
  * REQUEST_UPDATEs of one subscription that may wait for their answer.
@@ -1233,9 +1231,9 @@ export function createRequests(options: RequestsOptions): Requests {
 		// A namespace longer than §2.4.1 allows breaks the rule for any
 		// namespace.
 		if (
-			trackNamespace.length > MAX_NAMESPACE_FIELDS ||
+			trackNamespace.length > MAX_TRACK_NAMESPACE_FIELDS ||
 			trackNamespace.reduce((sum, field) => sum + field.length, 0) >
-				MAX_NAMESPACE_BYTES
+				MAX_FULL_TRACK_NAME_LENGTH
 		) {
 			throw protocolViolation("a namespace of NAMESPACE that is too long");
 		}
