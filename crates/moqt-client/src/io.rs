@@ -2,7 +2,7 @@
 //! the split of incoming events into the ones that concern the session and the
 //! ones that carry data.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, IdleSubgroupStreamTimeout, IncomingStreams, PeerRequestStreamEvent, RequestClose,
     RequestReader, RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace, UniEvent,
-    WriteError, read_request_streams, read_uni_streams, send_message,
+    WriteError, client, read_request_streams, read_uni_streams, send_message,
 };
 
 type Send = <WtConnection as Connection>::Send;
@@ -206,14 +206,53 @@ impl SessionInbox {
 /// What the peer's subgroup streams produced, in arrival order per stream.
 pub struct DataInbox {
     events: mpsc::Receiver<UniEvent>,
+    /// What came before the peer's SETUP ([`first_control_message`]), taken
+    /// first.
+    held: VecDeque<UniEvent>,
 }
 
 impl DataInbox {
     pub async fn next_event(&mut self) -> Result<UniEvent> {
+        if let Some(event) = self.held.pop_front() {
+            return Ok(event);
+        }
         self.events
             .recv()
             .await
             .ok_or_else(|| anyhow!("connection closed"))
+    }
+}
+
+/// The first control message, which is to be the peer's SETUP. What the
+/// peer's data streams bring meanwhile is held, for the mode to take first
+/// (§3.3: such streams "could arrive prior to the SETUP"), up to
+/// `MOST_HELD_BEFORE_SETUP` events as `client::setup` holds them; one more
+/// ends the session with `HeldTooMuch`, closed with `INTERNAL_ERROR`.
+///
+/// WHY taken while the SETUP is waited for: the readers wait while what they
+/// brought is not taken, and the control stream comes through them too.
+///
+/// # Errors
+///
+/// What ends the session on the control stream, and `HeldTooMuch`.
+pub async fn first_control_message(
+    session: &mut SessionInbox,
+    data: &mut DataInbox,
+) -> Result<ControlMessage> {
+    loop {
+        tokio::select! {
+            biased;
+            message = session.next_control_message() => return message,
+            event = data.events.recv() => {
+                let Some(event) = event else {
+                    return Err(anyhow!("connection closed"));
+                };
+                if data.held.len() >= client::MOST_HELD_BEFORE_SETUP {
+                    return Err(client::HeldTooMuch.into());
+                }
+                data.held.push_back(event);
+            }
+        }
     }
 }
 
@@ -350,6 +389,10 @@ pub fn start_readers(
     let streams = read_uni_streams(connection, config, stops, all, |event| event);
     // WHY two queues: the client waits for a control message and for data in
     // different places, and neither wait may swallow what the other needs.
+    // The router waits while the data queue is full, and the control
+    // messages behind it with it: every wait of the client takes data as
+    // well, the SETUP's (`first_control_message`) and those of the modes
+    // that ask for none (`response_stopping_data` in `main.rs`).
     let router = tokio::spawn(async move {
         while let Some(event) = incoming.recv().await {
             let queue = match &event {
@@ -372,6 +415,7 @@ pub fn start_readers(
         },
         DataInbox {
             events: data_events,
+            held: VecDeque::new(),
         },
         peer_requests,
         Readers {
