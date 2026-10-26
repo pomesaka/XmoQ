@@ -23,3 +23,8 @@ default-publisher-priority-255	track	-	0e80ff	ok	0e=255
 default-publisher-priority-above-255	track	-	0e8100	protocol-violation	-
 default-publisher-priority-inside-255	track	-	0b030e80ff	ok	0e=255
 default-publisher-priority-inside-above-255	track	-	0b030e8100	protocol-violation	-
+default-publisher-group-order-ascending	track	-	2201	ok	22=1
+default-publisher-group-order-descending	track	-	2202	ok	22=2
+default-publisher-group-order-0	track	-	2200	protocol-violation	-
+default-publisher-group-order-3	track	-	2203	protocol-violation	-
+default-publisher-group-order-inside-3	track	-	0b022203	protocol-violation	-
