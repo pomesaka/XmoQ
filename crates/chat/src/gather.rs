@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::args::Limits;
 use crate::rate::Window;
 use crate::rooms::Rooms;
-use xmoq_chat_tracks::names::Person;
+use xmoq_chat_tracks::names::{Person, Room};
 use xmoq_chat_tracks::payloads::{Line, Malformed, read_said};
 
 /// The participants the gatherer follows at once. One more is passed over
@@ -151,6 +151,19 @@ impl Gatherer {
         self.people.contains_key(person)
     }
 
+    /// How many are in `room`: the participants followed in it, what the
+    /// room's `present` says (decided on 2026-10-26). A name is one
+    /// participant of a room ([`Person`]), however often it is announced.
+    #[must_use]
+    pub fn present(&self, room: &Room) -> u64 {
+        let count = self
+            .people
+            .keys()
+            .filter(|person| person.room == *room)
+            .count();
+        u64::try_from(count).unwrap_or(u64::MAX)
+    }
+
     /// Takes what `person` said, `payload` of an Object of its `said`, at
     /// `now_ms` of a clock that does not go back and `wall_ms` of the
     /// gatherer's clock since the epoch. A line that is taken has its
@@ -253,6 +266,7 @@ mod tests {
             text_bytes: 4,
             lines_per_second: 2,
             fetch_lines: 10,
+            ..Limits::default()
         };
         let long = "x".repeat(5);
         let ok = |number: u64| Ok::<u64, &str>(number);
@@ -372,6 +386,42 @@ mod tests {
                 gatherer.admit(&person(room, name));
             }
             assert_eq!(gatherer.admit(&person(room, "a")), expected, "{case}");
+        }
+    }
+
+    /// (case, admitted, who leaves, how many are in room r), each who as
+    /// (room, name).
+    type Presence<'a> = (
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        &'a [(&'a str, &'a str)],
+        u64,
+    );
+
+    #[test]
+    fn how_many_are_in_a_room_is_who_is_followed_in_it() {
+        let cases: [Presence; 4] = [
+            ("nobody", &[], &[], 0),
+            (
+                "two of r, one of s",
+                &[("r", "a"), ("r", "b"), ("s", "a")],
+                &[],
+                2,
+            ),
+            ("a name twice is one", &[("r", "a"), ("r", "a")], &[], 1),
+            ("one left", &[("r", "a"), ("r", "b")], &[("r", "a")], 1),
+        ];
+        for (case, admitted, left, expected) in cases {
+            let mut gatherer = Gatherer::new(Limits::default());
+            gatherer.rooms.add(&broadcast("r"), 0);
+            gatherer.rooms.add(&broadcast("s"), 0);
+            for (room, name) in admitted {
+                gatherer.admit(&person(room, name));
+            }
+            for (room, name) in left {
+                gatherer.leave(&person(room, name));
+            }
+            assert_eq!(gatherer.present(&broadcast("r")), expected, "{case}");
         }
     }
 

@@ -1,7 +1,8 @@
 //! The namespaces and tracks of the chat: a room of a broadcast or of a
 //! meeting is `xmoq/chat/<kind>/<room>` (`kind` `broadcast` or `meeting`),
-//! where the gatherer publishes the track `lines`; a participant announces
-//! `xmoq/chat/<kind>/<room>/<name>` and publishes the track `said` there.
+//! where the gatherer publishes the tracks `lines`, `reactions` and
+//! `present`; a participant announces `xmoq/chat/<kind>/<room>/<name>` and
+//! publishes the tracks `said` and `reacted` there.
 //!
 //! WHY the kind is a field of its own: a broadcast and a meeting are rooms
 //! of two applications, each of its own names, and one gatherer can take
@@ -19,8 +20,85 @@ pub const PREFIX: [&str; 2] = ["xmoq", "chat"];
 /// The track of a participant: what it says.
 pub const SAID: &str = "said";
 
+/// The track of a participant: its reactions, one Object a press.
+pub const REACTED: &str = "reacted";
+
 /// The track of a room: its lines, numbered.
 pub const LINES: &str = "lines";
+
+/// The track of a room: its reactions counted over a while.
+pub const REACTIONS: &str = "reactions";
+
+/// The track of a room: how many are in it.
+pub const PRESENT: &str = "present";
+
+/// A track the gatherer publishes in a room's namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoomTrack {
+    /// [`LINES`].
+    Lines,
+    /// [`REACTIONS`].
+    Reactions,
+    /// [`PRESENT`].
+    Present,
+}
+
+/// A track a participant publishes in its namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PersonTrack {
+    /// [`SAID`].
+    Said,
+    /// [`REACTED`].
+    Reacted,
+}
+
+impl RoomTrack {
+    /// The name of the track.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lines => LINES,
+            Self::Reactions => REACTIONS,
+            Self::Present => PRESENT,
+        }
+    }
+
+    /// The track whose name is `name`; `None` for any other.
+    #[must_use]
+    pub fn of(name: &[u8]) -> Option<Self> {
+        [Self::Lines, Self::Reactions, Self::Present]
+            .into_iter()
+            .find(|track| track.name().as_bytes() == name)
+    }
+}
+
+impl PersonTrack {
+    /// The name of the track.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Said => SAID,
+            Self::Reacted => REACTED,
+        }
+    }
+
+    /// The track whose name is `name`; `None` for any other.
+    #[must_use]
+    pub fn of(name: &[u8]) -> Option<Self> {
+        [Self::Said, Self::Reacted]
+            .into_iter()
+            .find(|track| track.name().as_bytes() == name)
+    }
+}
+
+/// A track of the chat: a room's or a participant's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatTrack {
+    /// One the gatherer publishes for a room.
+    OfRoom(Room, RoomTrack),
+    /// One a participant publishes.
+    OfPerson(Person, PersonTrack),
+}
 
 /// What a room is of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -168,35 +246,37 @@ pub fn room_namespace(room: &Room) -> Result<TrackNamespace, UsageError> {
     ])
 }
 
-/// `xmoq/chat/<kind>/<room>/<name>`, `said`.
+/// `xmoq/chat/<kind>/<room>/<name>`, and the track of the participant.
 ///
 /// # Errors
 ///
 /// As [`person_namespace`].
-pub fn said_track(person: &Person) -> Result<FullTrackName, UsageError> {
+pub fn person_track(person: &Person, track: PersonTrack) -> Result<FullTrackName, UsageError> {
     let namespace = person_namespace(&person.room, &person.name)?;
-    FullTrackName::new(namespace, SAID.as_bytes().to_vec())
+    FullTrackName::new(namespace, track.name().as_bytes().to_vec())
 }
 
-/// `xmoq/chat/<kind>/<room>`, `lines`.
+/// `xmoq/chat/<kind>/<room>`, and the track of the room.
 ///
 /// # Errors
 ///
 /// As [`person_namespace`].
-pub fn lines_track(room: &Room) -> Result<FullTrackName, UsageError> {
-    FullTrackName::new(room_namespace(room)?, LINES.as_bytes().to_vec())
+pub fn room_track(room: &Room, track: RoomTrack) -> Result<FullTrackName, UsageError> {
+    FullTrackName::new(room_namespace(room)?, track.name().as_bytes().to_vec())
 }
 
-/// The room whose `lines` the track is; `None` for any other track.
+/// The track of the chat `track` is; `None` for any other, such as a room's
+/// track in a participant's namespace.
 #[must_use]
-pub fn room_of_lines(track: &FullTrackName) -> Option<Room> {
+pub fn track_of(track: &FullTrackName) -> Option<ChatTrack> {
+    if let Some(person) = person_of(track.namespace()) {
+        return PersonTrack::of(track.name()).map(|kind| ChatTrack::OfPerson(person, kind));
+    }
     let [xmoq, chat, kind, room] = track.namespace().fields() else {
         return None;
     };
-    if track.name() != LINES.as_bytes() {
-        return None;
-    }
-    room_of([xmoq, chat], kind, room)
+    let room = room_of([xmoq, chat], kind, room)?;
+    RoomTrack::of(track.name()).map(|kind| ChatTrack::OfRoom(room, kind))
 }
 
 #[cfg(test)]
@@ -246,15 +326,20 @@ mod tests {
                 ),
                 Some(name) => {
                     let track = FullTrackName::new(namespace, name.into_bytes()).unwrap();
-                    room_of_lines(&track)
-                        .map_or_else(|| "none".to_string(), |room| format!("lines {room}"))
+                    match track_of(&track) {
+                        None => "none".to_string(),
+                        Some(ChatTrack::OfRoom(room, track)) => format!("{} {room}", track.name()),
+                        Some(ChatTrack::OfPerson(person, track)) => {
+                            format!("{} {} {}", track.name(), person.room, person.name)
+                        }
+                    }
                 }
             };
             assert_eq!(got, expected, "{case}");
             read += 1;
         }
         // A table that lost rows would pass.
-        assert_eq!(read, 14);
+        assert_eq!(read, 21);
     }
 
     #[test]
@@ -296,11 +381,20 @@ mod tests {
                 room: room(kind, "r"),
                 name: "alice".to_string(),
             };
-            let said = said_track(&alice).unwrap();
-            assert_eq!(person_of(said.namespace()), Some(alice));
-            assert_eq!(said.name(), b"said");
-            let lines = lines_track(&room(kind, "r")).unwrap();
-            assert_eq!(room_of_lines(&lines), Some(room(kind, "r")));
+            for track in [PersonTrack::Said, PersonTrack::Reacted] {
+                let made = person_track(&alice, track).unwrap();
+                assert_eq!(
+                    track_of(&made),
+                    Some(ChatTrack::OfPerson(alice.clone(), track))
+                );
+            }
+            for track in [RoomTrack::Lines, RoomTrack::Reactions, RoomTrack::Present] {
+                let made = room_track(&room(kind, "r"), track).unwrap();
+                assert_eq!(
+                    track_of(&made),
+                    Some(ChatTrack::OfRoom(room(kind, "r"), track))
+                );
+            }
         }
         assert_eq!(
             prefix().unwrap().fields(),

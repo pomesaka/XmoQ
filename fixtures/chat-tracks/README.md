@@ -33,14 +33,14 @@ Columns are separated by a tab. A text column holds a JSON string literal, so th
 
 ## `names.tsv`
 
-What a namespace, or a track, of the chat is read as: the participant whose `said` it is, the room whose `lines` it is, or nobody's. A room is `<kind>/<room>`, the kind `broadcast` or `meeting` (`Room`, `crates/chat-tracks/src/names.rs`). Read by `xmoq-chat-tracks` (`names.rs`), and by `@xmoq/chat` (`test/names.test.ts`), which makes the names of the rows of a participant and of a room's lines and reads none. A field that is not UTF-8 is nobody's, a case of the Rust test itself.
+What a namespace, or a track, of the chat is read as: the participant it is, a participant's track (`said`, `reacted`), a room's track (`lines`, `reactions`, `present`), or nobody's. `reacted` is a track a participant need not publish (decided on 2026-10-26): one that does not (a viewer of the terminal, an agent) answers its SUBSCRIBE with `DOES_NOT_EXIST`, and is not asked for it again until it announces its namespace again. A room is `<kind>/<room>`, the kind `broadcast` or `meeting` (`Room`, `crates/chat-tracks/src/names.rs`). Read by `xmoq-chat-tracks` (`names.rs`), and by `@xmoq/chat` (`test/names.test.ts`), which makes the names of the rows of a participant and of a room's lines and reads none. A field that is not UTF-8 is nobody's, a case of the Rust test itself.
 
 | Column | What it is |
 |---|---|
 | 1 | The case |
 | 2 | The fields of the namespace, a JSON array of strings |
 | 3 | The track's name, where the row is of a track; `-` where it is of a namespace |
-| 4 | What it is read as: `participant <kind>/<room> <name>` for a namespace, `lines <kind>/<room>` for a track, `none` for nobody's |
+| 4 | What it is read as: `participant <kind>/<room> <name>` for a namespace; `<track> <kind>/<room>` for a track of a room, `<track> <kind>/<room> <name>` for a track of a participant; `none` for nobody's |
 
 ## `reacted.tsv`, `reactions.tsv` and `present.tsv`
 

@@ -65,7 +65,7 @@ impl Default for Settings {
     }
 }
 
-/// How a subscription to a participant's `said` came to an end.
+/// How a subscription to a track of a participant came to an end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionEnd {
     /// It ended (`PUBLISH_DONE`, its stream), was not answered in time, or
@@ -76,6 +76,12 @@ pub enum SubscriptionEnd {
     Refused(Option<u64>),
     /// It was cancelled for a malformed track.
     Malformed,
+    /// It was refused with `DOES_NOT_EXIST`, for a track a participant need
+    /// not publish (`reacted`, decided on 2026-10-26). WHY not asked again:
+    /// a viewer or an agent that publishes none would be asked
+    /// `--ask-again-times` times each, as many requests as the room has
+    /// people, for nothing.
+    NotPublished,
 }
 
 /// When one participant is asked again.
@@ -116,7 +122,7 @@ impl SaidAgain {
         let pause = match over {
             SubscriptionEnd::Ended => self.rule.after_end(),
             SubscriptionEnd::Refused(named) => self.rule.after_refusal(named),
-            SubscriptionEnd::Malformed => return None,
+            SubscriptionEnd::Malformed | SubscriptionEnd::NotPublished => return None,
         };
         self.asked += 1;
         Some(pause)
@@ -139,7 +145,7 @@ mod tests {
         let ended = |pause| Step::Over(SubscriptionEnd::Ended, pause);
         let refused = |named, pause| Step::Over(SubscriptionEnd::Refused(named), pause);
         let settings = |times, pause_ms| Settings { times, pause_ms };
-        let cases: [(&str, Settings, Vec<Step>); 8] = [
+        let cases: [(&str, Settings, Vec<Step>); 9] = [
             ("an end", Settings::default(), vec![ended(Some(1000))]),
             (
                 "a refusal that says do not retry: after the pause of an end",
@@ -155,6 +161,11 @@ mod tests {
                 "a malformed track is not asked again",
                 Settings::default(),
                 vec![Step::Over(SubscriptionEnd::Malformed, None)],
+            ),
+            (
+                "a track a participant need not publish, which is not there, is not asked again",
+                Settings::default(),
+                vec![Step::Over(SubscriptionEnd::NotPublished, None)],
             ),
             (
                 "two times, then not again",
