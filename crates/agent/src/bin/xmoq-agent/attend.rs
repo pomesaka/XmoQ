@@ -18,7 +18,8 @@ use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{
-    ControlEvent, PeerRequestId, RequestEvent, RequestId, Role, Session, Transport,
+    ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequestId, RequestEvent, RequestId,
+    Role, Session, Transport,
 };
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::wt::WtConnection;
@@ -343,17 +344,21 @@ const SPEECH_FETCH_MOST: usize = 1024 * 1024;
 /// fetched: as many as of the chat's lines by default. **Provisional.**
 const SPEECH_CATCH_UP: u64 = xmoq_viewer::chat_track::CATCH_UP_LINES;
 
-/// Writes what came of the transcript.
+/// Writes what came of the transcript; a piece also tells the meeting who
+/// spoke.
 fn on_speech(reader: &mut Reader, out: FollowOut<Speech>) {
     match out {
-        FollowOut::Item(piece) => reader.tell(&Event::Speech {
-            number: piece.number,
-            from: piece.from,
-            text: piece.text,
-            start_us: piece.start_us,
-            end_us: piece.end_us,
-            read_at: piece.at,
-        }),
+        FollowOut::Item(piece) => {
+            crate::meeting::spoke(reader, &piece.from);
+            reader.tell(&Event::Speech {
+                number: piece.number,
+                from: piece.from,
+                text: piece.text,
+                start_us: piece.start_us,
+                end_us: piece.end_us,
+                read_at: piece.at,
+            });
+        }
         FollowOut::Gap(gap) => reader.error(format!(
             "speech: {} pieces not fetched ({} to {})",
             gap.before - gap.after - 1,
@@ -361,6 +366,18 @@ fn on_speech(reader: &mut Reader, out: FollowOut<Speech>) {
             gap.before - 1
         )),
         FollowOut::Note(note) => eprintln!("{note}"),
+    }
+}
+
+/// Writes what came of the chat on tracks.
+fn on_chat(reader: &mut Reader, out: Out) {
+    match out {
+        Out::Line(line) => reader.tell(&chat_event(line)),
+        Out::Gap(gap) => reader.tell(&Event::ChatGap {
+            after: gap.after,
+            before: gap.before,
+        }),
+        Out::Note(note) => eprintln!("{note}"),
     }
 }
 
@@ -721,9 +738,6 @@ pub async fn attend(
             came = on(speech.as_mut().map(Follower::next)) => {
                 if let Some(follower) = speech.as_mut() {
                     for out in follower.on(&mut session, came).await? {
-                        if let FollowOut::Item(piece) = &out {
-                            crate::meeting::spoke(reader, &piece.from);
-                        }
                         on_speech(reader, out);
                     }
                     remember_speech(reader, place, follower);
@@ -731,11 +745,7 @@ pub async fn attend(
             }
             came = tracks.next() => {
                 for out in chat.tracks.on(&mut session, came).await? {
-                    match out {
-                        Out::Line(line) => reader.tell(&chat_event(line)),
-                        Out::Gap(gap) => reader.tell(&Event::ChatGap { after: gap.after, before: gap.before }),
-                        Out::Note(note) => eprintln!("{note}"),
-                    }
+                    on_chat(reader, out);
                 }
                 reader.had = chat.tracks.last_shown();
             }
@@ -773,7 +783,6 @@ pub async fn attend(
                 {
                     if let Some(follower) = speech.as_mut() {
                         if let Some(piece) = follower.live(header.group_id, &object.payload) {
-                            crate::meeting::spoke(reader, &piece.from);
                             on_speech(reader, FollowOut::Item(piece));
                         }
                         remember_speech(reader, place, follower);
@@ -803,13 +812,17 @@ pub async fn attend(
                     if speech.as_ref().and_then(Follower::fetch_request_id) == Some(header.request_id) =>
                 {
                     session.on_fetch_stream(header.request_id)?;
-                    if let Some(follower) = speech.as_ref() {
+                    if let Some(follower) = speech.as_mut() {
                         follower.read_fetch(stream, header);
                     }
                 }
                 Some(UniEvent::FetchOpened { stream, header }) => {
-                    session.on_fetch_stream(header.request_id)?;
                     drop(stops.take_fetch_body(stream));
+                    // Its stream is let go of: the FETCH is over once
+                    // it was answered too.
+                    if let FetchStreamOpened::Fetch(request) = session.on_fetch_stream(header.request_id)? {
+                        session.on_fetch_stream_closed(request);
+                    }
                 }
                 Some(UniEvent::Failed(error)) => return Err(error.into()),
                 // WHY the requests end at once, where §3.6 recommends
@@ -818,6 +831,39 @@ pub async fn attend(
                 Some(UniEvent::Control(message)) => {
                     if let ControlEvent::GoAway(go_away) = session.on_control_message(message)? {
                         break Ended::Moved(new_url(&go_away));
+                    }
+                }
+                // §2.4.2: "it MUST cancel any corresponding subscription or
+                // fetches for that Track". Each that was of it is asked for
+                // again on the session, as after any end of it.
+                Some(UniEvent::TrackMalformed { header, error, .. }) => {
+                    eprintln!("XMOQ_AGENT_TRACK_MALFORMED track_alias={} error={error}", header.track_alias);
+                    events.stop_streams_of(header.track_alias, &stops);
+                    for cancelled in session.cancel_malformed(header.track_alias) {
+                        // The reader takes no PUBLISH of the relay.
+                        let (MalformedRequest::Subscribe(request) | MalformedRequest::Fetch(request)) = cancelled else {
+                            continue;
+                        };
+                        if video.as_mut().is_ok_and(|video| video.malformed(request))
+                            || meeting.as_mut().is_some_and(|in_meeting| in_meeting.malformed(request))
+                        {
+                            continue;
+                        }
+                        if let Some(outs) = chat.tracks.malformed(request) {
+                            for out in outs {
+                                on_chat(reader, out);
+                            }
+                            reader.had = chat.tracks.last_shown();
+                        } else if let Some(outs) = speech.as_mut().and_then(|follower| follower.malformed(request)) {
+                            for out in outs {
+                                on_speech(reader, out);
+                            }
+                            if let Some(follower) = speech.as_ref() {
+                                remember_speech(reader, place, follower);
+                            }
+                        } else {
+                            eprintln!("XMOQ_AGENT_TRACK_MALFORMED_UNCLAIMED request_id={}", request.value());
+                        }
                     }
                 }
                 Some(other) => bail!("not expected of the relay: {other:?}"),

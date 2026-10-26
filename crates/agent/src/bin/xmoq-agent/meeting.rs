@@ -11,7 +11,7 @@ use xmoq_again::AskAgain;
 use xmoq_agent::events::{Event, ParticipantState};
 use xmoq_moqt::RequestFault;
 use xmoq_moqt::name::TrackNamespace;
-use xmoq_moqt::session::{RequestEvent, Session};
+use xmoq_moqt::session::{RequestEvent, RequestId, Session};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
 use xmoq_viewer::meeting::{self, Limits, Meeting, Video as VideoStep};
@@ -277,6 +277,14 @@ impl InMeeting {
             }
         }
         Ok(None)
+    }
+
+    /// The session ended `request` for a malformed track: whether it was of
+    /// the video of the participant watched ([`Video::malformed`]).
+    pub fn malformed(&mut self, request: RequestId) -> bool {
+        self.video
+            .as_mut()
+            .is_some_and(|video| video.malformed(request))
     }
 
     fn let_go_of_video(&mut self) {

@@ -5,14 +5,14 @@
 use anyhow::{Result, anyhow};
 use xmoq_moqt::RequestFault;
 use xmoq_moqt::name::TrackNamespace;
-use xmoq_moqt::session::Session;
+use xmoq_moqt::session::{RequestId, Session};
 use xmoq_viewer_io::kept::{Asking, Came, KeptTrack, Said, Wanted};
 use xmoq_viewer_io::session::{CatalogKept, Events, Requests};
 
 /// The video of one session.
 pub struct Video {
     kept: KeptTrack,
-    _catalog: CatalogKept,
+    catalog: CatalogKept,
 }
 
 impl Video {
@@ -58,7 +58,7 @@ impl Video {
         };
         Ok(Self {
             kept: KeptTrack::subscribed(wanted, asking_with, subscription),
-            _catalog: catalog,
+            catalog,
         })
     }
 
@@ -84,29 +84,49 @@ impl Video {
         session: &mut Session,
         came: Came,
     ) -> Result<Option<String>, RequestFault> {
-        match self.kept.on(session, came)? {
-            Some(Said::Subscribed { track_alias }) => {
-                eprintln!("XMOQ_AGENT_VIDEO_AGAIN track_alias={track_alias}");
-            }
-            Some(Said::Ended { how, pause_ms }) => {
-                eprintln!("XMOQ_AGENT_VIDEO_ENDED {how}; asking again in {pause_ms} ms");
-            }
-            Some(Said::Refused {
-                error_code,
-                pause_ms,
-            }) => eprintln!(
-                "XMOQ_AGENT_VIDEO_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"
-            ),
-            // Not asked again on this session, as `again_after_failure` says.
-            Some(Said::GivenUp(why) | Said::Failed { why, .. }) => return Ok(Some(why)),
-            Some(Said::Other(other)) => eprintln!("XMOQ_AGENT_VIDEO_SAID {other:?}"),
-            None => {}
+        Ok(self.kept.on(session, came)?.and_then(tell))
+    }
+
+    /// The session ended `request` for a malformed track
+    /// (`Session::cancel_malformed`): whether it was of this video, its
+    /// subscription (asked for again) or its catalog's SUBSCRIBE or FETCH.
+    pub fn malformed(&mut self, request: RequestId) -> bool {
+        if let Some(said) = self.kept.malformed(request) {
+            tell(said);
+            return true;
         }
-        Ok(None)
+        let of_the_catalog = self.catalog.malformed(request);
+        if of_the_catalog {
+            eprintln!("XMOQ_AGENT_CATALOG_MALFORMED");
+        }
+        of_the_catalog
     }
 
     /// Gives the subscription up, where there is one.
     pub fn cancel(self) {
         self.kept.cancel();
     }
+}
+
+/// Writes what became of the video; `Some` with why where it is given up on
+/// the session.
+fn tell(said: Said) -> Option<String> {
+    match said {
+        Said::Subscribed { track_alias } => {
+            eprintln!("XMOQ_AGENT_VIDEO_AGAIN track_alias={track_alias}");
+        }
+        Said::Ended { how, pause_ms } => {
+            eprintln!("XMOQ_AGENT_VIDEO_ENDED {how}; asking again in {pause_ms} ms");
+        }
+        Said::Refused {
+            error_code,
+            pause_ms,
+        } => eprintln!(
+            "XMOQ_AGENT_VIDEO_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"
+        ),
+        // Not asked again on this session, as `again_after_failure` says.
+        Said::GivenUp(why) | Said::Failed { why, .. } => return Some(why),
+        Said::Other(other) => eprintln!("XMOQ_AGENT_VIDEO_SAID {other:?}"),
+    }
+    None
 }
