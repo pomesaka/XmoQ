@@ -7,7 +7,7 @@ mise run chat -- --url https://127.0.0.1:4443/ --cert-sha256 <64 hex digits> --s
 mise run chat -- --url ... --cert-sha256 ... --store room-r.sqlite3 --room r     # one room alone
 ```
 
-It runs until Ctrl-C or SIGTERM, and connects again after a session ends: a second later at first, twice as long after each session that lasted less than a minute, up to 30 seconds (`backoff` of [`xmoq-track-serving`](../track-serving/README.md), provisional). After a GOAWAY it connects to the New Session URI at once, once in a row, and keeps to it (`NextTry`); a GOAWAY on the stream of one of its requests has that request asked again on the session. With a flag it does not know it prints its flags (`USAGE` in `src/args.rs`).
+It runs until Ctrl-C or SIGTERM, and connects again after a session ends: a second after its try at first, twice as long after each session that lasted less than a minute, up to 30 seconds (`Pause::SERVING` of [`xmoq-again`](../again/README.md), provisional). After a GOAWAY it connects to the New Session URI at once, once in a row, and keeps to it (`NextSession`); a GOAWAY on the stream of one of its requests has that request asked again on the session. With a flag it does not know it prints its flags (`USAGE` in `src/args.rs`).
 
 **Building it needs a C compiler**: `rusqlite` builds SQLite from the source it carries (`bundled`), through the `cc` crate. On macOS the Command Line Tools' `clang`, on Linux `gcc`.
 
@@ -20,7 +20,7 @@ It runs until Ctrl-C or SIGTERM, and connects again after a session ends: a seco
 
 `sentAt` is the sender's clock and `at` the gatherer's when it took the line, both milliseconds since the Unix epoch. `name` is the fourth field of the sender's namespace. The gatherer passes members of `said` it does not know over.
 
-The gatherer asks with one `SUBSCRIBE_NAMESPACE` for `xmoq/chat`, or, with `--room`, one for `xmoq/chat/<room>` for each room given, and follows every namespace of exactly four fields `xmoq`, `chat`, room, name, the last two UTF-8; any other is passed over. Where such a request ends (the relay ends it, or tells more namespaces than the session keeps), it is asked for again alone, after the same growing wait, and the session goes on. It subscribes to each participant's `said` with the Largest Object filter (§5.1.2), so that a relay that still has older lines does not pass them again to a gatherer that connected anew; why, at `subscribe` in `src/bin/xmoq-chat/session.rs`. `NAMESPACE_DONE` ends the subscription to that participant.
+The gatherer asks with one `SUBSCRIBE_NAMESPACE` for `xmoq/chat`, or, with `--room`, one for `xmoq/chat/<room>` for each room given, and follows every namespace of exactly four fields `xmoq`, `chat`, room, name, the last two UTF-8; any other is passed over. Where such a request ends (the relay ends it, or tells more namespaces than the session keeps), it is asked for again alone, after the same growing wait, and the session goes on; where it is refused, after the wait its Retry Interval names, by the rule every client asks by (`AskAgain` of [`xmoq-again`](../again/README.md)). It subscribes to each participant's `said` with the Largest Object filter (§5.1.2), so that a relay that still has older lines does not pass them again to a gatherer that connected anew; why, at `subscribe` in `src/bin/xmoq-chat/session.rs`. `NAMESPACE_DONE` ends the subscription to that participant.
 
 **A participant whose subscription ends or is refused while its namespace stays announced is subscribed to again** (`ASKING_AGAIN ... in_ms=N`), by the rule every client of this repository asks by ([`xmoq-again`](../again/README.md), the same as `@xmoq/moqt`'s): after 1 second (`--ask-again-ms`) where it ended or the refusal names no time, after the Retry Interval where it names one (no less than 100 ms, doubling while refusals follow each other, up to 5 s; no more than 30 s), also after a Retry Interval of 0. Its next lines are taken; what it said meanwhile is not fetched (decided on 2026-10-24). After `--ask-again-times` times in a row without a subscription that was established (30), it is not asked again until its NAMESPACE comes again (`NOT_ASKING_AGAIN`), nor after a track that was malformed. Why, at the top of `src/said_again.rs`.
 
@@ -81,7 +81,7 @@ The library (`src/*.rs`) decides, and does no input or output; the tests are the
 | `gather` | What becomes of a line: taken, or dropped and why; who is followed, and whether a room is left empty |
 | `args` | What the flags mean, the limits, and which rooms are taken |
 
-How long to wait before connecting again and before asking for a `SUBSCRIBE_NAMESPACE` again, what a FETCH gets, and the tasks that write each stream are [`xmoq-track-serving`](../track-serving/README.md)'s.
+How long to wait before connecting again and before asking for a `SUBSCRIBE_NAMESPACE` again is [`xmoq-again`](../again/README.md)'s; what a FETCH gets, and the tasks that write each stream, are [`xmoq-track-serving`](../track-serving/README.md)'s.
 
 The binary (`src/bin/xmoq-chat/`): `session.rs` (the requests and the answers on one session), `storage.rs` (the store), `main.rs` (connecting again, and the signals). What it prints, one line for each thing it does (`WATCHING`, `PARTICIPANT`, `SUBSCRIBED`, `ROOM_PUBLISHED`, `LINE`, `LINE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/chat.ts` waits for.
 

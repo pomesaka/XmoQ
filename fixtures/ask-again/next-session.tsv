@@ -1,6 +1,9 @@
-a session that ends is followed by the next after the pause	2000	ended=2000 ended=2000
-a session that cannot be made is tried again after the same pause	500	failed=500 failed=500 ended=500
-a GOAWAY has the next session made at once	2000	moved=0 ended=2000
-GOAWAYs in a row: at once once, then after the pause, then at once again	2000	moved=0 moved=2000 moved=0 moved=2000
-a session that ends or fails after a GOAWAY is followed after the pause, and the next GOAWAY at once	2000	moved=0 failed=2000 moved=0 ended=2000 moved=0
-a session longer than the pause is followed at once	2000	ended@5000=0 ended@500=1500 failed@2000=0 moved@100=0 moved@100=1900
+a session that ends is followed by the next after the pause	2000,2000,-	ended=2000 ended=2000
+a session that cannot be made is tried again after the same pause	500,500,-	failed=500 failed=500 ended=500
+a GOAWAY has the next session made at once	2000,2000,-	moved=0 ended=2000
+GOAWAYs in a row: at once once, then after the pause, then at once again	2000,2000,-	moved=0 moved=2000 moved=0 moved=2000
+a session that ends or fails after a GOAWAY is followed after the pause, and the next GOAWAY at once	2000,2000,-	moved=0 failed=2000 moved=0 ended=2000 moved=0
+a session longer than the pause is followed at once	2000,2000,-	ended@5000=0 ended@500=1500 failed@2000=0 moved@100=0 moved@100=1900
+a pause that grows doubles from one try to the next, up to its longest	1000,4000,-	failed=1000 failed=2000 failed=4000 failed=4000
+a session that lasted long enough has the pause begin again from the first	1000,30000,60000	failed=1000 failed=2000 failed@60000=0 failed=2000
+the try at once after a GOAWAY leaves the pause as it was	1000,30000,60000	failed=1000 moved=0 failed=2000
