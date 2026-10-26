@@ -22,7 +22,6 @@ The table shows them; it does not make them the same.
 |---|---|
 | `peer-requests` | The TypeScript session reads 64 request streams of the peer at once, and an accepted subscription keeps its stream open (`maxPeerRequests`, `packages/moqt/src/core/limits.ts`) |
 | `subgroup-stream-bytes`, `object-payload-bytes`, `object-properties-bytes` | The Rust session bounds an Object by the bytes one subgroup stream holds undecoded (`StreamConfig`); the TypeScript one bounds its payload and its properties apart |
-| `session-subgroup-bytes` | The TypeScript session has no bound on what all its subgroup streams hold together: a known gap of [the implementation notes](../../docs/moqt-implementation-notes.md) |
 | `peer-fetches`, `held-fetch-updates` | The Rust session leaves them to its caller: `xmoq-track-serving` and the relay |
 | `ended-by-publish-done` | The Rust session remembers requests it ended with PUBLISH_DONE by a count, for the messages that cross the end; the TypeScript one keeps such a request until the peer ends its stream, at most `peerStreamEndTimeoutMs` (3 s), and forgets it then |
 | `held-before-setup` | The TypeScript session holds nothing before the peer's SETUP: it takes what comes at once |

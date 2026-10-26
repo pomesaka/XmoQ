@@ -424,6 +424,8 @@ export interface SubgroupStreamDecoder {
 	 * serialized Object is a PROTOCOL_VIOLATION.
 	 */
 	finish(): MoqtError | undefined;
+	/** The bytes it holds of an Object or a header that has not arrived whole. */
+	undecodedBytes(): number;
 }
 
 /**
@@ -595,5 +597,6 @@ export function createSubgroupStreamDecoder(
 			}
 			return undefined;
 		},
+		undecodedBytes: () => pending.length + payloadReceived,
 	};
 }

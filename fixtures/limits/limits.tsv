@@ -24,7 +24,7 @@ peer-requests	256	64
 subgroup-stream-bytes	1048576	-
 object-payload-bytes	-	16777216
 object-properties-bytes	-	65536
-session-subgroup-bytes	4194304	-
+session-subgroup-bytes	4194304	4194304
 peer-fetches	-	32
 held-fetch-updates	-	64
 ended-by-publish-done	64	-

@@ -70,7 +70,7 @@ const OURS: Record<string, number | undefined> = {
 	"subgroup-stream-bytes": undefined,
 	"object-payload-bytes": defaults.maxObjectPayloadLength,
 	"object-properties-bytes": defaults.maxObjectPropertiesLength,
-	"session-subgroup-bytes": undefined,
+	"session-subgroup-bytes": defaults.maxSessionSubgroupBytes,
 	"peer-fetches": defaults.maxPeerFetches,
 	"held-fetch-updates": MAX_HELD_FETCH_UPDATES,
 	"ended-by-publish-done": undefined,

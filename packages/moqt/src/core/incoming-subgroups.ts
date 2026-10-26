@@ -122,6 +122,8 @@ interface SubgroupStream {
 	/** Objects held until the Track Alias is established. */
 	held: HeldObject[];
 	heldBytes: number;
+	/** What its decoder held after the last bytes, counted in `undecodedBytes` of the session. */
+	undecoded: number;
 	/** The stream was stopped; what still arrives on it is dropped. */
 	abandoned: boolean;
 }
@@ -301,6 +303,15 @@ export function createIncomingSubgroups(
 	 */
 	const earlyClosed = new Map<bigint, bigint>();
 	let heldBytes = 0;
+	/** What the decoders of all the streams hold together (`maxSessionSubgroupBytes`). */
+	let undecodedBytes = 0;
+
+	/** Counts what the stream's decoder holds now; whether the session holds no more than it may. */
+	const setUndecoded = (stream: SubgroupStream, bytes: number): boolean => {
+		undecodedBytes += bytes - stream.undecoded;
+		stream.undecoded = bytes;
+		return undecodedBytes <= limits.maxSessionSubgroupBytes;
+	};
 
 	const dropHeld = (stream: SubgroupStream): void => {
 		heldBytes -= stream.heldBytes;
@@ -363,6 +374,7 @@ export function createIncomingSubgroups(
 		out: SessionOutput[],
 	): void => {
 		dropHeld(stream);
+		setUndecoded(stream, 0);
 		stream.abandoned = true;
 		out.push({ type: "stop-sending", peerStream, code });
 	};
@@ -390,6 +402,21 @@ export function createIncomingSubgroups(
 	 */
 	const idleStream: StopReason = {
 		reason: "no bytes within the idle time",
+		code: StreamResetErrorCode.INTERNAL_ERROR,
+	};
+
+	/**
+	 * A stream whose bytes would take the session over
+	 * `maxSessionSubgroupBytes`, stopped as the Rust session stops it
+	 * (`session_buffer_limit`, `crates/moqt-io/src/streams.rs`). WHY the
+	 * stream that goes over, and not the session: the peer broke no rule
+	 * (§11.4 bounds nothing of the kind), and the other streams go on. WHY
+	 * INTERNAL_ERROR: as for an idle stream above, no code of §3.3.3 is for
+	 * it, and EXCESSIVE_LOAD says the endpoint is overloaded, which it would
+	 * be only if it went on.
+	 */
+	const tooMuchHeld: StopReason = {
+		reason: "the subgroup streams of the session hold too much",
 		code: StreamResetErrorCode.INTERNAL_ERROR,
 	};
 
@@ -562,6 +589,7 @@ export function createIncomingSubgroups(
 				requestId: undefined,
 				held: [],
 				heldBytes: 0,
+				undecoded: 0,
 				abandoned: false,
 			});
 		},
@@ -599,6 +627,12 @@ export function createIncomingSubgroups(
 				// Delivering an Object can end the subscription and stop this stream.
 				if (stream.abandoned) return;
 			}
+			if (failure === undefined && !fin) {
+				if (!setUndecoded(stream, stream.decoder.undecodedBytes())) {
+					abandon(peerStream, stream, tooMuchHeld, out);
+					return;
+				}
+			}
 			if (failure !== undefined) {
 				const { requestId } = stream;
 				const malformed = failure.scope === "track";
@@ -619,6 +653,7 @@ export function createIncomingSubgroups(
 				return;
 			}
 			if (!fin) return;
+			setUndecoded(stream, 0);
 			const finError = stream.decoder.finish();
 			if (finError !== undefined) throw finError;
 			const { header } = stream;
@@ -641,6 +676,7 @@ export function createIncomingSubgroups(
 			const stream = streams.get(peerStream);
 			if (stream === undefined || stream.abandoned) return false;
 			if (stream.header !== undefined) return false;
+			setUndecoded(stream, 0);
 			streams.delete(peerStream);
 			return true;
 		},
@@ -650,6 +686,7 @@ export function createIncomingSubgroups(
 			if (stream === undefined) return;
 			streams.delete(peerStream);
 			if (stream.abandoned) return;
+			setUndecoded(stream, 0);
 			dropHeld(stream);
 			if (stream.requestId !== undefined) countEnded(stream, out);
 			else if (stream.header !== undefined) {
@@ -707,6 +744,7 @@ export function createIncomingSubgroups(
 			earlyClosed.clear();
 			finishedHeld = [];
 			heldBytes = 0;
+			undecodedBytes = 0;
 		},
 	};
 }
