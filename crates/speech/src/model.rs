@@ -4,8 +4,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// The model used where none is named. Kept the same as `DEFAULT_MODEL` in
-/// `crates/speech/scripts/fetch-model.sh`, which fetches it, and with the
-/// file `demo/serve.ts` looks for.
+/// `crates/speech/scripts/fetch-model.sh`, which fetches it. An application
+/// that wants another names it with `--model`.
 ///
 /// WHY `small-q5_1` (decided on 2026-10-25 by the project owner, for
 /// meetings and broadcasts alike): one transcriber on a Mac kept up with 8

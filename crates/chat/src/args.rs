@@ -15,7 +15,7 @@ xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file
                     without one that was established (30; 0 never; up to 10000)
 --ask-again-ms      the pause before it is, after an end or a refusal that names no time or 0
                     (1000; 100 to 60000)
---auth-key-hex      the key the relay checks tokens with; the gatherer makes its own tokens (the demo alone)";
+--auth-key-hex      the key the relay checks tokens with; the gatherer makes its own tokens (where the relay shares its key with it)";
 
 use crate::said_again::{PAUSE_MS_LEAST, PAUSE_MS_MOST, Settings, TIMES_MOST};
 
@@ -74,9 +74,9 @@ pub struct Args {
     pub rooms: Rooms,
     /// `--auth-key-hex`: the key the relay checks the tokens of the room
     /// with (its flag of that name), with which the gatherer makes tokens
-    /// of its own for its SETUP and its requests. Only for the demo with
-    /// `--auth` (provisional): a gatherer of a room's real service
-    /// would get its tokens from where the room's are made.
+    /// of its own for its SETUP and its requests: for a relay that shares
+    /// its key with the gatherer (provisional). A gatherer of a room's real
+    /// service would get its tokens from where the room's are made.
     pub auth_key: Option<Vec<u8>>,
     /// `--ask-again-times`, `--ask-again-ms`.
     pub ask_again: Settings,

@@ -37,7 +37,7 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
 --readers       threads that read pieces at once: of whisper, each a state of its own over the one model;
                 of command, each runs the program for a piece of its own (1; 1 to 8)
 --tracks        broadcasts listened to at once; one more is passed over (16; 1 to 100)
---auth-key-hex  the relay's key, of which tokens are made: for the demo alone";
+--auth-key-hex  the relay's key, of which tokens are made: where the relay shares its key with the transcriber";
 
 /// The most `--namespace` flags: as many `SUBSCRIBE_NAMESPACE` requests as
 /// the own relay lets one session have open
@@ -104,8 +104,8 @@ pub struct Args {
     /// `--tracks`.
     pub tracks: usize,
     /// `--auth-key-hex`: the key the relay checks tokens with, of which the
-    /// transcriber makes its own, as the gatherer of the chat does. Only for
-    /// the demo (provisional).
+    /// transcriber makes its own, as the gatherer of the chat does: for a
+    /// relay that shares its key with the transcriber (provisional).
     pub auth_key: Option<Vec<u8>>,
 }
 
