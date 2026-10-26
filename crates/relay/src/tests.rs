@@ -4438,7 +4438,7 @@ mod rendezvous {
 #[test]
 fn the_relay_leaves_its_request_streams_room_in_the_connection_window() {
     let limits = crate::quic_limits(
-        &xmoq_moqt_io::StreamConfig::default(),
+        &HubConfig::default(),
         Duration::from_secs(6),
         xmoq_moqt_io::wt::Congestion::default(),
     );
@@ -4448,6 +4448,28 @@ fn the_relay_leaves_its_request_streams_room_in_the_connection_window() {
         (limits.stream_receive_window, limits.receive_window),
         (131_072, 9_830_400)
     );
+}
+
+/// The peer may open as many bidirectional streams as the relay reads
+/// request streams at once, which is above the requests a session may have
+/// open, so that one more is read and refused with `EXCESSIVE_LOAD`
+/// (`request_streams_for`): with the default (256), and with
+/// `--peer-requests-per-session` 10.
+#[test]
+fn the_peer_may_open_a_request_stream_more_than_it_may_have_requests_open() {
+    let cases = [(None, 264), (Some(10), 18)];
+    for (peer_requests, bidirectional) in cases {
+        let mut config = HubConfig::default();
+        if let Some(peer_requests) = peer_requests {
+            config.limits_of_a_session.peer_requests = peer_requests;
+        }
+        let limits = crate::quic_limits(
+            &config,
+            Duration::from_secs(6),
+            xmoq_moqt_io::wt::Congestion::default(),
+        );
+        assert_eq!(limits.max_bi_streams, bidirectional, "{peer_requests:?}");
+    }
 }
 
 /// A relay with another relay above it (`xmoq-relay-core`'s `upstream.rs`),

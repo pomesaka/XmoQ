@@ -23,7 +23,7 @@ use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::GroupOrder;
 use xmoq_moqt::printable::{printable, printable_namespace};
-use xmoq_moqt::session::{MAX_PEER_REQUESTS, MAX_UNANSWERED_UPDATES};
+use xmoq_moqt::session::MAX_UNANSWERED_UPDATES;
 use xmoq_moqt::{TerminationCode, stream_reset_code};
 use xmoq_moqt_io::{
     Connection, FetchBody, FetchChunk, FetchStreamWriter, IncomingStreams, OutgoingEvent,
@@ -72,7 +72,9 @@ use xmoq_relay_core::{
 /// defaults are far larger than everything else here.
 #[derive(Clone)]
 pub struct HubConfig {
-    /// Limits and deadlines of the streams of each session.
+    /// Limits and deadlines of the streams of each session. Its
+    /// `max_request_streams` is not read: [`Self::stream_config`] has it
+    /// follow [`Self::limits_of_a_session`].
     pub streams: StreamConfig,
     /// Sessions served at once. One more is sent to [`Self::when_full`]
     /// where there is one, and closed at once otherwise. **Provisional:
@@ -215,9 +217,10 @@ pub struct HubConfig {
     /// writes may keep alive of Groups its caches have let go of.
     pub held_beyond_cache_bytes: Option<usize>,
     /// What one session may have at the relay
-    /// ([`xmoq_relay_core::LimitsOfASession`]). Where `peer_requests` is
-    /// changed, [`StreamConfig::max_request_streams`] of [`Self::streams`]
-    /// is to be [`request_streams_for`] it.
+    /// ([`xmoq_relay_core::LimitsOfASession`]). The hub reads as many
+    /// request streams at once as `peer_requests` asks
+    /// ([`request_streams_for`]), whatever
+    /// [`StreamConfig::max_request_streams`] of [`Self::streams`] says.
     pub limits_of_a_session: LimitsOfASession,
     /// `xmoq_relay_core::MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER`, where it is
     /// not the relay's own number: how many requests the relay has open on
@@ -351,16 +354,28 @@ fn sent_away_url(url: &str) -> String {
 /// WHY above the session's limit on open requests: a request over that
 /// limit has to be read to be answered with `EXCESSIVE_LOAD`. With fewer
 /// readers than requests it would wait unanswered instead.
-#[must_use]
-pub fn request_streams_for(peer_requests: usize) -> usize {
+fn request_streams_for(peer_requests: usize) -> usize {
     peer_requests.saturating_add(8)
+}
+
+impl HubConfig {
+    /// [`Self::streams`] with as many request streams read at once as
+    /// [`Self::limits_of_a_session`] lets a session have open
+    /// ([`request_streams_for`]): what the hub reads with, and what the QUIC
+    /// limits of the relay's connections follow.
+    #[must_use]
+    pub fn stream_config(&self) -> StreamConfig {
+        StreamConfig {
+            max_request_streams: request_streams_for(self.limits_of_a_session.peer_requests),
+            ..self.streams.clone()
+        }
+    }
 }
 
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
             streams: StreamConfig {
-                max_request_streams: request_streams_for(MAX_PEER_REQUESTS),
                 // The relay counts an Object as received from its first
                 // byte (§5.1.2): `Event::ObjectBegun`.
                 report_objects_begun: true,
@@ -1082,6 +1097,8 @@ pub fn spawn_with_upstream<C: Connection>(
     config: HubConfig,
     upstream: Option<Upstream<C>>,
 ) -> (HubHandle<C>, JoinHandle<()>) {
+    let mut config = config;
+    config.streams = config.stream_config();
     let (events, inbox) = mpsc::channel(config.event_queue_len);
     let mut relay = Relay::new(&config.implementation);
     if let Some(upstream) = &upstream {
