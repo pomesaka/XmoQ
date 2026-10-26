@@ -2046,7 +2046,7 @@ fn a_publish_whose_stream_is_finished_without_publish_done_is_over() {
 /// finished can have no `PUBLISH_DONE` (§5.1).
 #[test]
 fn a_request_the_peers_fin_ends_has_the_relays_direction_finished() {
-    let watching = || {
+    let with_a_namespace_subscription = || {
         let mut relay = relay();
         relay.step(Event::RequestOpened {
             session: ALICE,
@@ -2060,7 +2060,11 @@ fn a_request_the_peers_fin_ends_has_the_relays_direction_finished() {
         relay
     };
     let cases = [
-        ("SUBSCRIBE_NAMESPACE", watching(), ALICE),
+        (
+            "SUBSCRIBE_NAMESPACE",
+            with_a_namespace_subscription(),
+            ALICE,
+        ),
         ("PUBLISH", relay_with_track(), PUBLISHER),
     ];
     for (name, mut relay, session) in cases {
