@@ -252,7 +252,10 @@
 //                 own relay. The first Object has the LOC Timestamp 2^60
 //                 microseconds, which a decoder of WebCodecs does not take
 //                 (`MAX_DECODER_TIME` of `@xmoq/media`); the 50 after it have
-//                 the driver's clock, 20 ms apart. Written before the first
+//                 the driver's clock, 20 ms apart, each sent once the viewer
+//                 decoded the one before: each is a stream of its own, which
+//                 can come before the one before it, and this run is not of
+//                 the order. Written before the first
 //                 run: **the viewer drops the first as `beyond-time`, decodes
 //                 the 50 after it**, received 51, and its decoder does not
 //                 fail. Before `MAX_DECODER_TIME` was looked at, the first
@@ -1365,6 +1368,15 @@ async function audioBeyondTime(): Promise<string> {
 	const now = BigInt(Date.now()) * 1000n;
 	for (let piece = 1; piece <= AUDIO_AFTER_BEYOND; piece++) {
 		await send(piece, now + BigInt(piece) * 20_000n);
+		// The next goes once this one is decoded (the top of this file).
+		await withTimeout(
+			viewer.evaluate(
+				([pieces, timeoutMs]) => window.xmoqOwn.audioReport(pieces, timeoutMs),
+				[piece, PLAY_TIMEOUT_MS] satisfies [number, number],
+			),
+			`the viewer to decode piece ${piece}`,
+			PLAY_TIMEOUT_MS + 5_000,
+		);
 	}
 	const report = await withTimeout(
 		viewer.evaluate(
