@@ -23,6 +23,8 @@
 pub mod client;
 #[cfg(test)]
 mod contract;
+#[cfg(test)]
+mod limits;
 pub mod memory;
 pub mod refuse;
 mod streams;
