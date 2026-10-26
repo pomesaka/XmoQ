@@ -3508,21 +3508,20 @@ async fn run_own_request<C: Connection>(
         Opening::Ended => return,
     };
     let mut reader = RequestReader::new(recv, &trace, &label);
-    let mut updates_written = true;
-    for update in early.updates {
-        if send_message(&mut send, &update, &trace, &label)
-            .await
-            .is_err()
-        {
-            updates_written = false;
-            break;
-        }
-    }
+    let (mut updates_written, ended_early) =
+        match write_updates(&mut send, early.updates, (&trace, &label), &mut ending).await {
+            UpdateWrite::Written => (true, None),
+            UpdateWrite::Failed => (false, None),
+            UpdateWrite::Ended(how) => (true, Some(how)),
+        };
     let mut updates_open = early.open;
     // Each direction is reported once; after that only the other one, and the
     // hub's word, are waited for. What an ending means is the relay's to say.
     let (mut reading, mut watching) = (true, true);
     let how = loop {
+        if let Some(how) = ended_early {
+            break how;
+        }
         if !updates_written {
             break None;
         }
@@ -3533,10 +3532,15 @@ async fn run_own_request<C: Connection>(
             update = updates.recv(), if updates_open => match update {
                 // WHY waited for here, and the peer's messages not read
                 // meanwhile: a `REQUEST_UPDATE` is short, and a write in a
-                // task of its own would let a `Finish` overtake it.
+                // task of its own would let a `Finish` overtake it. The
+                // ending is raced with it all the same, so that a `Cancel`
+                // gets through a write the peer gives no credit for.
                 Some(update) => {
-                    updates_written =
-                        send_message(&mut send, &update, &trace, &label).await.is_ok();
+                    match write_update(&mut send, &update, (&trace, &label), &mut ending).await {
+                        UpdateWrite::Written => {}
+                        UpdateWrite::Failed => updates_written = false,
+                        UpdateWrite::Ended(how) => break how,
+                    }
                 }
                 None => updates_open = false,
             },
@@ -3572,7 +3576,9 @@ async fn run_own_request<C: Connection>(
         }
     };
     if matches!(how, Some(OwnRequestEnding::Finish)) {
-        // The updates the hub sent before it finished go first.
+        // The updates the hub sent before it finished go first. WHY not
+        // raced with anything: nothing is to overtake a FIN, and a session
+        // that goes closes the connection, which ends the write.
         while let Ok(update) = updates.try_recv() {
             if send_message(&mut send, &update, &trace, &label)
                 .await
@@ -3583,6 +3589,53 @@ async fn run_own_request<C: Connection>(
         }
     }
     end_own_request(send, reader, how);
+}
+
+/// What became of writing an update of a request the relay opened.
+enum UpdateWrite {
+    Written,
+    /// The peer stopped the stream or is gone, which is reported apart.
+    Failed,
+    /// The hub ended the request first; `None`: the session is going.
+    Ended(Option<OwnRequestEnding>),
+}
+
+/// Writes an update of a request the relay opened, unless the hub ends the
+/// request first: a write the peer gives no credit for would hold a
+/// `Cancel` back until the session ends.
+async fn write_update<S: SendStream>(
+    send: &mut S,
+    update: &ControlMessage,
+    (trace, label): (&Trace, &str),
+    ending: &mut oneshot::Receiver<OwnRequestEnding>,
+) -> UpdateWrite {
+    let write = send_message(send, update, trace, label);
+    tokio::pin!(write);
+    tokio::select! {
+        biased;
+        how = &mut *ending => UpdateWrite::Ended(how.ok()),
+        written = &mut write => match written {
+            Ok(()) => UpdateWrite::Written,
+            Err(_) => UpdateWrite::Failed,
+        },
+    }
+}
+
+/// [`write_update`] for each of `updates`, in their order, until one is
+/// not written.
+async fn write_updates<S: SendStream>(
+    send: &mut S,
+    updates: VecDeque<ControlMessage>,
+    (trace, label): (&Trace, &str),
+    ending: &mut oneshot::Receiver<OwnRequestEnding>,
+) -> UpdateWrite {
+    for update in updates {
+        match write_update(send, &update, (trace, label), ending).await {
+            UpdateWrite::Written => {}
+            other => return other,
+        }
+    }
+    UpdateWrite::Written
 }
 
 /// Ends the stream of a request the relay opened as the hub said; `None`:
