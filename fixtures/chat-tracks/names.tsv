@@ -1,0 +1,14 @@
+a participant of a broadcast	["xmoq","chat","broadcast","demo","alice"]	-	participant broadcast/demo alice
+a participant of a meeting	["xmoq","chat","meeting","m1","bob"]	-	participant meeting/m1 bob
+the namespace of a room	["xmoq","chat","broadcast","demo"]	-	none
+a field more	["xmoq","chat","broadcast","demo","alice","x"]	-	none
+a kind this side does not know	["xmoq","chat","talk","demo","alice"]	-	none
+no kind: the old form	["xmoq","chat","demo","alice"]	-	none
+another prefix	["xmoq","talk","broadcast","demo","alice"]	-	none
+another first field	["moq","chat","broadcast","demo","alice"]	-	none
+the lines of a broadcast's room	["xmoq","chat","broadcast","demo"]	lines	lines broadcast/demo
+the lines of a meeting's room	["xmoq","chat","meeting","m1"]	lines	lines meeting/m1
+another track of a room	["xmoq","chat","broadcast","demo"]	said	none
+lines of a participant	["xmoq","chat","broadcast","demo","alice"]	lines	none
+lines of a kind this side does not know	["xmoq","chat","talk","demo"]	lines	none
+lines without a kind: the old form	["xmoq","chat","demo"]	lines	none

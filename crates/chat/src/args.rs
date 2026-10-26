@@ -3,11 +3,12 @@
 /// How the gatherer is started without a flag it does not know.
 pub const USAGE: &str = "\
 xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file>
-          [--room <room>]... [--text-bytes <n>] [--lines-per-second <n>] [--fetch-lines <n>]
+          [--room <kind>/<room>]... [--text-bytes <n>] [--lines-per-second <n>] [--fetch-lines <n>]
           [--ask-again-times <n>] [--ask-again-ms <ms>] [--auth-key-hex <hex>]
 
 --store             the SQLite file of the history, this gatherer's alone; made where it is not there
---room              a room to gather, up to 8; every room without it
+--room              a room to gather, broadcast/<room> or meeting/<room>, up to 8; every room of both
+                    kinds without it
 --text-bytes        the most bytes of UTF-8 the text of a line may have (512; 1 to 8192)
 --lines-per-second  the most lines one person may say in any second; the line over it is dropped (5; 1 to 1000)
 --fetch-lines       the most lines one FETCH gets, the latest of a longer range (1000; 1 to 100000)
@@ -16,6 +17,8 @@ xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file
 --ask-again-ms      the pause before it is, after an end or a refusal that names no time or 0
                     (1000; 100 to 60000)
 --auth-key-hex      the key the relay checks tokens with; the gatherer makes its own tokens (where the relay shares its key with it)";
+
+use xmoq_chat_tracks::names::Room;
 
 use crate::said_again::{PAUSE_MS_LEAST, PAUSE_MS_MOST, Settings, TIMES_MOST};
 
@@ -40,18 +43,18 @@ pub const ROOMS_MOST: usize = 8;
 /// Which rooms the gatherer takes, publishes and answers FETCH for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rooms {
-    /// Every room: one `SUBSCRIBE_NAMESPACE` for `xmoq/chat`.
+    /// Every room of both kinds: one `SUBSCRIBE_NAMESPACE` for `xmoq/chat`.
     Every,
-    /// These (`--room`), one `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<room>`
-    /// each, in the order given (decided on 2026-10-24: a gatherer for
-    /// each room).
-    These(Vec<String>),
+    /// These (`--room`), one `SUBSCRIBE_NAMESPACE` for
+    /// `xmoq/chat/<kind>/<room>` each, in the order given (decided on
+    /// 2026-10-24: a gatherer for each room).
+    These(Vec<Room>),
 }
 
 impl Rooms {
     /// Whether the gatherer takes this room.
     #[must_use]
-    pub fn has(&self, room: &str) -> bool {
+    pub fn has(&self, room: &Room) -> bool {
         match self {
             Self::Every => true,
             Self::These(rooms) => rooms.iter().any(|each| each == room),
@@ -129,7 +132,7 @@ where
 pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut url, mut cert_sha256, mut store) = (None, None, None);
     let mut limits = Limits::default();
-    let mut rooms: Vec<String> = Vec::new();
+    let mut rooms: Vec<Room> = Vec::new();
     let mut auth_key = None;
     let mut ask_again = Settings::default();
     while let Some(flag) = flags.next() {
@@ -146,13 +149,15 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--store" => store = Some(value),
             "--room" => {
-                if xmoq_chat_tracks::names::room_namespace(&value).is_err() {
-                    return Err(format!("--room {value:?} is no field of a namespace"));
-                }
-                if rooms.contains(&value) {
+                let room = Room::parse(&value)
+                    .filter(|room| xmoq_chat_tracks::names::room_namespace(room).is_ok())
+                    .ok_or_else(|| {
+                        format!("--room {value:?} is no broadcast/<room> or meeting/<room>")
+                    })?;
+                if rooms.contains(&room) {
                     return Err(format!("--room {value:?} is given twice"));
                 }
-                rooms.push(value);
+                rooms.push(room);
             }
             "--text-bytes" => limits.text_bytes = number_within(&flag, &value, TEXT_BYTES_MOST)?,
             "--lines-per-second" => {
@@ -224,8 +229,16 @@ mod tests {
 
     fn these(rooms: &[&str]) -> Args {
         Args {
-            rooms: Rooms::These(rooms.iter().map(ToString::to_string).collect()),
+            rooms: Rooms::These(rooms.iter().map(|room| broadcast(room)).collect()),
             ..with(Limits::default())
+        }
+    }
+
+    /// The room of a broadcast that `name` names.
+    fn broadcast(name: &str) -> Room {
+        Room {
+            kind: xmoq_chat_tracks::names::Kind::Broadcast,
+            name: name.to_string(),
         }
     }
 
@@ -240,21 +253,49 @@ mod tests {
             "s",
         ];
         let eight = [
-            "--room", "1", "--room", "2", "--room", "3", "--room", "4", "--room", "5", "--room",
-            "6", "--room", "7", "--room", "8",
+            "--room",
+            "broadcast/1",
+            "--room",
+            "broadcast/2",
+            "--room",
+            "broadcast/3",
+            "--room",
+            "broadcast/4",
+            "--room",
+            "broadcast/5",
+            "--room",
+            "broadcast/6",
+            "--room",
+            "broadcast/7",
+            "--room",
+            "broadcast/8",
         ];
-        let nine: Vec<&str> = eight.iter().copied().chain(["--room", "9"]).collect();
-        let cases: [(&str, &[&str], Result<Args, String>); 6] = [
+        let nine: Vec<&str> = eight
+            .iter()
+            .copied()
+            .chain(["--room", "broadcast/9"])
+            .collect();
+        let meeting = Args {
+            rooms: Rooms::These(vec![Room {
+                kind: xmoq_chat_tracks::names::Kind::Meeting,
+                name: "m".to_string(),
+            }]),
+            ..with(Limits::default())
+        };
+        let cases: [(&str, &[&str], Result<Args, String>); 9] = [
             ("none: every room", &[], Ok(with(Limits::default()))),
-            ("one", &["--room", "r"], Ok(these(&["r"]))),
+            ("one", &["--room", "broadcast/r"], Ok(these(&["r"]))),
+            ("one of a meeting", &["--room", "meeting/m"], Ok(meeting)),
             ("eight, the most", &eight, Ok(these(&["1", "2", "3", "4", "5", "6", "7", "8"]))),
             (
                 "nine",
                 &nine,
                 Err("--room is given 9 times: a session at the own relay may have 8 SUBSCRIBE_NAMESPACE requests; run another gatherer, with a store of its own, for the rest".to_string()),
             ),
-            ("twice the same", &["--room", "r", "--room", "r"], Err("--room \"r\" is given twice".to_string())),
-            ("an empty one", &["--room", ""], Err("--room \"\" is no field of a namespace".to_string())),
+            ("twice the same", &["--room", "broadcast/r", "--room", "broadcast/r"], Err("--room \"broadcast/r\" is given twice".to_string())),
+            ("an empty one", &["--room", ""], Err("--room \"\" is no broadcast/<room> or meeting/<room>".to_string())),
+            ("one without its kind", &["--room", "r"], Err("--room \"r\" is no broadcast/<room> or meeting/<room>".to_string())),
+            ("a kind there is not", &["--room", "talk/r"], Err("--room \"talk/r\" is no broadcast/<room> or meeting/<room>".to_string())),
         ];
         for (case, extra, expected) in cases {
             let flags: Vec<&str> = base.iter().chain(extra).copied().collect();
@@ -264,29 +305,39 @@ mod tests {
 
     #[test]
     fn which_rooms_are_taken() {
-        let cases: [(&str, Rooms, &str, bool); 4] = [
-            ("every room", Rooms::Every, "r", true),
+        let meeting = |name: &str| Room {
+            kind: xmoq_chat_tracks::names::Kind::Meeting,
+            name: name.to_string(),
+        };
+        let cases: [(&str, Rooms, Room, bool); 5] = [
+            ("every room", Rooms::Every, broadcast("r"), true),
             (
                 "a room given",
-                Rooms::These(vec!["r".to_string(), "s".to_string()]),
-                "s",
+                Rooms::These(vec![broadcast("r"), broadcast("s")]),
+                broadcast("s"),
                 true,
             ),
             (
                 "a room not given",
-                Rooms::These(vec!["r".to_string()]),
-                "s",
+                Rooms::These(vec![broadcast("r")]),
+                broadcast("s"),
                 false,
             ),
             (
                 "a prefix of a room given",
-                Rooms::These(vec!["room".to_string()]),
-                "roo",
+                Rooms::These(vec![broadcast("room")]),
+                broadcast("roo"),
+                false,
+            ),
+            (
+                "the same name of the other kind",
+                Rooms::These(vec![broadcast("r")]),
+                meeting("r"),
                 false,
             ),
         ];
         for (case, rooms, room, expected) in cases {
-            assert_eq!(rooms.has(room), expected, "{case}");
+            assert_eq!(rooms.has(&room), expected, "{case}");
         }
     }
 

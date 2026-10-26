@@ -49,7 +49,9 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use xmoq_chat::gather::{Admitted, Gatherer};
-use xmoq_chat_tracks::names::{self, Person, lines_track, person_of, room_of_lines, said_track};
+use xmoq_chat_tracks::names::{
+    self, Person, Room, lines_track, person_of, room_of_lines, said_track,
+};
 use xmoq_chat_tracks::payloads::Line;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
@@ -157,7 +159,7 @@ enum Purpose {
     /// The SUBSCRIBE for `said` of a participant.
     Said(Person),
     /// The PUBLISH of `lines` of a room.
-    Lines(String),
+    Lines(Room),
 }
 
 /// A request of the gatherer, by the token its task reports with.
@@ -199,7 +201,7 @@ struct Gathering<'a> {
     next_token: u64,
     heard: mpsc::Sender<(u64, Heard)>,
     /// The `lines` of each room the gatherer numbers.
-    rooms: HashMap<String, Publication<Line>>,
+    rooms: HashMap<Room, Publication<Line>>,
     next_track_alias: u64,
     /// Each participant that is followed.
     people: HashMap<Person, Followed>,
@@ -217,7 +219,7 @@ struct Gathering<'a> {
     requests: PeerRequests,
     /// The PUBLISH requests that wait for their streams to be closed, by
     /// token, with their room, and where the loop is told that they are.
-    ending: HashMap<u64, (String, Ending)>,
+    ending: HashMap<u64, (Room, Ending)>,
     drained: mpsc::Sender<u64>,
     watches: Vec<Watch>,
     /// The rooms the gatherer takes (`--room`).
@@ -252,7 +254,7 @@ fn prefixes(taken: &Taken) -> Result<Vec<TrackNamespace>> {
         Taken::Every => vec![names::prefix()?],
         Taken::These(rooms) => rooms
             .iter()
-            .map(|room| names::room_namespace(room))
+            .map(names::room_namespace)
             .collect::<Result<_, _>>()?,
     })
 }
@@ -545,10 +547,10 @@ impl Gathering<'_> {
     // transcriber has a copy of each.
     /// Publishes the `lines` of a room, unless they are published or wait
     /// to be published again.
-    fn publish(&mut self, room: &str) -> Result<()> {
+    fn publish(&mut self, room: &Room) -> Result<()> {
         let entry = self
             .rooms
-            .entry(room.to_string())
+            .entry(room.clone())
             .or_insert_with(|| Publication::new(LINES_WAITING_FOR_A_ROOM));
         if !entry.to_publish(Instant::now()) {
             return Ok(());
@@ -571,15 +573,13 @@ impl Gathering<'_> {
         let Ok((request, message)) = published else {
             // The PUBLISH before it still waits for its streams to be
             // closed; it is published again once that is over.
-            println!("ROOM_NOT_PUBLISHED room={room:?} why=\"the PUBLISH before is ending\"");
+            println!(
+                "ROOM_NOT_PUBLISHED room={room:?} why=\"the PUBLISH before is ending\"",
+                room = room.to_string()
+            );
             return Ok(());
         };
-        let token = self.open(
-            Purpose::Lines(room.to_string()),
-            request,
-            message,
-            &parameters,
-        );
+        let token = self.open(Purpose::Lines(room.clone()), request, message, &parameters);
         if let Some(entry) = self.rooms.get_mut(room) {
             entry.published(token, track_alias);
         }
@@ -588,11 +588,11 @@ impl Gathering<'_> {
 
     /// The PUBLISH of a room is over; the next line publishes it again.
     /// Does nothing where `token` is no longer the room's PUBLISH.
-    fn unpublish(&mut self, room: &str, token: u64, failed: bool) {
+    fn unpublish(&mut self, room: &Room, token: u64, failed: bool) {
         if let Some(entry) = self.rooms.get_mut(room)
             && entry.unpublished(token, failed, Instant::now())
         {
-            println!("ROOM_UNPUBLISHED room={room:?}");
+            println!("ROOM_UNPUBLISHED room={room:?}", room = room.to_string());
         }
     }
 
@@ -600,7 +600,7 @@ impl Gathering<'_> {
     /// now on, and its `PUBLISH_DONE` goes once the streams being sent are
     /// closed ([`Self::publish_done`]). `forget`: the room is numbered no
     /// more, and its state goes.
-    fn end_publish(&mut self, room: &str, status: u64, forget: bool) {
+    fn end_publish(&mut self, room: &Room, status: u64, forget: bool) {
         let ending = self.rooms.get_mut(room).and_then(|entry| entry.end(status));
         if forget {
             self.rooms.remove(room);
@@ -613,7 +613,7 @@ impl Gathering<'_> {
         tokio::spawn(async move {
             let _ = drained.send(when_drained.await).await;
         });
-        self.ending.insert(ending.token, (room.to_string(), ending));
+        self.ending.insert(ending.token, (room.clone(), ending));
     }
 
     /// Every stream of an ending PUBLISH is closed: its `PUBLISH_DONE`, with
@@ -635,7 +635,8 @@ impl Gathering<'_> {
             self.let_go(token, Command::Finish);
             println!(
                 "ROOM_DONE room={room:?} status={:#x} streams={streams}",
-                ending.status
+                ending.status,
+                room = room.to_string()
             );
         }
         if self.gatherer.rooms.knows(&room) {
@@ -676,7 +677,8 @@ impl Gathering<'_> {
             // A subscription to the track is there already.
             println!(
                 "NOT_SUBSCRIBED room={:?} name={:?} why=\"a subscription is there already\"",
-                person.room, person.name
+                person.room.to_string(),
+                person.name
             );
             return Ok(());
         };
@@ -693,7 +695,8 @@ impl Gathering<'_> {
     fn said_over(&mut self, person: &Person, over: SubscriptionEnd, why: &str) {
         println!(
             "NOT_SUBSCRIBED room={:?} name={:?} why={why:?}",
-            person.room, person.name
+            person.room.to_string(),
+            person.name
         );
         // Not followed: its NAMESPACE_DONE came.
         let Some(followed) = self.people.get_mut(person) else {
@@ -704,7 +707,8 @@ impl Gathering<'_> {
             Some(pause) => {
                 println!(
                     "ASKING_AGAIN room={:?} name={:?} in_ms={pause}",
-                    person.room, person.name
+                    person.room.to_string(),
+                    person.name
                 );
                 self.asking_again.insert(
                     person.clone(),
@@ -713,7 +717,8 @@ impl Gathering<'_> {
             }
             None => println!(
                 "NOT_ASKING_AGAIN room={:?} name={:?}",
-                person.room, person.name
+                person.room.to_string(),
+                person.name
             ),
         }
     }
@@ -721,7 +726,11 @@ impl Gathering<'_> {
     /// The subscription to a participant's `said` is established: the
     /// Objects that came before it are taken.
     fn said_established(&mut self, person: &Person) -> Result<()> {
-        println!("SUBSCRIBED room={:?} name={:?}", person.room, person.name);
+        println!(
+            "SUBSCRIBED room={:?} name={:?}",
+            person.room.to_string(),
+            person.name
+        );
         if let Some(followed) = self.people.get_mut(person) {
             followed.again.subscribed();
         }
@@ -792,7 +801,8 @@ impl Gathering<'_> {
             if !self.gatherer.rooms.add(&person.room, next) {
                 println!(
                     "PARTICIPANT_IGNORED room={:?} name={:?} why=too-many-rooms",
-                    person.room, person.name
+                    person.room.to_string(),
+                    person.name
                 );
                 return Ok(());
             }
@@ -809,7 +819,11 @@ impl Gathering<'_> {
         }
         match admitted {
             Admitted::Now => {
-                println!("PARTICIPANT room={:?} name={:?}", person.room, person.name);
+                println!(
+                    "PARTICIPANT room={:?} name={:?}",
+                    person.room.to_string(),
+                    person.name
+                );
                 self.subscribe(&person)
             }
             // Followed, and with no subscription in this session.
@@ -825,7 +839,8 @@ impl Gathering<'_> {
             Admitted::TooManyPeople | Admitted::NoRoom => {
                 println!(
                     "PARTICIPANT_IGNORED room={:?} name={:?} why=too-many-people",
-                    person.room, person.name
+                    person.room.to_string(),
+                    person.name
                 );
                 Ok(())
             }
@@ -849,13 +864,15 @@ impl Gathering<'_> {
             Left::RoomStays => {
                 println!(
                     "PARTICIPANT_GONE room={:?} name={:?}",
-                    person.room, person.name
+                    person.room.to_string(),
+                    person.name
                 );
             }
             Left::RoomEmpty => {
                 println!(
                     "PARTICIPANT_GONE room={:?} name={:?}",
-                    person.room, person.name
+                    person.room.to_string(),
+                    person.name
                 );
                 self.end_publish(&person.room, publish_done_status::TRACK_ENDED, true);
             }
@@ -870,7 +887,7 @@ impl Gathering<'_> {
             Err(dropped) => {
                 println!(
                     "LINE_DROPPED room={:?} name={:?} why={} dropped={}",
-                    person.room,
+                    person.room.to_string(),
                     person.name,
                     dropped.word(),
                     self.gatherer.dropped(dropped.word())
@@ -882,13 +899,14 @@ impl Gathering<'_> {
             self.gatherer.rooms.give_back(&person.room, line.number);
             println!(
                 "LINE_DROPPED room={:?} name={:?} why=store error={error:#}",
-                person.room, person.name
+                person.room.to_string(),
+                person.name
             );
             return Ok(());
         }
         println!(
             "LINE room={:?} number={} name={:?} text_bytes={}",
-            person.room,
+            person.room.to_string(),
             line.number,
             line.name,
             line.text.len()
@@ -898,7 +916,7 @@ impl Gathering<'_> {
 
     /// Sends a line that is kept on the `lines` of its room, or has it wait
     /// for the room's `PUBLISH_OK`.
-    fn send_live(&mut self, room: &str, line: Line) -> Result<()> {
+    fn send_live(&mut self, room: &Room, line: Line) -> Result<()> {
         let is_live = self.rooms.get(room).is_some_and(Publication::live);
         if !is_live {
             self.publish(room)?;
@@ -913,7 +931,8 @@ impl Gathering<'_> {
         if self.sends.len() >= LINES_BEING_SENT {
             println!(
                 "LINE_NOT_SENT room={room:?} number={} why=too-many-at-once",
-                line.number
+                line.number,
+                room = room.to_string()
             );
             return Ok(());
         }
@@ -1117,7 +1136,10 @@ impl Gathering<'_> {
             Purpose::Said(person) => self.said_over(person, SubscriptionEnd::Ended, why),
             Purpose::Lines(room) => {
                 let room = room.clone();
-                println!("ROOM_NOT_PUBLISHED room={room:?} why={why:?}");
+                println!(
+                    "ROOM_NOT_PUBLISHED room={room:?} why={why:?}",
+                    room = room.to_string()
+                );
                 self.unpublish(&room, token, true);
                 self.ending.remove(&token);
             }
@@ -1182,10 +1204,9 @@ impl Gathering<'_> {
                     .map(|entry| entry.established(token, forward))
                     .unwrap_or_default();
                 let largest = self.gatherer.rooms.largest(&room);
-                println!(
-                    "ROOM_PUBLISHED room={room:?} forward={forward} largest={}",
-                    largest.map_or_else(|| "none".to_string(), |largest| largest.to_string())
-                );
+                let largest = largest.map_or_else(|| "none".to_string(), |at| at.to_string());
+                let shown = room.to_string();
+                println!("ROOM_PUBLISHED room={shown:?} forward={forward} largest={largest}");
                 for line in waiting {
                     self.send_live(&room, line)?;
                 }
@@ -1230,7 +1251,9 @@ impl Gathering<'_> {
             (Purpose::Said(person), RequestEvent::SubscriptionDone(done)) => {
                 println!(
                     "SUBSCRIPTION_DONE room={:?} name={:?} status={:#x}",
-                    person.room, person.name, done.status_code
+                    person.room.to_string(),
+                    person.name,
+                    done.status_code
                 );
                 self.let_go(token, Command::Finish);
                 self.said_over(person, SubscriptionEnd::Ended, "PUBLISH_DONE");
@@ -1302,7 +1325,10 @@ impl Gathering<'_> {
         let planned = match plan(start, end, largest, most, group_order) {
             Ok(planned) => planned,
             Err(code) => {
-                println!("FETCH_REFUSED room={room:?} error_code={code:#x}");
+                println!(
+                    "FETCH_REFUSED room={room:?} error_code={code:#x}",
+                    room = room.to_string()
+                );
                 return self.refuse(asked, code);
             }
         };
@@ -1315,11 +1341,17 @@ impl Gathering<'_> {
             // §10.6.2: "EXCESSIVE_LOAD: The responder is overloaded and
             // cannot process the request at this time" (`MAX_BYTES_HELD`).
             Ok(None) => {
-                println!("FETCH_REFUSED room={room:?} error_code=0x9 why=too-many-bytes-held");
+                println!(
+                    "FETCH_REFUSED room={room:?} error_code=0x9 why=too-many-bytes-held",
+                    room = room.to_string()
+                );
                 return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);
             }
             Err(error) => {
-                println!("FETCH_REFUSED room={room:?} error_code=0x0 store_error={error:#}");
+                println!(
+                    "FETCH_REFUSED room={room:?} error_code=0x0 store_error={error:#}",
+                    room = room.to_string()
+                );
                 return self.refuse(asked, request_error_code::INTERNAL_ERROR);
             }
         };
@@ -1353,6 +1385,7 @@ impl Gathering<'_> {
                 || "none".to_string(),
                 |(location, _)| location.group.to_string()
             ),
+            room = room.to_string()
         );
         Ok(())
     }

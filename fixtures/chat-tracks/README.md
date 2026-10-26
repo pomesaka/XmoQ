@@ -1,4 +1,4 @@
-# The payloads of the chat's tracks
+# The chat's tracks: their names and payloads
 
 The JSON a participant writes on `said` and the gatherer writes on `lines` (decided on 2026-10-24), and what a reader makes of it. `xmoq-chat-tracks` (`crates/chat-tracks/src/payloads.rs`) and `@xmoq/chat` (`packages/chat/test/payloads.test.ts`) read both tables in their tests, so that the same bytes give the same line, or the same reason why there is none. Written by hand from the decision; no other implementation writes these payloads.
 
@@ -30,3 +30,14 @@ Columns are separated by a tab. A text column holds a JSON string literal, so th
 | 7 | The `at` read |
 | 8 | Why it is no line: `not-an-object`, `name`, `text`, `sent-at`, `at` |
 | 9 | `yes` where writing what was read gives the payload back, byte for byte |
+
+## `names.tsv`
+
+What a namespace, or a track, of the chat is read as: the participant whose `said` it is, the room whose `lines` it is, or nobody's. A room is `<kind>/<room>`, the kind `broadcast` or `meeting` (`Room`, `crates/chat-tracks/src/names.rs`). Read by `xmoq-chat-tracks` (`names.rs`); `@xmoq/chat` does not read it yet. A field that is not UTF-8 is nobody's, a case of the Rust test itself.
+
+| Column | What it is |
+|---|---|
+| 1 | The case |
+| 2 | The fields of the namespace, a JSON array of strings |
+| 3 | The track's name, where the row is of a track; `-` where it is of a namespace |
+| 4 | What it is read as: `participant <kind>/<room> <name>` for a namespace, `lines <kind>/<room>` for a track, `none` for nobody's |
