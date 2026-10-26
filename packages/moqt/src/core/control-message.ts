@@ -453,11 +453,16 @@ function decodeEndOfTrack(value: number): boolean {
 const DYNAMIC_GROUPS = 0x30n;
 /** The Track Property DEFAULT PUBLISHER PRIORITY (§12.4). */
 const DEFAULT_PUBLISHER_PRIORITY = 0x0en;
+/** The Track Property DEFAULT_PUBLISHER_GROUP_ORDER (§12.5). */
+const DEFAULT_PUBLISHER_GROUP_ORDER = 0x22n;
 
 /**
  * The Track Properties that end SUBSCRIBE_OK, PUBLISH, REQUEST_OK and
- * FETCH_OK. §12.6: "If an endpoint receives a value larger than 1, it MUST
- * close the session with PROTOCOL_VIOLATION." A DEFAULT PUBLISHER PRIORITY
+ * FETCH_OK. §12.5, of a DEFAULT_PUBLISHER_GROUP_ORDER other than Ascending
+ * (1) and Descending (2): "If an endpoint receives a value outside this
+ * range, it MUST close the session with PROTOCOL_VIOLATION." §12.6: "If an
+ * endpoint receives a value larger than 1, it MUST close the session with
+ * PROTOCOL_VIOLATION." A DEFAULT PUBLISHER PRIORITY
  * above 255 does the same: §12.4 has "Priorities above 255 are invalid" and
  * does not say what a receiver does with one, and this reads it as §12.5 and
  * §12.6 have it for their own properties, as moqtail 0.15.0 does. WHY NOT
@@ -483,6 +488,15 @@ function decodeTrackProperties(reader: ByteReader): KeyValuePair[] {
 		if (type === DEFAULT_PUBLISHER_PRIORITY && value > 255n) {
 			throw protocolViolation(
 				`DEFAULT PUBLISHER PRIORITY value ${value} is above 255`,
+			);
+		}
+		if (
+			type === DEFAULT_PUBLISHER_GROUP_ORDER &&
+			value !== 1n &&
+			value !== 2n
+		) {
+			throw protocolViolation(
+				`DEFAULT_PUBLISHER_GROUP_ORDER value ${value} is neither 1 nor 2`,
 			);
 		}
 	}

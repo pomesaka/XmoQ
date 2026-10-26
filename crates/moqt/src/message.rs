@@ -50,12 +50,17 @@ const SUBSCRIBE_TRACKS: u64 = 0x51;
 const DYNAMIC_GROUPS: u64 = 0x30;
 /// The Track Property DEFAULT PUBLISHER PRIORITY (§12.4).
 const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
+/// The Track Property `DEFAULT_PUBLISHER_GROUP_ORDER` (§12.5).
+const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
 
 /// Decodes the Track Properties that end `SUBSCRIBE_OK`, `PUBLISH`, `REQUEST_OK`
 /// and `FETCH_OK`.
 ///
-/// §12.6: "If an endpoint receives a value larger than 1, it MUST close the
-/// session with `PROTOCOL_VIOLATION`." A DEFAULT PUBLISHER PRIORITY above 255
+/// §12.5, of a `DEFAULT_PUBLISHER_GROUP_ORDER` other than Ascending (1) and
+/// Descending (2): "If an endpoint receives a value outside this range, it
+/// MUST close the session with `PROTOCOL_VIOLATION`." §12.6: "If an endpoint
+/// receives a value larger than 1, it MUST close the session with
+/// `PROTOCOL_VIOLATION`." A DEFAULT PUBLISHER PRIORITY above 255
 /// does the same: §12.4 has "Priorities above 255 are invalid" and does not
 /// say what a receiver does with one, and this reads it as §12.5 and §12.6
 /// have it for their own properties, as `moqtail` 0.15.0 does. WHY NOT refuse
@@ -85,6 +90,12 @@ pub(crate) fn decode_track_properties(reader: &mut Reader<'_>) -> ReadResult<Vec
                 return Err(
                     Error::ProtocolViolation("DEFAULT PUBLISHER PRIORITY is above 255").into(),
                 );
+            }
+            DEFAULT_PUBLISHER_GROUP_ORDER if !(1..=2).contains(&value) => {
+                return Err(Error::ProtocolViolation(
+                    "DEFAULT_PUBLISHER_GROUP_ORDER is neither 1 nor 2",
+                )
+                .into());
             }
             _ => {}
         }
@@ -1957,6 +1968,11 @@ pub(crate) mod tests {
             (
                 &[0x0e, 0x81, 0x00],
                 Error::ProtocolViolation("DEFAULT PUBLISHER PRIORITY is above 255"),
+            ),
+            // DEFAULT_PUBLISHER_GROUP_ORDER (0x22) = 3 (§12.5).
+            (
+                &[0x22, 0x03],
+                Error::ProtocolViolation("DEFAULT_PUBLISHER_GROUP_ORDER is neither 1 nor 2"),
             ),
         ];
         // (the type; the fields before the Track Properties)
