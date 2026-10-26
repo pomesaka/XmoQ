@@ -183,6 +183,12 @@ export function followTranscript(
 			const cancel = (): void => {
 				void subscription.cancel().catch(() => {});
 			};
+			// The signal can have aborted while the SUBSCRIBE waited for its
+			// answer: the subscription made after it is cancelled at once.
+			if (stop.signal.aborted) {
+				cancel();
+				return;
+			}
 			stop.signal.addEventListener("abort", cancel, { once: true });
 			again.subscribed();
 			changed({ following: true });
