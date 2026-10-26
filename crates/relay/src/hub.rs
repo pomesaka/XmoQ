@@ -2836,14 +2836,14 @@ impl<C: Connection> Hub<C> {
         else {
             return;
         };
-        let of_a_watch = matches!(
+        let of_a_namespace_subscription = matches!(
             command,
             RequestCommand::Send(ControlMessage::Namespace(_) | ControlMessage::NamespaceDone(_))
         );
         // Closed means the writer ended because the peer stopped the stream,
         // which it reports itself.
         if let Err(mpsc::error::TrySendError::Full(_)) = writer.commands.try_send(command) {
-            if of_a_watch {
+            if of_a_namespace_subscription {
                 self.reset_full_request(session, stream, pending);
                 return;
             }
@@ -3277,7 +3277,7 @@ async fn write_request<C: Connection>(
         };
         match command {
             Some(RequestCommand::Send(message)) => {
-                let of_a_watch = matches!(
+                let of_a_namespace_subscription = matches!(
                     message,
                     ControlMessage::Namespace(_) | ControlMessage::NamespaceDone(_)
                 );
@@ -3286,7 +3286,7 @@ async fn write_request<C: Connection>(
                 let written = send_message(&mut send, &message, &trace, &label).await;
                 // The relay sends the next ones of the SUBSCRIBE_NAMESPACE as
                 // these are written.
-                if of_a_watch && written.is_ok() {
+                if of_a_namespace_subscription && written.is_ok() {
                     let event = Event::NamespaceWritten { session, stream };
                     let _ = events.send(Envelope::Core(event)).await;
                 }

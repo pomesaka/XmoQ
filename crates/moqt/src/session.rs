@@ -135,13 +135,13 @@ enum Request {
     TrackStatus,
 }
 
-/// The namespaces a `SUBSCRIBE_NAMESPACE` of this endpoint keeps, that the
-/// peer named and has not withdrawn. One more ends the request
-/// ([`RequestEvent::TooManyNamespaces`]). Decided on 2026-10-24. WHY a limit: each is kept
-/// for its `NAMESPACE_DONE` (§10.18: "If a subscriber receives a
+/// The namespaces a `SUBSCRIBE_NAMESPACE` of this endpoint keeps, that the peer
+/// named and has not withdrawn. One more ends the request
+/// ([`RequestEvent::TooManyNamespaces`]). Decided on 2026-10-24. WHY a limit:
+/// each is kept for its `NAMESPACE_DONE` (§10.18: "If a subscriber receives a
 /// `NAMESPACE_DONE` before the corresponding NAMESPACE, it MUST close the
 /// session"), and the peer says how many there are. WHY 4,096: as many as the
-/// relay tells one request of (`MAX_NAMESPACES_OF_A_WATCH` of
+/// relay tells one request of (`MAX_NAMESPACES_OF_A_SUBSCRIPTION` of
 /// `xmoq-relay-core`).
 pub const MAX_NAMESPACES_OF_A_SUBSCRIPTION: usize = 4096;
 

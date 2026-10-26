@@ -13,7 +13,7 @@ use xmoq_chat_tracks::payloads::{Line, Malformed, read_said};
 /// and counted: it is not subscribed to, and nothing it says is taken.
 ///
 /// WHY 4,096: the most namespaces the own relay tells one
-/// `SUBSCRIBE_NAMESPACE` of (`MAX_NAMESPACES_OF_A_WATCH` of
+/// `SUBSCRIBE_NAMESPACE` of (`MAX_NAMESPACES_OF_A_SUBSCRIPTION` of
 /// `crates/relay-core/src/discovery.rs`), and the most a session of
 /// `xmoq-moqt` keeps of one. WHY a limit: each has a subscription and a
 /// window here, and the names are whoever announces them. **Provisional.**
