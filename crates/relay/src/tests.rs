@@ -887,6 +887,32 @@ async fn the_time_a_session_may_hold_nothing_begins_when_its_last_request_has_go
     );
 }
 
+/// A session that comes to hold nothing again and again has the hub start
+/// no task for it: a peer decides how often that is.
+#[tokio::test(start_paused = true)]
+async fn a_session_that_comes_to_hold_nothing_again_and_again_adds_no_task() {
+    // 30 s to hold nothing, longer than the turns below.
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    let mut peer = Peer::connect(&hub, true).await;
+    let mut announce_and_withdraw = async || {
+        let announced = peer.publish_namespace().await;
+        // CANCELLED (0x1) withdraws the namespace (§6.2).
+        announced.send.reset(0x1);
+        tokio::time::sleep(SOON).await;
+    };
+    announce_and_withdraw().await;
+    let tasks = alive_tasks();
+    for _ in 0..8 {
+        announce_and_withdraw().await;
+    }
+    assert_eq!(alive_tasks(), tasks);
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(
+        peer.connection.close_info().map(|close| close.code),
+        Some(0x0)
+    );
+}
+
 /// A hub that holds nothing.
 const NOTHING: Held = Held {
     sessions: 0,
