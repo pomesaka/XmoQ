@@ -17,15 +17,12 @@ use xmoq_moqt::session::{
 };
 use xmoq_moqt::{RequestFault, UsageError};
 use xmoq_moqt_io::refuse::{on_refused_closed, on_refused_message};
-use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, PeerRequestStreamEvent, SendStream as _, StreamStops, Trace, send_message,
+    Connection, PeerRequestStreamEvent, SendStream, StreamStops, Trace, send_message,
 };
 
 use crate::answers::{self, Answer, Answers, Bounds, Happened, Note, Over, Pace};
 use crate::fetch::Piece;
-
-type Send = <WtConnection as Connection>::Send;
 
 /// Why the session cannot go on after a request of the relay.
 #[derive(Debug)]
@@ -84,11 +81,11 @@ impl From<RequestFault> for RequestError {
 
 /// A FETCH of the relay for the client to answer ([`PeerRequests::answer`])
 /// or refuse ([`PeerRequests::refuse`]).
-pub struct AskedFetch {
+pub struct AskedFetch<S> {
     /// Its request stream.
     pub stream: u64,
     /// The sending half of it.
-    pub send: Send,
+    pub send: S,
     /// The request.
     pub request: PeerRequestId,
     /// The FETCH.
@@ -106,9 +103,8 @@ pub struct FetchAnswer {
     pub pieces: Vec<Piece>,
 }
 
-/// The requests of the relay on one session.
-// FIXME: generic over `Connection`, as `crate::answers` is, so that tests on
-// `MemoryConnection` reach it.
+/// The requests of the relay on one session, of any [`Connection`]: what
+/// is generic is the streams its methods are given.
 pub struct PeerRequests {
     answers: Answers,
     /// The requests the session keeps after the client ended them, refused
@@ -135,12 +131,12 @@ impl PeerRequests {
     /// # Errors
     ///
     /// Where the session cannot go on.
-    pub fn on_event(
+    pub fn on_event<S: SendStream>(
         &mut self,
         session: &mut Session,
         stops: &StreamStops,
-        event: PeerRequestStreamEvent<Send>,
-    ) -> Result<Option<AskedFetch>, RequestError> {
+        event: PeerRequestStreamEvent<S>,
+    ) -> Result<Option<AskedFetch<S>>, RequestError> {
         match event {
             PeerRequestStreamEvent::Opened {
                 stream,
@@ -209,7 +205,7 @@ impl PeerRequests {
         &mut self,
         session: &mut Session,
         stream: u64,
-        send: Send,
+        send: impl SendStream,
         request: PeerRequestId,
         code: u64,
     ) -> Result<(), RequestError> {
@@ -230,7 +226,7 @@ impl PeerRequests {
     pub fn refuse_fetch(
         &mut self,
         session: &mut Session,
-        asked: AskedFetch,
+        asked: AskedFetch<impl SendStream>,
         code: u64,
     ) -> Result<(), RequestError> {
         self.refuse(session, asked.stream, asked.send, asked.request, code)
@@ -263,11 +259,11 @@ impl PeerRequests {
     /// # Errors
     ///
     /// Where the session does not take the `FETCH_OK`.
-    pub fn answer(
+    pub fn answer<C: Connection>(
         &mut self,
-        connection: &Arc<WtConnection>,
+        connection: &Arc<C>,
         session: &mut Session,
-        asked: AskedFetch,
+        asked: AskedFetch<C::Send>,
         answer: FetchAnswer,
     ) -> Result<(), RequestError> {
         let AskedFetch {
@@ -321,11 +317,130 @@ impl PeerRequests {
 
     /// Writes the last message on a request stream of the relay, then a FIN
     /// (§3.3.2), in a task of its own.
-    fn reply(&mut self, mut send: Send, response: ControlMessage) {
+    fn reply(&mut self, mut send: impl SendStream, response: ControlMessage) {
         self.replies.spawn(async move {
             // An error means the relay is gone or stopped the stream.
             let _ = send_message(&mut send, &response, &Trace::default(), "reply").await;
             send.finish();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use xmoq_moqt::message::{FetchRange, Subscribe};
+    use xmoq_moqt::name::{FullTrackName, TrackNamespace};
+    use xmoq_moqt::session::{Role, Transport};
+    use xmoq_moqt_io::memory;
+    use xmoq_moqt_io::{RequestClose, RequestReader, RequestStreamEvent};
+
+    use super::*;
+    use crate::answers::{MAX_ANSWERED_AT_ONCE, SAY_QUEUE_OF_A_PAGE};
+
+    fn track() -> FullTrackName {
+        FullTrackName::new(
+            TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+            b"a".to_vec(),
+        )
+        .unwrap()
+    }
+
+    /// A SUBSCRIBE and a FETCH of the relay, with its first Request ID
+    /// (§10.1: a server's are odd).
+    fn subscribe() -> ControlMessage {
+        ControlMessage::Subscribe(Subscribe {
+            request_id: 1,
+            full_track_name: track(),
+            parameters: vec![],
+        })
+    }
+
+    fn fetch() -> ControlMessage {
+        ControlMessage::Fetch(Fetch {
+            request_id: 1,
+            range: FetchRange::Standalone {
+                full_track_name: track(),
+                start: Location {
+                    group: 0,
+                    object: 0,
+                },
+                end: Location {
+                    group: 1,
+                    object: 0,
+                },
+            },
+            parameters: vec![],
+        })
+    }
+
+    #[tokio::test]
+    async fn a_fetch_of_the_relay_is_handed_on_and_any_other_request_refused() {
+        // (case, the request, the code of its refusal; none: handed on)
+        let cases = [
+            ("a FETCH", fetch(), None),
+            (
+                "a SUBSCRIBE",
+                subscribe(),
+                Some(request_error_code::NOT_SUPPORTED),
+            ),
+        ];
+        for (case, request, refused) in cases {
+            let (client, relay) = memory::pair();
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            let mut requests = PeerRequests::new(Bounds {
+                at_once: MAX_ANSWERED_AT_ONCE,
+                bytes: 1024,
+                say_queue: SAY_QUEUE_OF_A_PAGE,
+            });
+            let (mut relay_send, relay_recv) = relay.open_bi().await.unwrap();
+            send_message(&mut relay_send, &request, &Trace::default(), "relay")
+                .await
+                .unwrap();
+            let (send, recv) = client.accept_bi().await.unwrap();
+            let mut reader = RequestReader::new(recv, &Trace::default(), "client");
+            let Ok(RequestStreamEvent::Message(first)) = reader.next_event().await else {
+                panic!("{case}: the request");
+            };
+            let event = PeerRequestStreamEvent::Opened {
+                stream: 0,
+                send,
+                first,
+            };
+            let asked = requests
+                .on_event(&mut session, &StreamStops::default(), event)
+                .unwrap();
+            match refused {
+                None => {
+                    let asked = asked.expect(case);
+                    assert_eq!((asked.stream, asked.fetch.request_id), (0, 1), "{case}");
+                }
+                Some(code) => {
+                    assert!(asked.is_none(), "{case}");
+                    // The refusal, then the client's FIN (§3.3.2).
+                    let mut relay_reader =
+                        RequestReader::new(relay_recv, &Trace::default(), "relay");
+                    let in_time = Duration::from_secs(5);
+                    let answer = tokio::time::timeout(in_time, relay_reader.next_event())
+                        .await
+                        .expect("in time")
+                        .unwrap();
+                    let RequestStreamEvent::Message(ControlMessage::RequestError(error)) = answer
+                    else {
+                        panic!("{case}: {answer:?}");
+                    };
+                    assert_eq!(error.error_code, code, "{case}");
+                    let end = tokio::time::timeout(in_time, relay_reader.next_event())
+                        .await
+                        .expect("in time")
+                        .unwrap();
+                    assert!(
+                        matches!(end, RequestStreamEvent::Closed(RequestClose::Fin)),
+                        "{case}: {end:?}"
+                    );
+                }
+            }
+        }
     }
 }

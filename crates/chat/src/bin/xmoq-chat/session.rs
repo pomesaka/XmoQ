@@ -1253,7 +1253,7 @@ impl Gathering<'_> {
 
     /// A FETCH of the relay: for a range of the `lines` of a room, which is
     /// answered from the store ([`xmoq_chat::fetch`]).
-    fn on_fetch(&mut self, asked: AskedFetch) -> Result<()> {
+    fn on_fetch(&mut self, asked: AskedFetch<Send>) -> Result<()> {
         // WHY a Joining FETCH is refused: the gatherer has no subscriber of
         // its own to join; the relay turns a viewer's Joining FETCH into a
         // Standalone one before it asks a publisher (`Relay::join` of
@@ -1338,7 +1338,7 @@ impl Gathering<'_> {
     }
 
     /// Refuses a FETCH of the relay with `code`.
-    fn refuse(&mut self, asked: AskedFetch, code: u64) -> Result<()> {
+    fn refuse(&mut self, asked: AskedFetch<Send>, code: u64) -> Result<()> {
         Ok(self.requests.refuse_fetch(&mut self.session, asked, code)?)
     }
 
