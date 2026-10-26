@@ -1,6 +1,7 @@
 //! What a viewer of a room does on its sockets, for the viewer of the
 //! terminal (`xmoq-watch`) and the reader for an agent (`xmoq-agent`): the
-//! room's WebSocket ([`room_socket`]), the requests of a session and the
+//! room's WebSocket ([`room_socket`]), the room's HTTP API ([`room_client`]),
+//! the requests of a session and the
 //! catalog ([`session`]), a track kept on a session ([`kept`]), the chat on
 //! tracks ([`chat_tracks`]), the following of a track of one item a Group,
 //! the chat's `lines` and a transcript's `speech` ([`follow`]), and the end
@@ -18,5 +19,6 @@ pub mod ending;
 pub mod follow;
 pub mod kept;
 pub mod reconnect;
+pub mod room_client;
 pub mod room_socket;
 pub mod session;

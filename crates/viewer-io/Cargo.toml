@@ -1,7 +1,7 @@
 [package]
 name = "xmoq-viewer-io"
 version = "0.0.0"
-description = "What a viewer of a room does on its sockets, for xmoq-watch and xmoq-agent: the room's WebSocket, the requests of a session, the catalog, and the chat on tracks."
+description = "What a viewer of a room does on its sockets, for xmoq-watch and xmoq-agent: the room's WebSocket and its HTTP API, the requests of a session, the catalog, and the chat on tracks."
 edition.workspace = true
 publish.workspace = true
 
@@ -21,3 +21,13 @@ tokio = { version = "=1.49.0", features = ["macros", "net", "rt-multi-thread", "
 # The room's WebSocket. No TLS: the rooms are a Worker run locally (ws://).
 tokio-tungstenite = "=0.30.0"
 futures-util = "=0.3.31"
+# The room's HTTP API, in `room_client.rs` alone (why reqwest, at its top).
+# Without its default features: they bring aws-lc-rs (a C build), HTTP/2
+# and the system's proxy, none of which a room needs. The crypto provider is
+# rustls's ring, which quinn already builds, installed in `room_client.rs`.
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
+
+[dev-dependencies]
+# The fake room of `room_client.rs` reads and writes its socket.
+tokio = { version = "=1.49.0", features = ["io-util"] }
