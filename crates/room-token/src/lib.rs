@@ -8,13 +8,11 @@
 //! where the mac is HMAC-SHA-256, with the key the relay shares with the
 //! room, over the text before the last `|`. The relay reads it, and the
 //! gatherer of the chat makes its own with the key of the demo (provisional),
-//! as the room (`spikes/durable-objects-room/worker.js`) does.
+//! as the room (`@xmoq/room`, `packages/room/src/token.ts`) does.
 //!
-//! WHY one crate for the one that makes it and the one that reads it, and
-//! not a table of `fixtures/` both read: both are Rust, and one function
+//! WHY one crate for the Rust ones that make it and read it: one function
 //! for each half leaves no second copy of the format to drift. The room's
-//! is JavaScript, in a spike, and makes a token with the clock of the
-//! moment, which a fixed value could not pin.
+//! is TypeScript: both read `fixtures/room-token/tokens.tsv`.
 
 use std::fmt::Write;
 
@@ -126,10 +124,10 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
 
 /// The bytes of the key given as `--auth-key-hex`: none for text that is not
 /// hex, or is empty. WHY not an empty key: anybody makes the mac of a key of
-/// no bytes, and the room (`worker.js`, `token`) takes an empty
-/// `AUTH_KEY_HEX` for no key at all, so an empty flag (a variable left
-/// unset) would have a relay that lets everybody in look like one that asks
-/// for tokens.
+/// no bytes, so an empty flag (a variable left unset) would have a relay
+/// that lets everybody in look like one that asks for tokens. The room
+/// (`keyOfSetting` of `packages/room/src/token.ts`) stops for an
+/// `AUTH_KEY_HEX` that is set and is none as well.
 #[must_use]
 pub fn key_of_hex(text: &str) -> Option<Vec<u8>> {
     unhex(text).filter(|key| !key.is_empty())
@@ -164,28 +162,41 @@ pub fn namespace_fits(asked: &TrackNamespace, named: &str) -> bool {
 mod tests {
     use super::*;
 
-    const KEY: &[u8] = b"a key of the room";
-
+    /// `fixtures/room-token/tokens.tsv`, which `@xmoq/room` reads as well.
     #[test]
     fn a_token_is_its_text_and_the_mac_of_it() {
-        let made = RoomKey::new(KEY).make("xmoq/chat/*", Role::Sub, 1_800_000_060);
-        // The mac as Python's hmac module makes it with the same key.
-        assert_eq!(
-            made,
-            "v1|xmoq/chat/*|sub|1800000060|53749e09d846bd5dcf000b8c12fc683114d5d538966d74056e43e21102604116"
-        );
-        assert_eq!(
-            RoomKey::new(KEY).read(made.as_bytes()),
-            Ok(Grant {
-                namespace: "xmoq/chat/*",
-                role: "sub",
-                expiry: 1_800_000_060
-            })
-        );
-        assert_eq!(
-            RoomKey::new(b"another key").read(made.as_bytes()),
-            Err(Fault::NotOfTheKey)
-        );
+        let table = include_str!("../../../fixtures/room-token/tokens.tsv");
+        let mut rows = 0;
+        for line in table.lines() {
+            let columns: Vec<&str> = line.split('\t').collect();
+            let [name, key, namespace, role, expiry, token] = columns[..] else {
+                panic!("a row of six columns: {line:?}");
+            };
+            let key = RoomKey::new(&unhex(key).unwrap());
+            let role_of = match role {
+                "pub" => Role::Pub,
+                "sub" => Role::Sub,
+                other => panic!("{name}: no role {other}"),
+            };
+            let expiry: u64 = expiry.parse().unwrap();
+            assert_eq!(key.make(namespace, role_of, expiry), token, "{name}");
+            assert_eq!(
+                key.read(token.as_bytes()),
+                Ok(Grant {
+                    namespace,
+                    role,
+                    expiry
+                }),
+                "{name}"
+            );
+            assert_eq!(
+                RoomKey::new(b"another key").read(token.as_bytes()),
+                Err(Fault::NotOfTheKey),
+                "{name}"
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 3);
     }
 
     #[test]

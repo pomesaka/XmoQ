@@ -176,6 +176,8 @@ package_layer() {
 	@xmoq/msf | @xmoq/chat | @xmoq/transcript) echo 1 ;;
 	@xmoq/media) echo 2 ;;
 	@xmoq/meeting) echo 3 ;;
+	# The room is run, not built on: nothing depends on it.
+	@xmoq/room) echo 4 ;;
 	*) echo "" ;;
 	esac
 }

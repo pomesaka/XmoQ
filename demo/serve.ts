@@ -9,10 +9,10 @@
 // at the token in SETUP, and closes a session without one before any
 // request.
 //
-// The rooms (a count, where the broadcast is, and reactions) are the spike in
-// spikes/durable-objects-room, run locally with Miniflare. They start when
-// that directory has its dependencies (`npm install` there); without them
-// the demo runs without a room.
+// The rooms (a count, where the broadcast is, and reactions) are
+// packages/room, run locally with Miniflare. They start when the workspace
+// has its dependencies (`bun install`); without them the demo runs without a
+// room.
 //
 // The gatherer of the chat (`xmoq-chat`) starts beside the relay, where it
 // is built, and keeps the lines in `--chat-store` (demo/.chat/chat.sqlite3,
@@ -176,15 +176,16 @@ relay.on("exit", (code) => {
 	transcriber?.kill("SIGINT");
 	process.exit(code ?? 1);
 });
-// The rooms, where the spike is installed.
-const roomsDir = join(here, "..", "spikes", "durable-objects-room");
+// The rooms, where their dependencies are installed.
+const roomsDir = join(here, "..", "packages", "room");
 const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
-	? spawn("node", ["run.mjs", "--port", options["rooms-port"]], {
+	? spawn("node", ["run.ts", "--port", options["rooms-port"]], {
 			cwd: roomsDir,
 			stdio: ["ignore", "ignore", "inherit"],
 			env: {
 				...process.env,
-				AUTH_KEY_HEX: authKeyHex ?? "",
+				// Not set without --auth: the rooms then have no key (an empty one would stop them).
+				...(authKeyHex === undefined ? {} : { AUTH_KEY_HEX: authKeyHex }),
 				// The relay the rooms name in their hello, with a broadcast
 				// and without one.
 				RELAY_URL: `https://127.0.0.1:${options["relay-port"]}/`,
@@ -342,7 +343,7 @@ const html = (path: string): string => `<!doctype html>
 		${
 			path === "/meet"
 				? roomsUrl === null
-					? "<p>no rooms: npm install in spikes/durable-objects-room, and start again; a meeting takes its seat from the room</p>"
+					? "<p>no rooms: bun install, and start again; a meeting takes its seat from the room</p>"
 					: `${
 							chat === undefined
 								? `<p>${noChat}</p>`
@@ -352,7 +353,7 @@ const html = (path: string): string => `<!doctype html>
 						}
 		<p><button id="agent-link">link a folder for Claude Code</button> <button id="agent-call">call Claude Code</button> <span id="agent-note"></span></p>`
 				: roomsUrl === null
-				? "<p>no rooms: npm install in spikes/durable-objects-room, and start again</p>"
+				? "<p>no rooms: bun install, and start again</p>"
 				: `<p id="connected"></p>
 		${
 			chat === undefined

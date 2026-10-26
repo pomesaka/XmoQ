@@ -1,6 +1,6 @@
 // The meeting page of the demo: a participant of the meeting of the room
 // `?room=NAME` ("demo" when left out). It asks the room for a seat
-// (`join-meeting`, at most 49, `spikes/durable-objects-room/worker.js`),
+// (`join-meeting`, at most 49, `packages/room/src/worker.ts`),
 // publishes its own picture and voice under `xmoq/meet/<room>/<id>`, and
 // shows the others it receives with `createMeeting` of `@xmoq/meeting`: the
 // sound of all of them, and the small video of the first 8 who came.

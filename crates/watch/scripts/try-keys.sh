@@ -15,8 +15,8 @@ port=${PORT:-48920}
 name="keys-$$"
 work=$(mktemp -d)
 (cd "$root" && cargo build --release --quiet --locked -p xmoq-watch && cargo build --quiet --locked -p xmoq-relay)
-[ -d "$root/spikes/durable-objects-room/node_modules" ] ||
-  npm ci --prefix "$root/spikes/durable-objects-room" --no-audit --no-fund > /dev/null
+# The rooms' dependencies, Miniflare among them, are the workspace's.
+(cd "$root" && mise exec -- bun install --frozen-lockfile > /dev/null)
 bun=$(cd "$root/interop" && mise which bun)
 (cd "$root" && exec "$bun" demo/serve.ts --auth --relay-port "$port" --port "$((port + 1))" --rooms-port "$((port + 2))") > "$work/demo.log" 2>&1 &
 demo=$!

@@ -1,5 +1,5 @@
 // A room as a Durable Object: where its broadcast is, how many are
-// connected, and reactions. A spike: run locally with Miniflare (run.mjs),
+// connected, and reactions. Run locally with Miniflare (`run.ts`),
 // never deployed. The chat is not here: it goes over MoQ tracks, through
 // the gatherer `xmoq-chat` (decided on 2026-10-24).
 //
@@ -86,17 +86,48 @@
 // so a participant that left the room may stay at the relay that long; the
 // room counts who it would give a token to now.
 
-/** How long a token is good for, in seconds. */
-const TOKEN_SECONDS = 600;
+import {
+	MOST_IN_A_MEETING,
+	participantId,
+	relayOf,
+	seatFor,
+	tokenForNamespace,
+	transcriptPrefix,
+} from "./core/rules.ts";
+import { keyOfSetting, type Role, TOKEN_SECONDS, tokenText } from "./token.ts";
 
-/** The participants of a meeting, the agents among them (decided on 2026-10-25). */
-const MOST_IN_A_MEETING = 49;
+/** The settings of the Worker (`run.ts` has what each is). */
+interface Env {
+	ROOMS: DurableObjectNamespace;
+	AUTH_KEY_HEX?: string;
+	REACTION_BATCH_MS?: string;
+	RELAY_URL?: string;
+	RELAY_CERT_SHA256_HEX?: string;
+	TRANSCRIPT_PREFIX?: string;
+	MEETING_TRANSCRIPT_PREFIX?: string;
+}
 
-/** Whether the namespace is a meeting's: `xmoq/meet` or under it. */
-const meetingNamespace = (namespace) => namespace[0] === "xmoq" && namespace[1] === "meet";
+/** Where a publisher said its broadcast is, and since when. */
+interface Broadcast {
+	relayUrl: string;
+	namespace: string[];
+	certSha256Hex: string;
+	since: number;
+}
 
-/** Whether `id` can be the last field of a participant's namespace. */
-const participantId = (id) => typeof id === "string" && id !== "" && id.length <= 64 && !id.includes("/") && !id.includes("*");
+/** What a socket of the room keeps, as it may sleep between messages. */
+interface Attachment {
+	/** The room's name: an object woken for a message is not told the URL its socket came by. */
+	room: string;
+	/** The participant it joined the meeting as. */
+	meeting?: string;
+	broadcast?: Broadcast;
+}
+
+const attachmentOf = (socket: WebSocket): Attachment => {
+	const kept: Attachment | null = socket.deserializeAttachment();
+	return kept ?? { room: "" };
+};
 
 // The pages of the demo are served from another origin.
 const CORS = {
@@ -104,74 +135,92 @@ const CORS = {
 	"access-control-allow-methods": "GET, PUT, DELETE, OPTIONS",
 	"access-control-allow-headers": "content-type",
 };
-const json = (value, status = 200) =>
+const json = (value: unknown, status = 200): Response =>
 	new Response(JSON.stringify(value), {
 		status,
 		headers: { "content-type": "application/json", ...CORS },
 	});
 
 export default {
-	async fetch(request, env) {
-		if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
-		const match = /^\/rooms\/([^/]{1,64})(\/.*)?$/.exec(new URL(request.url).pathname);
-		if (match === null) return json({ error: "no such path" }, 404);
+	async fetch(request: Request, env: Env): Promise<Response> {
+		if (request.method === "OPTIONS")
+			return new Response(null, { headers: CORS });
+		const match = /^\/rooms\/([^/]{1,64})(\/.*)?$/.exec(
+			new URL(request.url).pathname,
+		);
+		const name = match?.[1];
+		if (name === undefined) return json({ error: "no such path" }, 404);
 		// One Durable Object for a room name, wherever the request comes in.
-		const room = env.ROOMS.get(env.ROOMS.idFromName(decodeURIComponent(match[1])));
+		const room = env.ROOMS.get(env.ROOMS.idFromName(decodeURIComponent(name)));
 		return room.fetch(request);
 	},
 };
 
 export class Room {
-	constructor(ctx, env) {
+	private readonly ctx: DurableObjectState;
+	private readonly env: Env;
+	/** With `REACTION_BATCH_MS`: the reactions that wait, and the timer that sends them. */
+	private pending:
+		| { counts: Record<string, number>; sent: unknown[] }
+		| undefined;
+	private flushing: ReturnType<typeof setTimeout> | undefined;
+
+	constructor(ctx: DurableObjectState, env: Env) {
 		this.ctx = ctx;
 		this.env = env;
 	}
 
 	/** The text of a token for the role in the namespace, or null without a key. */
-	async token(role, namespace) {
-		const hex = this.env.AUTH_KEY_HEX;
-		if (typeof hex !== "string" || hex === "") return null;
-		const key = await crypto.subtle.importKey(
-			"raw",
-			Uint8Array.from(hex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16)),
-			{ name: "HMAC", hash: "SHA-256" },
-			false,
-			["sign"],
+	async token(
+		role: Role,
+		namespace: readonly string[],
+	): Promise<string | null> {
+		const key = keyOfSetting(this.env.AUTH_KEY_HEX);
+		if (key === undefined) return null;
+		return tokenText(
+			key,
+			namespace,
+			role,
+			Math.floor(Date.now() / 1000) + TOKEN_SECONDS,
 		);
-		const signed = `v1|${namespace.join("/")}|${role}|${Math.floor(Date.now() / 1000) + TOKEN_SECONDS}`;
-		const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signed)));
-		return `${signed}|${Array.from(mac, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 	}
 
-	async fetch(request) {
+	async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
 		const rest = url.pathname.replace(/^\/rooms\/[^/]+/, "");
 		if (rest === "/ws") {
 			if (request.headers.get("upgrade") !== "websocket") {
 				return json({ error: "a WebSocket is expected" }, 426);
 			}
-			const pair = new WebSocketPair();
+			const [client, server] = Object.values(new WebSocketPair());
+			if (client === undefined || server === undefined) {
+				return json({ error: "no WebSocket" }, 500);
+			}
 			// WHY the hibernation API: the object can be put to sleep between
 			// messages with its sockets open, and is not billed for waiting.
 			// The broadcast of a publisher is kept with the socket, since
 			// nothing in memory is.
-			this.ctx.acceptWebSocket(pair[1]);
+			this.ctx.acceptWebSocket(server);
 			const room = decodeURIComponent(url.pathname.split("/")[2] ?? "");
-			// The room's name, for join-meeting: an object woken for a message
-			// is not told the URL its socket came by.
-			pair[1].serializeAttachment({ room });
-			pair[1].send(
+			server.serializeAttachment({ room } satisfies Attachment);
+			server.send(
 				JSON.stringify({
 					type: "hello",
 					connected: this.ctx.getWebSockets().length,
 					broadcast: this.broadcast(),
-					relay: this.relay(),
-					transcript: this.transcript(this.env.TRANSCRIPT_PREFIX, room),
-					meetingTranscript: this.transcript(this.env.MEETING_TRANSCRIPT_PREFIX, room),
+					relay: relayOf(this.env.RELAY_URL, this.env.RELAY_CERT_SHA256_HEX),
+					transcript: transcriptPrefix(this.env.TRANSCRIPT_PREFIX, room),
+					meetingTranscript: transcriptPrefix(
+						this.env.MEETING_TRANSCRIPT_PREFIX,
+						room,
+					),
 				}),
 			);
-			this.tellAll({ type: "connected", connected: this.ctx.getWebSockets().length });
-			return new Response(null, { status: 101, webSocket: pair[0] });
+			this.tellAll({
+				type: "connected",
+				connected: this.ctx.getWebSockets().length,
+			});
+			return new Response(null, { status: 101, webSocket: client });
 		}
 		if (rest === "" && request.method === "GET") {
 			return json({
@@ -182,83 +231,88 @@ export class Room {
 		return json({ error: "no such path" }, 404);
 	}
 
-	/** Where the relay of the rooms is, or null where the Worker was not told. */
-	relay() {
-		const relayUrl = this.env.RELAY_URL;
-		const certSha256Hex = this.env.RELAY_CERT_SHA256_HEX;
-		if (typeof relayUrl !== "string" || relayUrl === "" || typeof certSha256Hex !== "string" || certSha256Hex === "") return null;
-		return { relayUrl, certSha256Hex };
-	}
-
-	/**
-	 * The prefix a transcriber listens under for the room named `room`, its
-	 * fields, from the setting `prefix`, or null where the Worker was not
-	 * told. Null as well where a
-	 * field would be empty or have a `*`, which the relay reads as every
-	 * namespace under the ones before it: a room's name with a `/` or a
-	 * `*` makes no prefix.
-	 */
-	transcript(prefix, room) {
-		if (typeof prefix !== "string" || prefix === "") return null;
-		if (room.includes("/") || room.includes("*")) return null;
-		const fields = prefix.replaceAll("{room}", room).split("/");
-		if (fields.some((field) => field === "" || field.includes("*"))) return null;
-		return fields;
-	}
-
 	/** The broadcast of the publisher that is connected, the latest where there are several; null without one. */
-	broadcast(except) {
+	broadcast(except?: WebSocket): Broadcast | null {
 		const all = this.ctx
 			.getWebSockets()
 			.filter((socket) => socket !== except)
-			.map((socket) => socket.deserializeAttachment()?.broadcast)
-			.filter((broadcast) => broadcast != null);
+			.map((socket) => attachmentOf(socket).broadcast)
+			.filter((broadcast) => broadcast !== undefined);
 		return all.sort((a, b) => b.since - a.since)[0] ?? null;
 	}
 
-	async webSocketMessage(socket, message) {
-		let said;
+	async webSocketMessage(
+		socket: WebSocket,
+		message: string | ArrayBuffer,
+	): Promise<void> {
+		let said: unknown;
 		try {
 			said = JSON.parse(typeof message === "string" ? message : "");
 		} catch {
 			return;
 		}
-		if (said?.type === "broadcast" && said.broadcast != null) {
-			const broadcast = {
-				relayUrl: String(said.broadcast.relayUrl),
-				namespace: Array.isArray(said.broadcast.namespace) ? said.broadcast.namespace.map(String) : [],
-				certSha256Hex: String(said.broadcast.certSha256Hex),
+		if (typeof said !== "object" || said === null || !("type" in said)) return;
+		if (said.type === "broadcast" && "broadcast" in said) {
+			const given = said.broadcast;
+			if (typeof given !== "object" || given === null) return;
+			const field = (name: string): unknown =>
+				name in given
+					? Object.getOwnPropertyDescriptor(given, name)?.value
+					: undefined;
+			const namespace = field("namespace");
+			const broadcast: Broadcast = {
+				relayUrl: String(field("relayUrl")),
+				namespace: Array.isArray(namespace) ? namespace.map(String) : [],
+				certSha256Hex: String(field("certSha256Hex")),
 				since: Date.now(),
 			};
-			socket.serializeAttachment({ ...socket.deserializeAttachment(), broadcast });
+			socket.serializeAttachment({
+				...attachmentOf(socket),
+				broadcast,
+			} satisfies Attachment);
 			this.tellAll({ type: "broadcast", broadcast: this.broadcast() });
 			return;
 		}
-		if (said?.type === "token-for" && (said.role === "pub" || said.role === "sub") && Array.isArray(said.namespace)) {
-			const namespace = said.namespace.map(String);
-			// The relay reads a last field `*` as every namespace under the
-			// ones before it, and the token joins the fields with `/`,
-			// so that ["xmoq/chat", "blue"] would sign xmoq/chat/blue: the
-			// room makes neither for anybody who asks, and leaves the asking
-			// unanswered.
-			if (namespace.some((field) => field.includes("*") || field.includes("/"))) return;
-			if (meetingNamespace(namespace)) return;
-			socket.send(JSON.stringify({ type: "token", role: said.role, namespace, token: await this.token(said.role, namespace) }));
+		if (
+			said.type === "token-for" &&
+			"role" in said &&
+			(said.role === "pub" || said.role === "sub") &&
+			"namespace" in said &&
+			Array.isArray(said.namespace)
+		) {
+			const namespace = tokenForNamespace(said.namespace);
+			if (namespace === undefined) return;
+			socket.send(
+				JSON.stringify({
+					type: "token",
+					role: said.role,
+					namespace,
+					token: await this.token(said.role, namespace),
+				}),
+			);
 			return;
 		}
-		if (said?.type === "join-meeting") {
-			await this.joinMeeting(socket, said.participant);
+		if (said.type === "join-meeting") {
+			await this.joinMeeting(
+				socket,
+				"participant" in said ? said.participant : undefined,
+			);
 			return;
 		}
-		if (said?.type === "reaction" && typeof said.emoji === "string") {
+		if (
+			said.type === "reaction" &&
+			"emoji" in said &&
+			typeof said.emoji === "string"
+		) {
 			// A reaction is shown and forgotten: it has no number and is not
 			// kept for those who come later. At most 8 UTF-16 units: an emoji
 			// with its modifiers, and no text.
 			const emoji = said.emoji.slice(0, 8);
+			const sent = "sent" in said ? said.sent : undefined;
 			const batchMs = Number(this.env.REACTION_BATCH_MS ?? 0);
 			if (!(batchMs > 0)) {
 				// As it comes, to everybody, the sender among them.
-				this.tellAll({ type: "reaction", emoji, sent: said.sent });
+				this.tellAll({ type: "reaction", emoji, sent });
 				return;
 			}
 			// `REACTION_BATCH_MS` (a trial, for measuring; 0 without it): the
@@ -268,63 +322,85 @@ export class Room {
 			// timer, which is that long at most.
 			this.pending ??= { counts: {}, sent: [] };
 			this.pending.counts[emoji] = (this.pending.counts[emoji] ?? 0) + 1;
-			if (said.sent !== undefined) this.pending.sent.push(said.sent);
+			if (sent !== undefined) this.pending.sent.push(sent);
 			this.flushing ??= setTimeout(() => {
-				const { counts, sent } = this.pending;
+				const waited = this.pending;
 				this.pending = undefined;
 				this.flushing = undefined;
-				this.tellAll({ type: "reactions", counts, sent });
+				if (waited === undefined) return;
+				this.tellAll({
+					type: "reactions",
+					counts: waited.counts,
+					sent: waited.sent,
+				});
 			}, batchMs);
-			return;
 		}
 	}
 
-	/** Answers join-meeting from `socket` for the participant `id`, or leaves it unanswered (at the top). */
-	async joinMeeting(socket, id) {
-		const attachment = socket.deserializeAttachment() ?? {};
-		const room = attachment.room ?? "";
-		if (!participantId(id) || room === "" || room.includes("/") || room.includes("*")) return;
-		if (attachment.meeting !== undefined && attachment.meeting !== id) return;
-		const others = this.ctx.getWebSockets().filter((each) => each !== socket);
-		if (others.some((each) => each.deserializeAttachment()?.meeting === id)) return;
-		if (attachment.meeting === undefined) {
-			const counted = others.filter((each) => each.deserializeAttachment()?.meeting !== undefined).length;
-			if (counted >= MOST_IN_A_MEETING) {
-				socket.send(JSON.stringify({ type: "meeting-full", most: MOST_IN_A_MEETING }));
+	/** Answers join-meeting from `socket` for the participant `id`, or leaves it unanswered (`seatFor`). */
+	async joinMeeting(socket: WebSocket, id: unknown): Promise<void> {
+		const attachment = attachmentOf(socket);
+		const others = this.ctx
+			.getWebSockets()
+			.filter((each) => each !== socket)
+			.map((each) => attachmentOf(each).meeting);
+		const answer = seatFor(id, attachment.room, attachment.meeting, others);
+		switch (answer.type) {
+			case "unanswered":
 				return;
+			case "full":
+				socket.send(
+					JSON.stringify({ type: "meeting-full", most: MOST_IN_A_MEETING }),
+				);
+				return;
+			case "seat": {
+				// WHY before the tokens are made: making one waits, and another
+				// join-meeting can be read meanwhile; it has to count this one.
+				if (answer.counted && participantId(id)) {
+					socket.serializeAttachment({
+						...attachment,
+						meeting: id,
+					} satisfies Attachment);
+				}
+				socket.send(
+					JSON.stringify({
+						type: "meeting",
+						participant: id,
+						publish: {
+							namespace: answer.publish,
+							token: await this.token("pub", answer.publish),
+						},
+						subscribe: {
+							namespace: answer.subscribe,
+							token: await this.token("sub", answer.subscribe),
+						},
+					}),
+				);
 			}
-			// WHY before the tokens are made: making one waits, and another
-			// join-meeting can be read meanwhile; it has to count this one.
-			socket.serializeAttachment({ ...attachment, meeting: id });
 		}
-		const publish = ["xmoq", "meet", room, id];
-		const subscribe = ["xmoq", "meet", room, "*"];
-		socket.send(
-			JSON.stringify({
-				type: "meeting",
-				participant: id,
-				publish: { namespace: publish, token: await this.token("pub", publish) },
-				subscribe: { namespace: subscribe, token: await this.token("sub", subscribe) },
-			}),
-		);
 	}
 
-	webSocketClose(socket) {
+	webSocketClose(socket: WebSocket): void {
 		socket.close();
 		// The socket that closes is still among them here.
-		const connected = this.ctx.getWebSockets().filter((each) => each !== socket).length;
+		const connected = this.ctx
+			.getWebSockets()
+			.filter((each) => each !== socket).length;
 		this.tellAll({ type: "connected", connected }, socket);
 		// A publisher that goes takes its broadcast with it.
-		if (socket.deserializeAttachment()?.broadcast != null) {
-			this.tellAll({ type: "broadcast", broadcast: this.broadcast(socket) }, socket);
+		if (attachmentOf(socket).broadcast !== undefined) {
+			this.tellAll(
+				{ type: "broadcast", broadcast: this.broadcast(socket) },
+				socket,
+			);
 		}
 	}
 
-	webSocketError(socket) {
+	webSocketError(socket: WebSocket): void {
 		this.webSocketClose(socket);
 	}
 
-	tellAll(message, except) {
+	tellAll(message: unknown, except?: WebSocket): void {
 		const text = JSON.stringify(message);
 		for (const socket of this.ctx.getWebSockets()) {
 			if (socket === except) continue;

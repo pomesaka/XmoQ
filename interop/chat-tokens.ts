@@ -5,7 +5,7 @@
 // of `joinChat`). The gatherer (`xmoq-chat`) runs with the same key and makes
 // tokens of its own (`sub` and `pub` in `xmoq/chat/*`), as in the demo with
 // `--auth`. The pages' tokens are made here with the relay's key, in the form
-// `crates/room-token` reads and writes and `spikes/durable-objects-room/worker.js`
+// `crates/room-token` reads and writes and `packages/room/src/token.ts`
 // writes.
 //
 // Usage: bun chat-tokens.ts [--relay own] [--port N] [--verbose]
