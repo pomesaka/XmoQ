@@ -30,7 +30,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use xmoq_again::AskAgain;
-use xmoq_again::next_session::{Growing, Pause, new_url};
+use xmoq_again::next_session::{Pause, new_url};
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
@@ -40,7 +40,7 @@ use xmoq_moqt::message::{
     ControlMessage, FetchRange, ReasonPhrase, publish_done_status, request_error_code,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
-use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
+use xmoq_moqt::params::{GroupOrder, Parameter};
 use xmoq_moqt::session::{
     ControlEvent, FetchStreamOpened, MalformedRequest, RequestEvent, RequestId, Role, Session,
     SubscribedAlias, Transport,
@@ -51,20 +51,20 @@ use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestStreamEvent, RequestClose, RequestReadError, StreamConfig,
     StreamEnd, StreamStops, UniEvent, client, read_request_streams, read_uni_streams,
 };
+use xmoq_msf::{CATALOG_TRACK, MAX_CATALOG_LENGTH};
 use xmoq_publisher::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
 use xmoq_publisher::fetch::pieces_of;
+use xmoq_publisher::own::OwnRequests;
 use xmoq_publisher::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
 use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
-use xmoq_publisher::streams::{
-    COMMAND_QUEUE, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request,
-    send_group,
-};
+use xmoq_publisher::streams::{COMMAND_QUEUE, Command, GroupToSend, Heard, Sending, send_group};
 use xmoq_publisher::{shown, sleep_until};
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 use xmoq_speech::cut::Cut;
 use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
 use xmoq_speech::vad::Silero;
 use xmoq_speech::{AudioPacket, Listener};
+use xmoq_subscriber::namespaces::KeptNamespace;
 use xmoq_transcriber::args::Args;
 use xmoq_transcriber::transcript::Transcript;
 use xmoq_transcript_tracks::names::{listened_of, speech_track, transcript_namespace};
@@ -106,12 +106,6 @@ const MAX_BYTES_HELD: usize = 16 * 1000 * 1024;
 /// default (`whisper_vad_default_params`). Provisional.
 const VAD_THRESHOLD: f32 = 0.5;
 
-/// The name of the catalog track (MSF §5).
-const CATALOG: &[u8] = b"catalog";
-
-/// The most a catalog may be, as the terminal viewer reads it.
-const CATALOG_LIMIT: usize = 1024 * 1024;
-
 /// How a session ended without an error.
 #[derive(Debug)]
 pub enum SessionEnd {
@@ -139,32 +133,13 @@ enum Purpose {
     Speech(usize),
 }
 
-/// A request of the transcriber, by the token its task reports with.
-struct Own {
-    purpose: Purpose,
-    request: RequestId,
-    task: RequestTask,
-}
-
-/// One `SUBSCRIBE_NAMESPACE`, and when it is asked for again after it
-/// ended.
-struct Watch {
-    prefix: TrackNamespace,
-    again: Option<Instant>,
-    sent: Instant,
-    /// The wait after it ended, which grows while it ends again and again.
-    ends: Growing,
-    /// The wait after it was refused, by the Retry Interval.
-    refusals: AskAgain,
-}
-
-/// Has `watch` asked for again `wait_ms` from now, and says so.
-fn watch_again_in(watch: &mut Watch, wait_ms: u64, why: &str) {
+/// Says that the `SUBSCRIBE_NAMESPACE` for `prefix` is asked for again
+/// `wait_ms` from now.
+fn watch_ended(prefix: &TrackNamespace, why: &str, wait_ms: u64) {
     println!(
         "WATCH_ENDED prefix={} why={why:?} again_in_ms={wait_ms}",
-        shown(&watch.prefix)
+        shown(prefix)
     );
-    watch.again = Some(Instant::now() + Duration::from_millis(wait_ms));
 }
 
 /// How the subscription to a catalog or a sound ended.
@@ -211,13 +186,11 @@ struct Transcribing<'a> {
     vad: Option<&'a Path>,
     session: Session,
     stops: StreamStops,
-    own: HashMap<u64, Own>,
-    next_token: u64,
-    heard: mpsc::Sender<(u64, Heard)>,
+    own: OwnRequests<Purpose>,
     /// The transcript of each prefix.
     published: Vec<Publication<Speech>>,
     next_track_alias: u64,
-    watches: Vec<Watch>,
+    watches: Vec<KeptNamespace>,
     broadcasts: HashMap<TrackNamespace, Broadcast>,
     /// The tracks of broadcasts to be asked for again, and when.
     asking_again: HashMap<(TrackNamespace, BroadcastTrack), Instant>,
@@ -263,7 +236,7 @@ async fn last_object(
     header: xmoq_moqt::fetch::FetchHeader,
     mut body: xmoq_moqt_io::FetchBody,
 ) -> Option<Vec<u8>> {
-    let mut decoder = FetchStreamDecoder::new(CATALOG_LIMIT, GroupOrder::Ascending);
+    let mut decoder = FetchStreamDecoder::new(MAX_CATALOG_LENGTH, GroupOrder::Ascending);
     // The readers took the header off; the decoder wants to see one.
     decoder
         .push(&FetchStreamEncoder::new(header, GroupOrder::Ascending).take_bytes())
@@ -327,9 +300,7 @@ pub async fn transcribe(
         vad,
         session: Session::new(Role::Client, Transport::WebTransport),
         stops,
-        own: HashMap::new(),
-        next_token: 0,
-        heard,
+        own: OwnRequests::new(heard, OPEN_WAIT),
         published: args
             .prefixes
             .iter()
@@ -339,13 +310,7 @@ pub async fn transcribe(
         watches: args
             .prefixes
             .iter()
-            .map(|prefix| Watch {
-                prefix: prefix.clone(),
-                again: None,
-                sent: Instant::now(),
-                ends: Growing::new(Pause::SERVING),
-                refusals: AskAgain::default(),
-            })
+            .map(|prefix| KeptNamespace::new(prefix.clone(), Pause::SERVING))
             .collect(),
         broadcasts: HashMap::new(),
         asking_again: HashMap::new(),
@@ -476,27 +441,24 @@ impl Transcribing<'_> {
         let Some(watch) = self.watches.get_mut(index) else {
             return Ok(());
         };
-        watch.again = None;
-        watch.sent = Instant::now();
-        let prefix = watch.prefix.clone();
+        watch.asked(Instant::now());
+        let prefix = watch.prefix().clone();
         let (request, message) = self.session.subscribe_namespace(prefix, parameters)?;
         self.open(Purpose::Watch(index), request, message, &[]);
         Ok(())
     }
 
     fn next_watch(&self) -> Option<Instant> {
-        self.watches.iter().filter_map(|watch| watch.again).min()
+        self.watches
+            .iter()
+            .filter_map(KeptNamespace::again_at)
+            .min()
     }
 
     fn watch_again(&mut self) -> Result<()> {
         let now = Instant::now();
         let due: Vec<usize> = (0..self.watches.len())
-            .filter(|index| {
-                self.watches
-                    .get(*index)
-                    .and_then(|watch| watch.again)
-                    .is_some_and(|again| again <= now)
-            })
+            .filter(|index| self.watches.get(*index).is_some_and(|watch| watch.due(now)))
             .collect();
         for index in due {
             self.watch(index)?;
@@ -512,32 +474,15 @@ impl Transcribing<'_> {
         message: ControlMessage,
         parameters: &[Parameter],
     ) -> u64 {
-        let token = self.next_token;
-        self.next_token += 1;
-        let waits = Waits {
-            open: OPEN_WAIT,
-            answer: Duration::from_millis(answer_wait_ms(ANSWER_WAIT_MS, parameters)),
-        };
-        let task = open_request(self.connection, token, message, waits, self.heard.clone());
-        self.own.insert(
-            token,
-            Own {
-                purpose,
-                request,
-                task,
-            },
-        );
-        token
+        self.own
+            .open(self.connection, purpose, request, message, parameters)
     }
 
     /// Tells the task of a request stream something; where its queue is
     /// full the request is cancelled, as the gatherer does (why, at its
     /// `tell`).
     fn tell(&mut self, token: u64, command: Command) {
-        let full = self
-            .own
-            .get(&token)
-            .is_some_and(|own| own.task.commands.try_send(command).is_err());
+        let full = self.own.tell(token, command).is_err();
         if full
             && let Some(purpose) =
                 self.let_go(token, Command::Cancel(stream_reset_code::EXCESSIVE_LOAD))
@@ -548,25 +493,11 @@ impl Transcribing<'_> {
 
     /// Ends a request in the session and on its stream, and forgets it.
     fn let_go(&mut self, token: u64, command: Command) -> Option<Purpose> {
-        let mut own = self.own.remove(&token)?;
-        match command {
-            Command::Cancel(code) => {
-                self.session.cancel(own.request);
-                if let Some(abort) = own.task.abort.take() {
-                    let _ = abort.send(code);
-                }
-            }
-            command => {
-                let _ = own.task.commands.try_send(command);
-            }
-        }
-        Some(own.purpose)
+        self.own.let_go(&mut self.session, token, command)
     }
 
     // FIXME: take the steps of a PUBLISH (`publish` to `publish_done`,
-    // `send_live`) and of the transcriber's own requests (`open`, `tell`,
-    // `let_go`, `watch`, `watch_again`) from `xmoq-publisher`; the
-    // gatherer has a copy of each.
+    // `send_live`) from `xmoq-publisher`; the gatherer has a copy of each.
     /// Publishes the transcript of a prefix, unless it is published or waits
     /// to be published again.
     fn publish(&mut self, prefix: usize) -> Result<()> {
@@ -652,7 +583,7 @@ impl Transcribing<'_> {
         let Some((prefix, ending)) = self.ending.remove(&token) else {
             return Ok(());
         };
-        if let Some(own) = self.own.get(&token) {
+        if let Some(own) = self.own.get(token) {
             let streams = ending.streams();
             let done = self.session.publish_done(
                 own.request,
@@ -782,7 +713,7 @@ impl Transcribing<'_> {
             return Ok(());
         }
         let parameters = self.subscribe_parameters(broadcast.prefix);
-        let track = FullTrackName::new(namespace.clone(), CATALOG.to_vec())?;
+        let track = FullTrackName::new(namespace.clone(), CATALOG_TRACK.as_bytes().to_vec())?;
         let Some((request, message)) = self.subscribe(namespace, track, &parameters) else {
             return Ok(());
         };
@@ -1077,7 +1008,7 @@ impl Transcribing<'_> {
         let Some(broadcast) = self.broadcasts.get(namespace) else {
             return Ok(());
         };
-        if track.name() == CATALOG {
+        if track.name() == CATALOG_TRACK.as_bytes() {
             return self.on_catalog(&namespace.clone(), &object.payload);
         }
         if broadcast.audio_name.as_deref() == Some(track.name()) {
@@ -1181,7 +1112,7 @@ impl Transcribing<'_> {
 
     /// What the task of one of the transcriber's request streams heard.
     fn on_heard(&mut self, token: u64, heard: Heard) -> Result<Option<SessionEnd>> {
-        let Some(own) = self.own.get(&token) else {
+        let Some(own) = self.own.get(token) else {
             return Ok(None);
         };
         let (purpose, request) = (own.purpose.clone(), own.request);
@@ -1189,7 +1120,7 @@ impl Transcribing<'_> {
             Heard::Opened => Ok(None),
             Heard::NotOpened(why) => {
                 self.session.cancel(request);
-                self.own.remove(&token);
+                self.own.forget(token);
                 self.request_over(token, &purpose, &format!("not sent: {why}"));
                 Ok(None)
             }
@@ -1235,10 +1166,7 @@ impl Transcribing<'_> {
     fn malformed(&mut self, request: RequestId) {
         const WHY: &str = "the track is malformed";
         self.catalog_fetches.remove(&request.value());
-        let token = self
-            .own
-            .iter()
-            .find_map(|(token, own)| (own.request == request).then_some(*token));
+        let token = self.own.token_of(request);
         let Some(token) = token else {
             return;
         };
@@ -1297,10 +1225,8 @@ impl Transcribing<'_> {
         match purpose {
             Purpose::Watch(index) => {
                 if let Some(watch) = self.watches.get_mut(*index) {
-                    let lasted =
-                        u64::try_from(watch.sent.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    let wait = watch.ends.after(lasted);
-                    watch_again_in(watch, wait, why);
+                    let wait = watch.ended(Instant::now());
+                    watch_ended(watch.prefix(), why, wait);
                 }
             }
             Purpose::Catalog(namespace) => {
@@ -1327,14 +1253,14 @@ impl Transcribing<'_> {
     fn catalog_established(&mut self, namespace: &TrackNamespace, track_alias: u64) -> Result<()> {
         // The catalog's Objects are held to its limit, and not to what every
         // subgroup stream may hold alone.
-        self.stops.limit_payload(track_alias, CATALOG_LIMIT);
+        self.stops.limit_payload(track_alias, MAX_CATALOG_LENGTH);
         let Some(catalog) = self.broadcasts.get_mut(namespace).and_then(|broadcast| {
             broadcast.catalog_again.subscribed();
             broadcast.catalog
         }) else {
             return Ok(());
         };
-        let Some(own) = self.own.get(&catalog) else {
+        let Some(own) = self.own.get(catalog) else {
             return Ok(());
         };
         let range = FetchRange::RelativeJoining {
@@ -1438,8 +1364,8 @@ impl Transcribing<'_> {
             }
             (Purpose::Watch(index), RequestEvent::NamespacesSubscribed) => {
                 if let Some(watch) = self.watches.get_mut(*index) {
-                    watch.refusals.subscribed();
-                    println!("WATCHING prefix={}", shown(&watch.prefix));
+                    watch.subscribed();
+                    println!("WATCHING prefix={}", shown(watch.prefix()));
                 }
             }
             (Purpose::Watch(index), RequestEvent::Namespace(namespace)) => {
@@ -1488,8 +1414,8 @@ impl Transcribing<'_> {
                 match purpose {
                     Purpose::Watch(index) => {
                         if let Some(watch) = self.watches.get_mut(*index) {
-                            let wait = watch.refusals.after_refusal(error.retry_wait_ms());
-                            watch_again_in(watch, wait, &why);
+                            let wait = watch.refused(error.retry_wait_ms(), Instant::now());
+                            watch_ended(watch.prefix(), &why, wait);
                         }
                     }
                     Purpose::Audio(namespace) => self.audio_over(&namespace.clone(), over, &why),
@@ -1516,7 +1442,7 @@ impl Transcribing<'_> {
                     ..
                 },
             ) => {
-                let request = self.own.get(&token).map(|own| own.request);
+                let request = self.own.get(token).map(|own| own.request);
                 if let Some(request) = request {
                     self.malformed(request);
                 }

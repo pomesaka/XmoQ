@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use xmoq_again::AskAgain;
+use xmoq_again::next_session::Pause;
 use xmoq_agent::events::{Event, ParticipantState};
 use xmoq_moqt::RequestFault;
 use xmoq_moqt::message::request_error_code;
@@ -18,6 +18,7 @@ use xmoq_moqt_io::client;
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{RequestReadError, RequestStreamEvent, StreamStops};
 use xmoq_subscriber::kept::{Asking, Came as VideoCame};
+use xmoq_subscriber::namespaces::KeptNamespace;
 use xmoq_subscriber::session::{Events, GoingAway, GoneAway, new_url};
 use xmoq_viewer::meeting::{Limits, Meeting, Video as VideoStep};
 use xmoq_viewer::presence::{Change, SETTLE_MS};
@@ -111,7 +112,6 @@ pub fn watching(reader: &Reader) -> Option<String> {
 /// The meeting of one session: its `SUBSCRIBE_NAMESPACE` and its video.
 pub struct InMeeting {
     room: String,
-    prefix: TrackNamespace,
     limits: Limits,
     connection: Arc<WtConnection>,
     /// The session's token, where the room gave one.
@@ -119,8 +119,9 @@ pub struct InMeeting {
     answer_wait_ms: u64,
     open_wait_ms: u64,
     watching: Option<Watching>,
-    watch_at: Option<tokio::time::Instant>,
-    again: AskAgain,
+    /// The `SUBSCRIBE_NAMESPACE` for the namespaces, and when it is asked
+    /// for again (`xmoq-subscriber`).
+    kept: KeptNamespace,
     settle_at: Option<tokio::time::Instant>,
     video: Option<Video>,
     linger_at: Option<tokio::time::Instant>,
@@ -164,15 +165,13 @@ impl InMeeting {
         )?;
         let mut begun = Self {
             room: room.to_string(),
-            prefix,
             limits,
             connection: Arc::clone(connection),
             token,
             answer_wait_ms,
             open_wait_ms,
             watching: None,
-            watch_at: None,
-            again: AskAgain::default(),
+            kept: KeptNamespace::new(prefix, Pause::VIEWER),
             settle_at: None,
             video: None,
             linger_at: None,
@@ -183,11 +182,11 @@ impl InMeeting {
     }
 
     async fn watch(&mut self, session: &mut Session, reader: &mut Reader) {
-        self.watch_at = None;
+        self.kept.asked(std::time::Instant::now());
         match watch(
             &self.connection,
             session,
-            &self.prefix,
+            self.kept.prefix(),
             self.token.as_deref(),
             self.open_wait_ms,
         )
@@ -198,12 +197,24 @@ impl InMeeting {
         }
     }
 
+    /// The `SUBSCRIBE_NAMESPACE` ended, or could not be sent: asked for again
+    /// after the role's pause.
     fn watch_failed(&mut self, reader: &mut Reader, how: &str) {
+        let pause = self.kept.ended(std::time::Instant::now());
+        self.watch_again_in(reader, how, pause);
+    }
+
+    /// The `SUBSCRIBE_NAMESPACE` was refused: asked for again after the wait
+    /// its Retry Interval names (`named_ms`).
+    fn watch_refused(&mut self, reader: &mut Reader, how: &str, named_ms: Option<u64>) {
+        let pause = self.kept.refused(named_ms, std::time::Instant::now());
+        self.watch_again_in(reader, how, pause);
+    }
+
+    fn watch_again_in(&mut self, reader: &mut Reader, how: &str, pause: u64) {
         if let Some(watching) = self.watching.take() {
             watching.cancel();
         }
-        let pause = self.again.after_end();
-        self.watch_at = Some(tokio::time::Instant::now() + Duration::from_millis(pause));
         reader.error(format!(
             "who is in the meeting: {how}; asking again in {pause} ms"
         ));
@@ -218,7 +229,7 @@ impl InMeeting {
     pub async fn next(&mut self) -> Came {
         let Self {
             watching,
-            watch_at,
+            kept,
             settle_at,
             linger_at,
             video,
@@ -226,7 +237,7 @@ impl InMeeting {
         } = self;
         tokio::select! {
             event = on(watching.as_mut().map(|watching| watching.reader.next_event())) => Came::Watching(event),
-            () = on(watch_at.map(tokio::time::sleep_until)) => Came::WatchNow,
+            () = on(kept.again_at().map(|at| tokio::time::sleep_until(at.into()))) => Came::WatchNow,
             () = on(settle_at.map(tokio::time::sleep_until)) => Came::Settled,
             () = on(linger_at.map(tokio::time::sleep_until)) => Came::Linger,
             came = on(video.as_mut().map(Video::next)) => Came::Video(came),
@@ -325,10 +336,11 @@ impl InMeeting {
         }
     }
 
-    /// FIXME: one keeping of a `SUBSCRIBE_NAMESPACE` for this and for the
-    /// other (`attend::Chat::on_watching`), as `xmoq_subscriber::kept` is for a track, where only
-    /// more namespaces than the session keeps ask again, and any other
-    /// message that breaks the protocol closes the session.
+    /// FIXME: one reading of the stream of a `SUBSCRIBE_NAMESPACE` for this
+    /// and for the other (`attend::Chat::on_watching`), where only more namespaces than the
+    /// session keeps ask again, and any other message that breaks the
+    /// protocol closes the session. When it is asked again is
+    /// `KeptNamespace` of `xmoq-subscriber` already.
     fn on_watching(
         &mut self,
         session: &mut Session,
@@ -358,7 +370,7 @@ impl InMeeting {
         };
         match session.on_request_message(request, message) {
             Ok(RequestEvent::NamespacesSubscribed) => {
-                self.again.subscribed();
+                self.kept.subscribed();
                 self.settle_at =
                     Some(tokio::time::Instant::now() + Duration::from_millis(SETTLE_MS));
             }
@@ -382,7 +394,8 @@ impl InMeeting {
             }
             Ok(RequestEvent::Rejected(error)) => {
                 session.cancel(request);
-                self.watch_failed(reader, &format!("refused with {:#x}", error.error_code));
+                let how = format!("refused with {:#x}", error.error_code);
+                self.watch_refused(reader, &how, error.retry_wait_ms());
             }
             Ok(RequestEvent::GoAway(go_away)) => return Some(Ended::Moved(new_url(&go_away))),
             Ok(other) => reader.error(format!("who is in the meeting: {other:?}")),

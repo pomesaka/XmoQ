@@ -17,6 +17,7 @@ xmoq-msf = { path = "../msf" }
 xmoq-room-token = { path = "../room-token" }
 xmoq-speech = { path = "../speech" }
 xmoq-publisher = { path = "../publisher" }
+xmoq-subscriber = { path = "../subscriber" }
 xmoq-transcript-tracks = { path = "../transcript-tracks" }
 anyhow = "=1.0.100"
 tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

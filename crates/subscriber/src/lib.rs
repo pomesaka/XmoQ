@@ -4,7 +4,8 @@
 //! by one rule ([`kept`]), a followed track of one numbered item a Group,
 //! read from a point in its past ([`follow`], what it decides in
 //! [`followed`]), the catalog of a broadcast that may not be there yet
-//! ([`catalog`]), and the requests and the events of the session they go
+//! ([`catalog`]), a `SUBSCRIBE_NAMESPACE` asked for again by the same rule
+//! ([`namespaces`]), and the requests and the events of the session they go
 //! by ([`session`]).
 //!
 //! WHY a crate of its own, apart from the viewers: the gatherer of the chat
@@ -19,4 +20,5 @@ pub mod catalog;
 pub mod follow;
 pub mod followed;
 pub mod kept;
+pub mod namespaces;
 pub mod session;

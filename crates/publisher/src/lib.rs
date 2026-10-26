@@ -6,7 +6,8 @@
 //!
 //! The parts: what a FETCH gets of such a track ([`fetch`]), the PUBLISH of
 //! a track ([`publication`]; these two without input or output), the
-//! requests the relay opens ([`requests`]), the FETCH requests being
+//! requests the relay opens ([`requests`]), those the client opens itself
+//! ([`own`]), the FETCH requests being
 //! answered and the tasks that answer them ([`answers`], by which the Rust
 //! client answers too), and the tasks that write the other streams
 //! ([`streams`]).
@@ -19,6 +20,7 @@
 
 pub mod answers;
 pub mod fetch;
+pub mod own;
 pub mod publication;
 pub mod requests;
 pub mod streams;
