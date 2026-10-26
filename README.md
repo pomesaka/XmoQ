@@ -21,6 +21,7 @@ Start with the [vision](docs/vision.md), what is done and what is open ([require
 
 The design:
 
+- [Glossary](docs/glossary.md): the words of broadcasts and meetings
 - [Protocol layers](docs/protocols.md)
 - [MoQ Transport implementation notes](docs/moqt-implementation-notes.md): what both implementations do where draft 18 is silent or contradicts itself
 - [Scaling a broadcast and meetings: a design draft](docs/scale-and-meetings.md)

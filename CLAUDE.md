@@ -92,6 +92,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | docs/vision.md | 仕様 | 目指す方向と範囲外 |
 | docs/requirements.md | 仕様 | 要件ごとの状態と、状態を表す語の定義 |
 | docs/architecture.md、docs/assets/ | 仕様 | 構成要素の責務と境界。図 |
+| docs/glossary.md | 仕様 | 配信と会議の語。MoQの語はdraftを指すだけ |
 | docs/protocols.md | 仕様 | プロトコルの層、版、一次仕様へのリンク |
 | docs/moqt-implementation-notes.md | 仕様 | draftが黙っている箇所と矛盾している箇所で2つの実装がそろえる挙動。既知の不足 |
 | docs/open-questions.md | 仕様 | 未決事項と、仮の値の置き場所 |
