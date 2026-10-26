@@ -13,7 +13,7 @@ export const HISTORY_LINES = 16;
 /**
  * How many of the lines it missed a participant that had lines asks for,
  * when its subscription is made again: 200 by default, what the demo's page
- * keeps of the chat (`SHOWN_LINES` of `demo/room-chat.ts`), so that a page
+ * keeps of the chat (`shownLines` of `showChat`, 200 on the pages of the demo), so that a page
  * that comes back fills what it shows and no more. Decided on 2026-10-24.
  * **Provisional** as a number.
  */

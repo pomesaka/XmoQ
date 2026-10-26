@@ -6,6 +6,6 @@
 	},
 	// WHY a pattern with the Bun side left out, and not the names of the
 	// pages: a page that was added and not named here would not be checked.
-	"include": ["*.ts"],
-	"exclude": ["serve.ts", "check.ts", "open-publish.ts"]
+	"include": ["*/**/*.ts"],
+	"exclude": ["node_modules", "*/pages.ts", "lib/shell.ts"]
 }

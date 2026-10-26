@@ -30,23 +30,17 @@ import {
 	RequestFailedError,
 } from "@xmoq/moqt";
 import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
-import { TRANSCRIPT_PREFIX } from "@xmoq/transcript";
-import { startCaptions } from "./captions.ts";
-import {
-	AGAIN,
-	connectToRelay,
-	every,
-	firstBytes,
-	joinRoom,
-	MARK,
-	namespace,
-	perSecond,
-	SAMPLE_RATE,
-	say,
-	through,
-	WIDTH,
-	why,
-} from "./shared.ts";
+import { showCaptions, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
+import { MARK, WIDTH } from "./picture.ts";
+import { joinRoom } from "./room.ts";
+import { AGAIN, every, perSecond, say } from "../lib/page.ts";
+import { connectToRelay, firstBytes, through, why } from "../lib/relay.ts";
+import { namespace, SAMPLE_RATE } from "../lib/tracks.ts";
+
+declare const XMOQ_DEMO: { transcript: boolean };
+
+/** How long a caption stays when no other comes. Not a flag: a person reads a line of 15 s of speech in that time. */
+const CAPTION_MS = 8_000;
 
 const query = new URLSearchParams(location.search);
 /**
@@ -239,16 +233,22 @@ async function main(): Promise<void> {
 	// The transcriber listens under the prefix the room names; its
 	// transcript is of that prefix. After a GOAWAY the captions go to its
 	// URI with the same certificate's hash, as the broadcast and the chat do.
+	// The captions are under the picture (`#caption`), where `serve.ts` runs
+	// a transcriber.
 	const listened = room.transcript;
-	if (listened !== null) {
-		startCaptions(listened, async (goAway) =>
-			connectToRelay(
-				goAway === undefined || goAway.newSessionUri === ""
-					? through(room.broadcast)
-					: { ...room.broadcast, relayUrl: goAway.newSessionUri },
-				await room.token("sub", [...TRANSCRIPT_PREFIX, ...listened]),
-			),
-		);
+	const caption = document.getElementById("caption");
+	if (listened !== null && XMOQ_DEMO.transcript && caption !== null) {
+		showCaptions(caption, {
+			listened,
+			connect: async (goAway) =>
+				connectToRelay(
+					goAway === undefined || goAway.newSessionUri === ""
+						? through(room.broadcast)
+						: { ...room.broadcast, relayUrl: goAway.newSessionUri },
+					await room.token("sub", [...TRANSCRIPT_PREFIX, ...listened]),
+				),
+			shownMs: CAPTION_MS,
+		});
 	}
 	/** What the first line under the picture says of the session. */
 	let link = "connecting";

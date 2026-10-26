@@ -18,3 +18,4 @@ export {
 	keepFollowingTranscript,
 	type TranscriptConnection,
 } from "./moqt/keep-following.ts";
+export { type ShowCaptionsOptions, showCaptions } from "./web/captions.ts";

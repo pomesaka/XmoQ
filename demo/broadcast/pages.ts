@@ -1,0 +1,47 @@
+// The pages of the broadcast: one that publishes, and one that watches.
+// Runs on Bun, with the server (`serve.ts`), which serves them where it
+// says.
+
+import { join } from "node:path";
+import { chatHtml, type Page, pageHtml, type Served } from "../lib/shell.ts";
+
+const LINKS = [
+	{ href: "/publish", text: "publish (a clock)" },
+	{ href: "/publish?source=camera", text: "publish (camera)" },
+	{ href: "/watch", text: "watch" },
+];
+
+/** The room's line and its chat, or why there is neither. */
+const roomHtml = (served: Served): string =>
+	served.roomsUrl === null
+		? "<p>no rooms: bun install, and start again</p>"
+		: `<p id="room"></p>
+		${served.noChat === undefined ? chatHtml("8em") : `<p>${served.noChat}</p>`}`;
+
+export const BROADCAST_PAGES: Record<string, Page> = {
+	"/publish": {
+		entry: join(import.meta.dir, "publish.ts"),
+		html: (served) =>
+			pageHtml(
+				"publish",
+				LINKS,
+				`<canvas width="640" height="360"></canvas>
+		<pre id="status">loading</pre>
+		${roomHtml(served)}`,
+				"/publish.js",
+			),
+	},
+	"/watch": {
+		entry: join(import.meta.dir, "watch.ts"),
+		html: (served) =>
+			pageHtml(
+				"watch",
+				LINKS,
+				`<canvas width="640" height="360"></canvas>
+		<p id="caption" style="min-height: 1.5em; font-size: 1.2em; color: #fff;">${served.noCaptions ?? ""}</p><p><button id="sound">sound</button></p>
+		<pre id="status">loading</pre>
+		${roomHtml(served)}`,
+				"/watch.js",
+			),
+	},
+};

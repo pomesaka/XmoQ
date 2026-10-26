@@ -23,7 +23,7 @@
 // which is not committed). The pages chat over its tracks, and have no chat
 // without it. Unless `--no-auth`, the gatherer is given the relay's key
 // (`--auth-key-hex`) and makes its own tokens, and each page asks the room
-// for two whenever it connects for the chat (`demo/shared.ts`). WHY the key
+// for two whenever it connects for the chat (`room.ts` of each application). WHY the key
 // for the gatherer, and not a token of the room: the room gives a token to
 // whoever asks, and the gatherer needs one for every namespace under
 // `xmoq/chat`. A gatherer built without that flag exits at once with
@@ -50,6 +50,9 @@ import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
+import { BROADCAST_PAGES } from "./broadcast/pages.ts";
+import type { Page, Served } from "./lib/shell.ts";
+import { MEETING_PAGES } from "./meeting/pages.ts";
 
 const { values: options } = parseArgs({
 	options: {
@@ -298,15 +301,19 @@ const stop = (): void => {
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
-const PAGES: Record<string, string> = {
-	"/publish": "publish.ts",
-	"/watch": "watch.ts",
-	"/meet": "meet.ts",
+// Which path is of which application: each assembles its own pages
+// (`pages.ts`), and this server only serves them, so that one could be run
+// apart from the other.
+const PAGES: Record<string, Page> = { ...BROADCAST_PAGES, ...MEETING_PAGES };
+const served: Served = {
+	roomsUrl,
+	noChat: chat === undefined ? noChat : undefined,
+	noCaptions,
 };
 const scripts = new Map<string, string>();
-for (const [path, entry] of Object.entries(PAGES)) {
+for (const [path, page] of Object.entries(PAGES)) {
 	const build = await Bun.build({
-		entrypoints: [join(here, entry)],
+		entrypoints: [page.entry],
 		target: "browser",
 		throw: false,
 		define: {
@@ -322,56 +329,10 @@ for (const [path, entry] of Object.entries(PAGES)) {
 	const [bundle] = build.outputs;
 	if (!build.success || bundle === undefined) {
 		stop();
-		throw new Error(`bundling ${entry} failed: ${build.logs.join("\n")}`);
+		throw new Error(`bundling ${page.entry} failed: ${build.logs.join("\n")}`);
 	}
 	scripts.set(`${path}.js`, await bundle.text());
 }
-
-const html = (path: string): string => `<!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<title>XmoQ demo: ${path.slice(1)}</title>
-		<link rel="icon" href="data:," />
-		<style>
-			body { font-family: monospace; background: #111; color: #ddd; margin: 16px; }
-			canvas { display: block; max-width: 100%; background: #000; }
-			a { color: #f2c14e; }
-		</style>
-	</head>
-	<body>
-		<p>XmoQ demo, ${path.slice(1)} · <a href="/publish">publish (a clock)</a> · <a href="/publish?source=camera">publish (camera)</a> · <a href="/watch">watch</a> · <a href="/meet">meet</a></p>
-		<canvas width="640" height="360"></canvas>
-		${path === "/watch" ? `<p id="caption" style="min-height: 1.5em; font-size: 1.2em; color: #fff;">${noCaptions ?? ""}</p><p><button id="sound">sound</button></p>` : ""}
-		${path === "/meet" ? `<p><button id="sound">sound</button></p><div id="tiles" style="display: flex; flex-wrap: wrap; gap: 4px;"></div>` : ""}
-		<pre id="status">loading</pre>
-		${
-			path === "/meet"
-				? roomsUrl === null
-					? "<p>no rooms: bun install, and start again; a meeting takes its seat from the room</p>"
-					: `${
-							chat === undefined
-								? `<p>${noChat}</p>`
-								: `<div id="chat" style="height: 6em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
-		<form><input size="40" placeholder="say something" /> <button>send</button></form>
-		<p id="chat-note"></p>`
-						}
-		<p><button id="agent-link">link a folder for Claude Code</button> <button id="agent-call">call Claude Code</button> <span id="agent-note"></span></p>`
-				: roomsUrl === null
-					? "<p>no rooms: bun install, and start again</p>"
-					: `<p id="room"></p>
-		${
-			chat === undefined
-				? `<p>${noChat}</p>`
-				: `<div id="chat" style="height: 8em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
-		<form><input size="40" placeholder="say something" /> <button>send</button></form>
-		<p id="chat-note"></p>`
-		}`
-		}
-		<script type="module" src="${path}.js"></script>
-	</body>
-</html>
-`;
 
 const server = Bun.serve({
 	hostname: "127.0.0.1",
@@ -384,8 +345,9 @@ const server = Bun.serve({
 				headers: { "content-type": "text/javascript" },
 			});
 		}
-		if (pathname in PAGES) {
-			return new Response(html(pathname), {
+		const page = PAGES[pathname];
+		if (page !== undefined) {
+			return new Response(page.html(served), {
 				headers: { "content-type": "text/html" },
 			});
 		}

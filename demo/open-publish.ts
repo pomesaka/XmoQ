@@ -166,7 +166,7 @@ const url = options.meet
 await page.goto(url);
 console.log(`opened ${url} in Chromium ${browser.version()}`);
 if (options.meet) {
-	// What the page says of itself (`demo/meet.ts`): its id, once it has a seat.
+	// What the page says of itself (`demo/meeting/meet.ts`): its id, once it has a seat.
 	const seated = await page.waitForFunction(
 		() => {
 			const meet = document.body.dataset.meet;

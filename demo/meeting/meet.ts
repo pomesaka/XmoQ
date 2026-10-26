@@ -37,23 +37,18 @@ import {
 	tokenOfARoom,
 } from "@xmoq/room-client";
 import { keepFollowingTranscript, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
-import { startChat } from "./room-chat.ts";
-import {
-	AUDIO_TRACK,
-	type Broadcast,
-	connectToRelay,
-	DECODER_CODEC,
-	ENCODER_CODEC,
-	every,
-	SAMPLE_RATE,
-	say,
-	TRACK,
-	tokenOf,
-	why,
-} from "./shared.ts";
+import { startChat } from "../lib/chat.ts";
+import { every, say } from "../lib/page.ts";
+import { type Broadcast, connectToRelay, tokenOf, why } from "../lib/relay.ts";
+import { AUDIO_TRACK, DECODER_CODEC, ENCODER_CODEC, SAMPLE_RATE, TRACK } from "../lib/tracks.ts";
 
 declare const XMOQ_DEMO: { roomsUrl: string | null };
 
+/**
+ * How many lines of the chat the page shows; the oldest go. Not a flag:
+ * what a page holds is bounded whatever the address says.
+ */
+const SHOWN_LINES = 200;
 /** The size each participant sends at: the small version the meeting receives of 8. */
 const WIDTH = 320;
 const HEIGHT = 180;
@@ -400,7 +395,7 @@ async function main(): Promise<void> {
 	const agent: { bridge: AgentBridge | undefined } = { bridge: undefined };
 
 	// The chat of the room, under the page's id, as the other pages have it
-	// (`room-chat.ts`): the person and Claude Code share it, as they share
+	// (`demo/lib/chat.ts`): the person and Claude Code share it, as they share
 	// the seat. Its tokens are asked of the room each time, as theirs.
 	const chatRoom: ChatRoom = { kind: "meeting", name: room };
 	const chat = startChat(
@@ -417,7 +412,7 @@ async function main(): Promise<void> {
 				...(pub === undefined ? {} : { publishNamespaceToken: pub }),
 			};
 		},
-		(line) => agent.bridge?.chat(line),
+		{ shownLines: SHOWN_LINES, onLine: (line) => agent.bridge?.chat(line) },
 	);
 
 	const agentNote = document.getElementById("agent-note");

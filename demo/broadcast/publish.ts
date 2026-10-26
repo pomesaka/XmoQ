@@ -12,29 +12,11 @@ import {
 	keepPublishing,
 } from "@xmoq/media";
 import { createCatalogPublisher } from "@xmoq/msf";
-import {
-	AGAIN,
-	AUDIO_TRACK,
-	audioTrackName,
-	connectToRelay,
-	DECODER_CODEC,
-	ENCODER_CODEC,
-	every,
-	HEIGHT,
-	joinRoom,
-	MARK,
-	marked,
-	namespace,
-	perSecond,
-	SAMPLE_RATE,
-	SIZES,
-	say,
-	TRACK,
-	through,
-	trackName,
-	WIDTH,
-	why,
-} from "./shared.ts";
+import { HEIGHT, MARK, marked, SIZES, WIDTH } from "./picture.ts";
+import { joinRoom } from "./room.ts";
+import { AGAIN, every, perSecond, say } from "../lib/page.ts";
+import { connectToRelay, through, why } from "../lib/relay.ts";
+import { AUDIO_TRACK, audioTrackName, DECODER_CODEC, ENCODER_CODEC, namespace, SAMPLE_RATE, TRACK, trackName } from "../lib/tracks.ts";
 
 const FRAMES_A_SECOND = 30;
 /** `?size=360|720|1080`: the size the picture is sent at; 360 when left out, or for a size that is none. */

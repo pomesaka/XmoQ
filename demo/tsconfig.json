@@ -1,5 +1,6 @@
 {
-	// The parts that run on Bun: the server and the scripts that drive pages.
+	// The parts that run on Bun: the server, what each application serves
+	// (`pages.ts`) and the scripts that drive pages.
 	// The pages run in a browser and are checked by tsconfig.page.json, so
 	// that neither side can use the other's globals.
 	"compilerOptions": {
@@ -17,5 +18,11 @@
 		"noEmit": true,
 		"skipLibCheck": true
 	},
-	"include": ["serve.ts", "check.ts", "open-publish.ts"]
+	"include": [
+		"serve.ts",
+		"check.ts",
+		"open-publish.ts",
+		"*/pages.ts",
+		"lib/shell.ts"
+	]
 }
