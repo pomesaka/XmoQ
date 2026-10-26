@@ -34,6 +34,7 @@ use xmoq_moqt::params::{Parameter, SubscriptionFilter};
 use xmoq_moqt::session::{PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
+use crate::own::{Counted, OwnEnd};
 use crate::{
     Action, MAX_SOURCES, OwnRequestEnd, OwnRequestKey, Relay, RequestSlot, SessionKey, Source,
     StreamKey, Subscriber, TrackEnd, TrackSource, internal_error, largest_object,
@@ -57,7 +58,10 @@ pub const MAX_NAMESPACES_PER_SESSION: usize = 64;
 pub struct LimitsOfASession {
     /// Requests of the peer open at once ([`xmoq_moqt::session::MAX_PEER_REQUESTS`]).
     pub peer_requests: usize,
-    /// Requests the relay has open on the session ([`MAX_OWN_REQUESTS_PER_SESSION`]).
+    /// Requests the relay has open on the session
+    /// ([`MAX_OWN_REQUESTS_PER_SESSION`]): SUBSCRIBE, FETCH and
+    /// `TRACK_STATUS`; a `PUBLISH_NAMESPACE` upstream does not count
+    /// (`own::Counted`).
     pub own_requests: usize,
     /// Namespaces the session has announced ([`MAX_NAMESPACES_PER_SESSION`]).
     pub namespaces: usize,
@@ -944,19 +948,6 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) -> Result<Ask, u64> {
         let token = self.token_for(publisher, crate::Operation::Subscribe);
-        let own_requests_most = self.limits_of_a_session.own_requests;
-        let Some(state) = self.sessions.get_mut(&publisher) else {
-            return Err(request_error_code::DOES_NOT_EXIST);
-        };
-        // §10.4: "Upon receiving a GOAWAY on the control stream, an
-        // endpoint SHOULD NOT initiate new requests to the peer". It is passed
-        // over as a publisher that is not there.
-        if state.moqt.peer_going_away() {
-            return Err(request_error_code::DOES_NOT_EXIST);
-        }
-        if state.own_requests() >= own_requests_most {
-            return Err(request_error_code::EXCESSIVE_LOAD);
-        }
         // §9.2: "Relays SHOULD set the Forward flag to 1 when a new
         // subscription needs to be sent upstream", and §9.5: "MUST use
         // Forward=1 when subscribing upstream". No parameter says that:
@@ -979,31 +970,33 @@ impl Relay {
             .chain(rendezvous.map(Parameter::RendezvousTimeout))
             .chain(token)
             .collect();
-        let Ok((id, message)) = state.moqt.subscribe(track.clone(), parameters) else {
-            // The session already has a subscription to the track in this
-            // role, which is one that PUBLISH_DONE ended and that still
-            // drains. The track is over for now.
-            return Err(request_error_code::DOES_NOT_EXIST);
+        // A publisher that sent GOAWAY is passed over as one that is not
+        // there (`Relay::open_own_request`).
+        let counted = Counted::Yes {
+            over_a_share: false,
         };
-        let own = OwnRequestKey(self.next_own_request);
-        self.next_own_request = self.next_own_request.saturating_add(1);
-        state.own.insert(
-            own,
-            OwnRequest {
-                id,
-                track: track.clone(),
-                awaits_publish: false,
+        let own = self.open_own_request(
+            publisher,
+            (counted, true),
+            |moqt| {
+                // An error: the session already has a subscription to the
+                // track in this role, which is one that PUBLISH_DONE ended
+                // and that still drains. The track is over for now.
+                moqt.subscribe(track.clone(), parameters)
+                    .map_err(|_| request_error_code::DOES_NOT_EXIST)
             },
-        );
-        actions.push(Action::OpenRequest {
-            session: publisher,
-            request: own,
-            message,
-        });
-        actions.push(Action::StartUpstreamTimer {
-            session: publisher,
-            request: own,
-        });
+            |state, own, id| {
+                state.own.insert(
+                    own,
+                    OwnRequest {
+                        id,
+                        track: track.clone(),
+                        awaits_publish: false,
+                    },
+                );
+            },
+            actions,
+        )?;
         Ok(Ask {
             publisher,
             request: own,
@@ -1209,11 +1202,7 @@ impl Relay {
                 request_error_code::UNSUPPORTED_EXTENSION,
             ),
         };
-        actions.push(Action::CancelOwnRequest {
-            session: publisher,
-            request,
-            code,
-        });
+        self.close_own_request(publisher, request, OwnEnd::Reset { code }, actions);
         self.ask_is_over(&own.track, own.ask, &Refusal::code(refused), actions);
     }
 
@@ -1248,10 +1237,10 @@ impl Relay {
             publisher: session,
             request,
         } = own.ask;
+        self.close_own_request(session, request, OwnEnd::Answered, actions);
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        actions.push(Action::FinishOwnRequest { session, request });
         // §5.1: "If a publisher receives a SUBSCRIBE request for a
         // Track with an existing subscription in Pending (publisher)
         // state, it MUST fail that request with a
@@ -1399,12 +1388,11 @@ impl Relay {
         match own.phase {
             Some(UpstreamPhase::Asked) => {
                 state.own.remove(&request);
-                state.moqt.cancel(own.id);
-                actions.push(Action::CancelOwnRequest {
-                    session,
-                    request,
+                let end = OwnEnd::GivenUp {
+                    id: own.id,
                     code: stream_reset_code::CANCELLED,
-                });
+                };
+                self.close_own_request(session, request, end, actions);
             }
             Some(UpstreamPhase::AwaitsPublish) => {
                 state.own.remove(&request);
@@ -1495,12 +1483,11 @@ impl Relay {
                 actions.push(Action::StopUpstreamTimer { session, request });
             }
             Some(own) => {
-                state.moqt.cancel(own.id);
-                actions.push(Action::CancelOwnRequest {
-                    session,
-                    request,
+                let end = OwnEnd::GivenUp {
+                    id: own.id,
                     code: stream_reset_code::CANCELLED,
-                });
+                };
+                self.close_own_request(session, request, end, actions);
             }
             None => {}
         }

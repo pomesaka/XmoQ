@@ -1200,3 +1200,38 @@ fn an_announcement_the_upstream_refuses_or_ends_is_closed_once() {
         );
     }
 }
+
+/// A `PUBLISH_NAMESPACE` the relay passes upstream does not count among the
+/// requests it may have open on the session with the upstream
+/// (`own::Counted::No`): with room for one, and that one taken by a
+/// SUBSCRIBE, the next SUBSCRIBE is refused and an announcement still goes.
+#[test]
+fn an_announcement_upstream_is_not_held_back_by_the_relays_own_requests_there() {
+    let mut relay = Relay::new("test/0");
+    relay.set_limits_of_a_session(crate::LimitsOfASession {
+        own_requests: 1,
+        ..crate::LimitsOfASession::default()
+    });
+    relay.set_upstream(namespace_of(&[]));
+    for session in [PUBLISHER, ALICE] {
+        relay.step(Event::SessionOpened {
+            session,
+            role: Role::Server,
+        });
+    }
+    upstream_opened(&mut relay);
+    assert_eq!(
+        routed(&subscribe_to(&mut relay, 0, &[b"xmoq", b"a"], None)),
+        Routed::Asks(vec![UPSTREAM])
+    );
+    // EXCESSIVE_LOAD (0x9).
+    assert_eq!(
+        routed(&subscribe_to(&mut relay, 4, &[b"xmoq", b"b"], None)),
+        Routed::Refused(0x9)
+    );
+    let announced = announce_by(&mut relay, PUBLISHER, 0, &[b"xmoq", b"chat", b"r", b"a"]);
+    assert_eq!(
+        announced_upstream(&announced),
+        [namespace_of(&[b"xmoq", b"chat", b"r", b"a"])]
+    );
+}
