@@ -341,15 +341,15 @@ function unsupportedMessageType(
 const REDIRECT = 0x34n;
 
 /** §1.4.4 */
-const MAX_REASON_PHRASE_LENGTH = 1024;
+export const MAX_REASON_PHRASE_LENGTH = 1024;
 /**
  * §10.4: "The maximum length of the New Session URI is 8,192 bytes. If an
  * endpoint receives a length exceeding the maximum, it MUST close the session
  * with a PROTOCOL_VIOLATION."
  */
-const MAX_NEW_SESSION_URI_LENGTH = 8192;
+export const MAX_NEW_SESSION_URI_LENGTH = 8192;
 /** Message Length is a 16-bit field (§10). */
-const MAX_MESSAGE_PAYLOAD_LENGTH = 0xffff;
+export const MAX_MESSAGE_PAYLOAD_LENGTH = 0xffff;
 
 // WHY not `fatal`: §1.4.4 says a Reason Phrase is UTF-8 and names no error for
 // bytes that are not. The text is diagnostic and is never encoded again by a

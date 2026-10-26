@@ -70,13 +70,13 @@ const DEFAULT_SUBSCRIPTION_HIGH_WATER_MARK = 16;
  * Provisional, and the value of the Rust implementation (`max_uni_streams` in
  * crates/moqt-io): the draft sets no limit, and XmoQ has not decided one.
  */
-const DEFAULT_MAX_PEER_UNI_STREAMS = 64;
+export const DEFAULT_MAX_PEER_UNI_STREAMS = 64;
 /**
  * Provisional, like every limit here (docs/open-questions.md, on the
  * receive limits). The same number as the Rust implementation reads at once
  * (`max_request_streams` of `StreamConfig`).
  */
-const DEFAULT_MAX_PEER_BIDI_STREAMS = 64;
+export const DEFAULT_MAX_PEER_BIDI_STREAMS = 64;
 /**
  * Reads of a fetch stream that `Fetch.body` holds; with the last of them
  * the connection stops reading the stream. Provisional. The Rust reader
@@ -105,7 +105,7 @@ const NAMESPACE_CHANGES_HIGH_WATER_MARK = 64;
  * Rust implementation sends any 32-bit code.
  */
 const MAX_STREAM_ERROR_CODE = 255;
-const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
+export const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
 /** Provisional: how long a request may wait for its stream to be opened (`openStreamTimeoutMs`). The Rust client has the same (`STREAM_OPEN_WAIT_MS`). */
 const DEFAULT_OPEN_STREAM_TIMEOUT_MS = 10_000;
 /** The Error Reason of the PUBLISH_DONE that ends a PUBLISH nobody answered; the Rust client sends the same. */
@@ -146,7 +146,7 @@ function isAnswer(event: SessionEvent): event is Extract<
  * (`first_bytes_timeout` in crates/moqt-io); docs/open-questions.md, on the
  * receive limits.
  */
-const DEFAULT_FIRST_BYTES_TIMEOUT_MS = 10_000;
+export const DEFAULT_FIRST_BYTES_TIMEOUT_MS = 10_000;
 /**
  * Decided on 2026-10-24, and the value of the Rust implementation, which
  * gets it in another change (docs/moqt-implementation-notes.md, row on a
@@ -157,7 +157,7 @@ const DEFAULT_FIRST_BYTES_TIMEOUT_MS = 10_000;
  * the rest of that Group at this endpoint; its next Group comes on a new
  * stream and is read.
  */
-const DEFAULT_IDLE_SUBGROUP_STREAM_TIMEOUT_MS = 30_000;
+export const DEFAULT_IDLE_SUBGROUP_STREAM_TIMEOUT_MS = 30_000;
 /**
  * §10.11 asks for at least the larger of the two delivery timeouts. Neither
  * is implemented, so this is a fixed value for now.
