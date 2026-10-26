@@ -69,6 +69,28 @@ The publishing page sends a second track with sound, Opus: a quiet tone that goe
 
 The times are compared on one machine, where the two pages have the same clock.
 
+## An agent in a room
+
+`mise run agent-demo -- start --out /tmp/room` does all of what follows in one go, with a voice as the page's microphone, and `mise run agent-demo -- stop --out /tmp/room` ends it (`scripts/agent-demo.sh` has its flags). `start --meeting 3` opens 3 participants of the meeting (`/meet`) in place of the publishing page, each saying the voice 2 s after the one before, and starts the reader in the meeting's room (`/meetings/demo`); it ends by printing their ids, and `/frame <id>` gives the picture of one ([record](../docs/experiments/2026-10-25-agent-demo-with-a-meeting.md)). By hand: a demo of its own, on ports apart from `mise run demo`'s (4443, 8080, 8787), then the reader in its room, in the background:
+
+```sh
+bun install --frozen-lockfile          # once after main moved: the demo bundles the packages
+bun demo/serve.ts --relay-port 33443 --port 33080 --rooms-port 33787 --chat-store /tmp/room/chat.sqlite3 &
+# add --transcribe-language en (or ja, ...) where the voice's language is known: twice as fast as auto
+# open http://localhost:33080/publish?audio=mic in Chromium: the broadcast, with the microphone as its sound
+mkdir -p /tmp/room; mkfifo /tmp/room/say; sleep 86400 > /tmp/room/say &
+mise run agent -- --room http://127.0.0.1:33787/broadcasts/demo --name claude --out /tmp/room < /tmp/room/say &
+echo 'hello' > /tmp/room/say          # said in the chat
+echo '/frame' > /tmp/room/say         # a picture of the broadcast now
+tail -f /tmp/room/events.jsonl
+```
+
+`speech` lines come where the demo has its transcriber (built with `cargo build --release -p xmoq-transcriber` and its models fetched with `mise run speech-model` and `mise run speech-model -- silero-v5.1.2`; the demo says so when it starts) and the page sends a voice: without `?audio=mic` it sends a tone, in which there are no words. The `sleep` holds the pipe open. What the reader writes is in [its README](../crates/agent/README.md).
+
+## The terminal viewer beside a demo
+
+`broadcast/scripts/` runs `xmoq-watch` (a release build) against a demo of its own, its publishing page in headless Chromium (`publish-headless.ts`): `try.sh` plays it for some seconds and prints what the viewer cost, `try-room.sh` joins it through the room of the broadcast with a token and once more without one, `try-keys.sh` types the keys on a pseudo-terminal (`keys-on-a-pty.py`), and `try-narrow-link.sh` puts a link with less room than the video between the relay and the viewer. `try-silent-peers.sh` starts no demo: it has the viewer wait for a room and a relay that answer nothing. `watch-demo.sh` plays `mise run demo` without a room. Each says how to run it at its top.
+
 ## Every flag
 
 Read off the code on 2026-10-13 (`demo/broadcast/watch.ts`, `demo/broadcast/publish.ts`, `demo/broadcast/room.ts`, `demo/lib/`, `demo/serve.ts`). Each is a query of the page's address unless it begins with `--`. "Trial" is something tried behind the flag and not the demo's way; the sections above have what each trial showed.

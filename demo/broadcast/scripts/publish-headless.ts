@@ -1,7 +1,7 @@
 // Opens the publishing page of a demo in headless Chromium and stays until
 // it is stopped: the clock's picture and the tone, no camera.
 //
-// Usage: bun crates/watch/scripts/publish-headless.ts http://localhost:48901 [room] [a line for the chat]
+// Usage: bun demo/broadcast/scripts/publish-headless.ts http://localhost:48901 [room] [a line for the chat]
 //
 // With a room the page joins it (`?room=`); the line is typed into the
 // page's chat 6 seconds after the page publishes. When stopped it prints

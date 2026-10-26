@@ -2,7 +2,7 @@
 # Plays the broadcast of `mise run demo` in this terminal, without a room: the relay is the
 # demo's, and the hash of its certificate is read from the file the demo made.
 #
-#   crates/watch/scripts/watch-demo.sh [flags of xmoq-watch]       # from the repository root
+#   demo/broadcast/scripts/watch-demo.sh [flags of xmoq-watch]       # from the repository root
 #
 # after `mise run demo` is up and http://localhost:8080/publish is open in Chromium. With the
 # demo's rooms there is no need for this: `mise run watch -- --room http://127.0.0.1:8787/broadcasts/demo`.

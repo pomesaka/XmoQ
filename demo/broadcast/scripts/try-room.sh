@@ -5,7 +5,7 @@
 # room carries no chat), which show nothing here: no gatherer (xmoq-chat) is started.
 # Then once more without a token, which the relay is to refuse.
 #
-#   crates/watch/scripts/try-room.sh [seconds, 15]            # from the repository root
+#   demo/broadcast/scripts/try-room.sh [seconds, 15]            # from the repository root
 #
 # Needs `mise run interop` once (Playwright's Chromium); the rooms' dependencies are the
 # workspace's, installed here as `mise run demo` does.
@@ -13,7 +13,7 @@
 set -eu
 seconds=${1:-15}
 root=$(cd "$(dirname "$0")/../../.." && pwd)
-here="$root/crates/watch/scripts"
+here="$root/demo/broadcast/scripts"
 port=${PORT:-48910}
 name="try-$$"
 work=$(mktemp -d)

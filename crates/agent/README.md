@@ -8,21 +8,9 @@ Building it needs a C++ compiler, for the H.264 decoder that `xmoq-picture` buil
 
 ## Using it from an agent
 
-`mise run agent-demo -- start --out /tmp/room` does all of what follows in one go, with a voice as the page's microphone, and `mise run agent-demo -- stop --out /tmp/room` ends it (`scripts/agent-demo.sh` has its flags). `start --meeting 3` opens 3 participants of the meeting (`/meet`) in place of the publishing page, each saying the voice 2 s after the one before, and starts the reader in the meeting's room (`/meetings/demo`); it ends by printing their ids, and `/frame <id>` gives the picture of one ([record](../../docs/experiments/2026-10-25-agent-demo-with-a-meeting.md)). By hand: a demo of its own, on ports apart from `mise run demo`'s (4443, 8080, 8787), then the reader in its room, in the background:
+How to run it beside a demo, with `mise run agent-demo` or by hand, is in [the demo's README](../../demo/README.md#an-agent-in-a-room).
 
-```sh
-bun install --frozen-lockfile          # once after main moved: the demo bundles the packages
-bun demo/serve.ts --relay-port 33443 --port 33080 --rooms-port 33787 --chat-store /tmp/room/chat.sqlite3 &
-# add --transcribe-language en (or ja, ...) where the voice's language is known: twice as fast as auto
-# open http://localhost:33080/publish?audio=mic in Chromium: the broadcast, with the microphone as its sound
-mkdir -p /tmp/room; mkfifo /tmp/room/say; sleep 86400 > /tmp/room/say &
-mise run agent -- --room http://127.0.0.1:33787/broadcasts/demo --name claude --out /tmp/room < /tmp/room/say &
-echo 'hello' > /tmp/room/say          # said in the chat
-echo '/frame' > /tmp/room/say         # a picture of the broadcast now
-tail -f /tmp/room/events.jsonl
-```
-
-The lines of `events.jsonl` are `chat`, `joined`, `left`, `broadcast`, `frame`, `speech`, `chat_gap` and `error` (the table below). A `frame` line's `path` is the PNG's from `--out` (`frames/<when the reader began, ms>/<file>`, in `/tmp/room` here), as the page of a meeting writes it too (`fixtures/agent-lines/`). `speech` lines come where the demo has its transcriber (built with `cargo build --release -p xmoq-transcriber` and its models fetched with `mise run speech-model` and `mise run speech-model -- silero-v5.1.2`; the demo says so when it starts) and the page sends a voice: without `?audio=mic` it sends a tone, in which there are no words. The `sleep` holds the pipe open: without stdin the reader reads on and says nothing.
+The lines of `events.jsonl` are `chat`, `joined`, `left`, `broadcast`, `frame`, `speech`, `chat_gap` and `error` (the table below). A `frame` line's `path` is the PNG's from `--out` (`frames/<when the reader began, ms>/<file>`), as the page of a meeting writes it too (`fixtures/agent-lines/`). `speech` lines come where the room names a transcript and a transcriber writes it. Without stdin the reader reads on and says nothing.
 
 ## Flags
 

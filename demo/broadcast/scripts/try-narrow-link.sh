@@ -4,7 +4,7 @@
 # spikes/lossy-link/proxy.mjs with a rate, a queue and a delay. With --video-timeout-ms the
 # viewer asks the relay to give up Groups of the video that are late.
 #
-#   crates/watch/scripts/try-narrow-link.sh [seconds, 25] [flags of xmoq-watch]   # from the root
+#   demo/broadcast/scripts/try-narrow-link.sh [seconds, 25] [flags of xmoq-watch]   # from the root
 #
 # PUBLISH_QUERY is the publishing page's (bitrate=2500000&picture=busy); with &ladder=1 it has
 # a second, small version of the video, which --video-version chooses.
@@ -15,7 +15,7 @@ set -eu
 seconds=${1:-25}
 [ $# -gt 0 ] && shift
 root=$(cd "$(dirname "$0")/../../.." && pwd)
-here="$root/crates/watch/scripts"
+here="$root/demo/broadcast/scripts"
 port=${PORT:-48960}
 link=$((port + 3))
 control=$((port + 4))
