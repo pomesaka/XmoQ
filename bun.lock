@@ -107,6 +107,7 @@
       "name": "@xmoq/msf",
       "version": "0.0.0",
       "dependencies": {
+        "@xmoq/json": "workspace:*",
         "@xmoq/moqt": "workspace:*",
       },
       "devDependencies": {

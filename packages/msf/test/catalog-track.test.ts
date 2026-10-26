@@ -179,7 +179,7 @@ describe("catalogStateAfter: which catalog a reader has after each Object", () =
 		expect(state.outdated).toEqual({
 			at: { group: 5n, object: 0n },
 			because: "unreadable",
-			detail: "the payload is not JSON in UTF-8",
+			detail: "the payload is no JSON in UTF-8 that serde_json reads",
 		});
 	});
 

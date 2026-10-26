@@ -74,3 +74,7 @@ percent-alone	invalid	{"version":"draft-01","tracks":[{"name":"100%","packaging"
 percent-in-a-field-that-is-not-read	invalid	{"version":"draft-01","x-note":["50% off"],"tracks":[{"name":"video","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1}]}
 percent-around-a-name-with-a-dot	invalid	{"version":"draft-01","tracks":[{"name":"%a.b%","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1}]}
 percent-around-no-name	invalid	{"version":"draft-01","tracks":[{"name":"a%%b","packaging":"loc","isLive":true,"codec":"avc3.42E01F","bitrate":1}]}
+a-field-not-read-nested-127-deep	catalog	{"version":"draft-01","x":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],"tracks":[]}
+a-field-not-read-nested-128-deep	invalid	{"version":"draft-01","x":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],"tracks":[]}
+version-twice-the-later-draft-01	catalog	{"version":"draft-00","version":"draft-01","tracks":[]}
+version-twice-the-later-another	unsupported-version	{"version":"draft-01","version":"draft-00","tracks":[]}

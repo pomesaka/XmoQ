@@ -17,13 +17,13 @@
 // tracks reads its payloads with it, and packages of one layer may not
 // depend on each other (`scripts/ci/check-layers.sh`).
 
-/** A value as this reader keeps it: of a number its text, of a literal only what it is. */
+/** A value as this reader keeps it: of a number its text. */
 export type JsonValue =
 	| { kind: "object"; members: Map<string, JsonValue> }
 	| { kind: "array"; items: JsonValue[] }
 	| { kind: "string"; value: string }
 	| { kind: "number"; text: string }
-	| { kind: "literal" };
+	| { kind: "literal"; value: boolean | null };
 
 /**
  * How deep arrays and objects may be nested: the outermost counts as 1.
@@ -35,6 +35,12 @@ export type JsonValue =
 const MAX_DEPTH = 127;
 
 const NUMBER = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
+
+const LITERALS: [string, boolean | null][] = [
+	["true", true],
+	["false", false],
+	["null", null],
+];
 
 /** Why the text is no JSON; nothing outside this file sees it. */
 class NotJson extends Error {}
@@ -184,10 +190,10 @@ export function readJson(text: string): JsonValue | undefined {
 			case '"':
 				return { kind: "string", value: string() };
 			default: {
-				for (const literal of ["true", "false", "null"]) {
+				for (const [literal, read] of LITERALS) {
 					if (text.startsWith(literal, at)) {
 						at += literal.length;
-						return { kind: "literal" };
+						return { kind: "literal", value: read };
 					}
 				}
 				NUMBER.lastIndex = at;
@@ -210,5 +216,82 @@ export function readJson(text: string): JsonValue | undefined {
 	} catch (error) {
 		if (error instanceof NotJson) return undefined;
 		throw error;
+	}
+}
+
+// WHY `fatal` and `ignoreBOM`: `serde_json` reads bytes that are not UTF-8,
+// and a byte order mark, as no JSON. Without `fatal` the decoder puts
+// U+FFFD in place of the first, and without `ignoreBOM` it drops the second.
+const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** The one value of a payload of UTF-8 JSON, read as `readJson` reads text; undefined for bytes that are not UTF-8, or no JSON. */
+export function readJsonPayload(payload: Uint8Array): JsonValue | undefined {
+	let text: string;
+	try {
+		text = decoder.decode(payload);
+	} catch {
+		return undefined;
+	}
+	return readJson(text);
+}
+
+/** The members of `value` where it is an object. */
+export const membersOf = (
+	value: JsonValue | undefined,
+): Map<string, JsonValue> | undefined =>
+	value?.kind === "object" ? value.members : undefined;
+
+/**
+ * A number written as a whole number from 0 to `most`, with no fraction,
+ * exponent or sign, as `as_u64` of `serde_json` takes it (it has a float for
+ * `-0`, `1.0` and `1e3`); undefined for any other value. `most` is at most
+ * `Number.MAX_SAFE_INTEGER`, which a number holds exactly.
+ */
+export function wholeNumberOf(
+	value: JsonValue | undefined,
+	most: number = Number.MAX_SAFE_INTEGER,
+): number | undefined {
+	if (value?.kind !== "number" || !/^(?:0|[1-9][0-9]*)$/.test(value.text)) {
+		return undefined;
+	}
+	// WHY by the text's length first: a longer one would lose its last
+	// digits in a number, and could come out at `most`.
+	if (value.text.length > String(Number.MAX_SAFE_INTEGER).length) {
+		return undefined;
+	}
+	const read = Number(value.text);
+	return read <= most && read <= Number.MAX_SAFE_INTEGER ? read : undefined;
+}
+
+/**
+ * `value` as `JSON.parse` would give it: a number by `Number` of its text,
+ * an object as a plain object of its members (the last of a member that
+ * came twice). For a reader that checks a document by the types of its
+ * fields, as `@xmoq/msf` does its catalogs.
+ */
+export function plainOf(value: JsonValue): unknown {
+	switch (value.kind) {
+		case "object": {
+			const plain: Record<string, unknown> = {};
+			for (const [key, member] of value.members) {
+				// WHY defineProperty: a member named `__proto__` is a member,
+				// as `JSON.parse` makes it, and not the prototype.
+				Object.defineProperty(plain, key, {
+					value: plainOf(member),
+					enumerable: true,
+					writable: true,
+					configurable: true,
+				});
+			}
+			return plain;
+		}
+		case "array":
+			return value.items.map(plainOf);
+		case "string":
+			return value.value;
+		case "number":
+			return Number(value.text);
+		case "literal":
+			return value.value;
 	}
 }
