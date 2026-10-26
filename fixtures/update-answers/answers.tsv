@@ -1,0 +1,10 @@
+accepted	update ok	- | accepted
+refused	update error done	- | failed | done
+refused-once-for-two	update update error done	- | - | failed | done
+refused-each-of-two	update update error error done	- | - | failed | after-refusal | done
+refused-then-accepted	update update error ok done	- | - | failed | after-refusal | done
+accepted-then-refused	update update ok error done	- | - | accepted | failed | done
+done-while-waiting	update update done	- | - | done
+answer-to-nothing	ok	closed 0x3
+refusal-of-nothing	error	closed 0x3
+more-answers-than-updates	update error error	- | failed | closed 0x3

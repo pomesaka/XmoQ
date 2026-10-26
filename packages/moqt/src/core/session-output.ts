@@ -112,7 +112,8 @@ export type SessionEvent =
 	/**
 	 * The publisher refused a REQUEST_UPDATE of a subscription. The
 	 * subscription is still there: its PUBLISH_DONE with UPDATE_FAILED
-	 * follows (§10.9.1) and ends it as any other.
+	 * follows (§10.9.1) and ends it as any other. What answers the updates
+	 * sent after the refused one comes with no event.
 	 */
 	| {
 			type: "update-error";

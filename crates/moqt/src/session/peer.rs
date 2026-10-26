@@ -4,8 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use super::fetch::ends_before;
 use super::{
-    MAX_UNANSWERED_UPDATES, Request, RequestEvent, RequestId, Role, Session, check_own_parameters,
-    first_request_id,
+    Request, RequestEvent, RequestId, Role, Session, check_own_parameters, first_request_id,
 };
 use crate::aliases::SubscribedAlias;
 use crate::immutable::{TrackRefusal, track_properties_refusal};
@@ -228,6 +227,9 @@ pub enum PeerRequestEvent {
     /// still there: its `PUBLISH_DONE` with `UPDATE_FAILED` follows
     /// (§10.9.1) and ends it as any other.
     OwnUpdateFailed(RequestError),
+    /// The answer to such a `REQUEST_UPDATE` sent before the publisher
+    /// refused an earlier one ([`Self::OwnUpdateFailed`]): nothing to do.
+    OwnUpdateAnsweredAfterRefusal,
     /// Another `REQUEST_UPDATE` after one was refused. Nothing is sent (§10.9.1).
     UpdateAlreadyRefused,
     /// `REQUEST_UPDATE` for a FETCH that was answered. The caller sends
@@ -294,9 +296,9 @@ enum PeerRequestState {
         full_track_name: FullTrackName,
         track_alias: u64,
         established: bool,
-        /// `REQUEST_UPDATE`s this endpoint sent for it that have no answer
-        /// yet ([`Session::update_published`]).
-        updates: u32,
+        /// The `REQUEST_UPDATE`s this endpoint sent for it
+        /// ([`Session::update_published`]).
+        updates: super::SentUpdates,
     },
     PublishNamespace {
         established: bool,
@@ -670,7 +672,7 @@ impl Session {
                     full_track_name: message.full_track_name.clone(),
                     track_alias: message.track_alias,
                     established: false,
-                    updates: 0,
+                    updates: super::SentUpdates::default(),
                 };
                 (state, PeerRequest::Publish(message))
             }
@@ -1085,7 +1087,7 @@ impl Session {
     ///
     /// Fails for a request that is not a PUBLISH this endpoint accepted,
     /// when a parameter may not appear in `REQUEST_UPDATE`, when
-    /// [`MAX_UNANSWERED_UPDATES`] updates wait for their answer, and when
+    /// [`super::MAX_UNANSWERED_UPDATES`] updates wait for their answer, and when
     /// the Request IDs are used up (§10.1: an update consumes one).
     pub fn update_published(
         &mut self,
@@ -1102,13 +1104,11 @@ impl Session {
         else {
             return Err(UsageError("not an established subscription of a PUBLISH"));
         };
-        if *updates >= MAX_UNANSWERED_UPDATES {
-            return Err(UsageError("too many updates wait for their answer"));
-        }
+        updates.check_room()?;
         let next = request_id
             .checked_add(2)
             .ok_or(UsageError("request ids are exhausted"))?;
-        *updates += 1;
+        updates.sent();
         self.next_request_id = next;
         Ok(ControlMessage::RequestUpdate(RequestUpdate {
             request_id,
@@ -1197,7 +1197,7 @@ impl Session {
                 else {
                     return Err(not_allowed.into());
                 };
-                if *updates == 0 {
+                if !updates.waiting() {
                     return Err(not_allowed.into());
                 }
                 match super::update_answered(updates, answer)? {
@@ -1206,6 +1206,9 @@ impl Session {
                     }
                     RequestEvent::UpdateAccepted { parameters } => {
                         Ok(PeerRequestEvent::OwnUpdateAccepted { parameters })
+                    }
+                    RequestEvent::UpdateAnsweredAfterRefusal => {
+                        Ok(PeerRequestEvent::OwnUpdateAnsweredAfterRefusal)
                     }
                     _ => Err(not_allowed.into()),
                 }
@@ -1525,7 +1528,9 @@ mod tests {
     use crate::name::TrackNamespace;
     use crate::session::RequestState;
     use crate::session::Transport;
-    use crate::test_util::{REQUEST_UPDATES_BY_HAND, fixture, fixture_by_hand};
+    use crate::test_util::{
+        REQUEST_UPDATES_BY_HAND, closed, fixture, fixture_by_hand, table_rows, update_answer_steps,
+    };
 
     fn server() -> Session {
         Session::new(Role::Server, Transport::WebTransport)
@@ -2146,39 +2151,6 @@ mod tests {
                 other => panic!("{row:?}: {other:?}"),
             };
             assert_eq!(outcome, row.outcome, "{row:?}");
-        }
-    }
-
-    /// The rows of a shared table: its lines, each split at the tabs into
-    /// `N` fields. The first field is the name of the row.
-    fn table_rows<const N: usize>(path: &str) -> Vec<[String; N]> {
-        let path = format!("{}/../../fixtures/{path}", env!("CARGO_MANIFEST_DIR"));
-        let table = std::fs::read_to_string(&path).expect("the fixture is there");
-        let body = table
-            .strip_suffix('\n')
-            .unwrap_or_else(|| panic!("{path}: the last row does not end with a line feed"));
-        let mut rows: Vec<[String; N]> = Vec::new();
-        for line in body.split('\n') {
-            let fields: Vec<String> = line.split('\t').map(str::to_string).collect();
-            let row: [String; N] = fields
-                .try_into()
-                .unwrap_or_else(|_| panic!("{path}: not {N} fields: {line:?}"));
-            assert!(
-                rows.iter().all(|other| other[0] != row[0]),
-                "{path}: twice: {:?}",
-                row[0]
-            );
-            rows.push(row);
-        }
-        rows
-    }
-
-    /// What the session does for an error that closes it, as the shared
-    /// tables write it.
-    fn closed(error: &Error) -> String {
-        match error.termination_code() {
-            Some(code) => format!("closed {:#x}", code.code()),
-            None => panic!("an error that closes no session: {error:?}"),
         }
     }
 
@@ -3511,8 +3483,8 @@ mod tests {
             session.on_peer_request_message(request, ok()),
             Ok(PeerRequestEvent::OwnUpdateAccepted { parameters: vec![] })
         );
-        // A refusal answers all that wait (§10.9.1), and PUBLISH_DONE ends
-        // the subscription as any other.
+        // A refusal answers the one that waits, and PUBLISH_DONE ends the
+        // subscription as any other.
         let refusal = RequestError {
             error_code: 0x3,
             retry_interval: 0,
@@ -3533,6 +3505,54 @@ mod tests {
             assert!(ask(&mut session, request, 0).is_ok(), "{sent}");
         }
         assert!(ask(&mut session, request, 0).is_err());
+    }
+
+    /// The contract `fixtures/update-answers/answers.tsv` pins for both
+    /// implementations, for the subscriber of a PUBLISH.
+    #[test]
+    fn a_subscriber_of_a_publish_reads_the_answers_to_its_updates_as_the_shared_table_says() {
+        for (name, steps, events) in update_answer_steps() {
+            let mut session = server();
+            let request = opened(&mut session, publish(0, b"a", 7));
+            session.accept_publish(request, vec![]).unwrap();
+            let mut done = Vec::new();
+            for step in steps.split(' ') {
+                let message = match step {
+                    "update" => {
+                        session.update_published(request, vec![]).unwrap();
+                        done.push("-".to_string());
+                        continue;
+                    }
+                    "ok" => ControlMessage::RequestOk(RequestOk::default()),
+                    "error" => ControlMessage::RequestError(RequestError {
+                        error_code: 0x3,
+                        retry_interval: 0,
+                        error_reason: ReasonPhrase::default(),
+                        redirect: None,
+                    }),
+                    "done" => ControlMessage::PublishDone(PublishDone {
+                        status_code: 0x8,
+                        stream_count: 0,
+                        error_reason: ReasonPhrase::default(),
+                    }),
+                    other => panic!("{name}: a step the test does not know: {other}"),
+                };
+                done.push(match session.on_peer_request_message(request, message) {
+                    Ok(PeerRequestEvent::OwnUpdateAccepted { .. }) => "accepted".to_string(),
+                    Ok(PeerRequestEvent::OwnUpdateFailed(_)) => "failed".to_string(),
+                    Ok(PeerRequestEvent::OwnUpdateAnsweredAfterRefusal) => {
+                        "after-refusal".to_string()
+                    }
+                    Ok(PeerRequestEvent::PublishDone { .. }) => "done".to_string(),
+                    Err(RequestFault::Peer(error)) => closed(&error),
+                    other => panic!("{name}: {step}: {other:?}"),
+                });
+                if done.last().is_some_and(|last| last.starts_with("closed")) {
+                    break;
+                }
+            }
+            assert_eq!(&done.join(" | "), &events, "{name}");
+        }
     }
 
     #[test]

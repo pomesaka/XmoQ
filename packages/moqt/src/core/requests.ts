@@ -506,6 +506,8 @@ interface SubscribeEntry extends RequestCommon {
 	maxObjectPayloadLength: number;
 	/** REQUEST_UPDATEs this endpoint sent that have no answer yet (`updateSubscription`). */
 	updates: number;
+	/** Whether the publisher refused one of them. */
+	updateRefused: boolean;
 }
 
 /**
@@ -1000,47 +1002,57 @@ export function createRequests(options: RequestsOptions): Requests {
 		});
 	};
 
+	/**
+	 * After a refusal the publisher ends the subscription (§10.9.1: it "MUST
+	 * also terminate the subscription by sending a PUBLISH_DONE with error
+	 * code UPDATE_FAILED"), and what answers the later updates is taken
+	 * with no event. WHY each answer counts one, where a refusal could be
+	 * read as the answer to all that wait: a publisher that coalesces sends
+	 * "only a single REQUEST_ERROR" (§10.9.1), but one that does not answers
+	 * each, and both are followed by the PUBLISH_DONE, which ends the
+	 * request whatever still waits. `fixtures/update-answers/` has the rows,
+	 * which the Rust session reads too.
+	 */
 	const onUpdateAnswered = (
 		request: SubscribeEntry,
 		message: RequestOk | RequestError,
 		out: SessionOutput[],
 	): void => {
 		const { requestId } = request;
-		if (message.type === "REQUEST_ERROR") {
-			// §10.9.1: the publisher "MUST also terminate the subscription by
-			// sending a PUBLISH_DONE with error code UPDATE_FAILED", which
-			// comes next and ends the request. WHY the count goes to 0: a
-			// receiver may answer several updates with one REQUEST_ERROR.
-			request.updates = 0;
+		if (message.type === "REQUEST_OK") {
+			// What a REQUEST_UPDATE_OK may carry: §10.2.10, §10.2.11.
+			const outside = Object.keys(message.parameters).filter(
+				(name) => name !== "expires" && name !== "largestObject",
+			);
+			if (outside.length > 0) {
+				throw protocolViolation(
+					`${outside.join(", ")} not allowed in REQUEST_UPDATE_OK`,
+				);
+			}
+			// §10.5: Track Properties are empty in REQUEST_UPDATE_OK.
+			if (message.trackProperties.length > 0) {
+				throw protocolViolation("Track Properties in REQUEST_UPDATE_OK");
+			}
+		}
+		request.updates -= 1;
+		if (request.updateRefused) return;
+		if (message.type === "REQUEST_OK") {
 			out.push({
 				type: "event",
-				event: {
-					type: "update-error",
-					requestId,
-					errorCode: message.errorCode,
-					retryInterval: message.retryInterval,
-					errorReason: message.errorReason,
-				},
+				event: { type: "update-ok", requestId, parameters: message.parameters },
 			});
 			return;
 		}
-		// What a REQUEST_UPDATE_OK may carry: §10.2.10, §10.2.11.
-		const outside = Object.keys(message.parameters).filter(
-			(name) => name !== "expires" && name !== "largestObject",
-		);
-		if (outside.length > 0) {
-			throw protocolViolation(
-				`${outside.join(", ")} not allowed in REQUEST_UPDATE_OK`,
-			);
-		}
-		// §10.5: Track Properties are empty in REQUEST_UPDATE_OK.
-		if (message.trackProperties.length > 0) {
-			throw protocolViolation("Track Properties in REQUEST_UPDATE_OK");
-		}
-		request.updates -= 1;
+		request.updateRefused = true;
 		out.push({
 			type: "event",
-			event: { type: "update-ok", requestId, parameters: message.parameters },
+			event: {
+				type: "update-error",
+				requestId,
+				errorCode: message.errorCode,
+				retryInterval: message.retryInterval,
+				errorReason: message.errorReason,
+			},
 		});
 	};
 
@@ -1857,6 +1869,7 @@ export function createRequests(options: RequestsOptions): Requests {
 					trackAlias: undefined,
 					maxObjectPayloadLength,
 					updates: 0,
+					updateRefused: false,
 				},
 				message: {
 					type: "SUBSCRIBE",
