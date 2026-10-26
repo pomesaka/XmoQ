@@ -8,6 +8,7 @@ use crate::kvp::{self, KeyValuePair};
 use crate::name::{FullTrackName, Location, TrackNamespace};
 use crate::params::{self, MessageKind, Parameter};
 use crate::{Error, UsageError, varint};
+use track_property::{DEFAULT_PUBLISHER_GROUP_ORDER, DEFAULT_PUBLISHER_PRIORITY, DYNAMIC_GROUPS};
 
 /// Largest Message Payload: the Message Length field is 16 bits (§10).
 pub const MAX_PAYLOAD_LEN: usize = 65_535;
@@ -46,12 +47,20 @@ const PUBLISH_OK: u64 = 0x1e;
 const SUBSCRIBE_NAMESPACE: u64 = 0x50;
 const SUBSCRIBE_TRACKS: u64 = 0x51;
 
-/// The Track Property `DYNAMIC_GROUPS` (§12.6).
-const DYNAMIC_GROUPS: u64 = 0x30;
-/// The Track Property DEFAULT PUBLISHER PRIORITY (§12.4).
-const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
-/// The Track Property `DEFAULT_PUBLISHER_GROUP_ORDER` (§12.5).
-const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
+/// Track Property types (§15.8) and what holds without them.
+pub mod track_property {
+    /// DEFAULT PUBLISHER PRIORITY (§12.4).
+    pub const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
+    /// The Publisher Priority of a track whose PUBLISH or `SUBSCRIBE_OK` has
+    /// no DEFAULT PUBLISHER PRIORITY. §12.4: "If omitted, the Default
+    /// Publisher Priority is 128." A Subgroup Header or a datagram without a
+    /// Publisher Priority inherits this (§11.4.2, §11.3.1).
+    pub const DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED: u8 = 128;
+    /// `DEFAULT_PUBLISHER_GROUP_ORDER` (§12.5).
+    pub const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
+    /// `DYNAMIC_GROUPS` (§12.6).
+    pub const DYNAMIC_GROUPS: u64 = 0x30;
+}
 
 /// Decodes the Track Properties that end `SUBSCRIBE_OK`, `PUBLISH`, `REQUEST_OK`
 /// and `FETCH_OK`.

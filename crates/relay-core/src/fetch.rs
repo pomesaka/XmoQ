@@ -17,9 +17,13 @@ use std::collections::btree_map::Entry;
 use xmoq_moqt::fetch::RangeEnd;
 use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
-use xmoq_moqt::message::{ControlMessage, Fetch, FetchRange, RequestOk, request_error_code};
+use xmoq_moqt::message::{
+    ControlMessage, Fetch, FetchRange, RequestOk, request_error_code, track_property,
+};
 use xmoq_moqt::name::{FullTrackName, Location};
-use xmoq_moqt::params::{ANSWER_WAIT_MS, GroupOrder, Parameter, answer_wait_ms};
+use xmoq_moqt::params::{
+    ANSWER_WAIT_MS, DEFAULT_SUBSCRIBER_PRIORITY, GroupOrder, Parameter, answer_wait_ms,
+};
 use xmoq_moqt::session::{FetchStreamOpened, PeerRequestId, RequestEvent, RequestId};
 use xmoq_moqt::{RequestFault, stream_reset_code};
 
@@ -499,8 +503,11 @@ fn fetch_send_order(parameters: &[Parameter]) -> i32 {
             Parameter::SubscriberPriority(priority) => Some(*priority),
             _ => None,
         })
-        .unwrap_or(crate::DEFAULT_PRIORITY);
-    crate::send_order(subscriber_priority, crate::DEFAULT_PRIORITY)
+        .unwrap_or(DEFAULT_SUBSCRIBER_PRIORITY);
+    crate::send_order(
+        subscriber_priority,
+        track_property::DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED,
+    )
 }
 
 /// How the answer to a FETCH that has its `FETCH_OK` ended.
@@ -2725,7 +2732,10 @@ impl Relay {
         let Some(priority) = priority else {
             return;
         };
-        let send_order = crate::send_order(priority, crate::DEFAULT_PRIORITY);
+        let send_order = crate::send_order(
+            priority,
+            track_property::DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED,
+        );
         let set = Action::SetFetchSendOrder {
             session,
             stream,

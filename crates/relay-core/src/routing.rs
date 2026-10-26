@@ -326,7 +326,7 @@ impl Delivery {
                     Parameter::SubscriberPriority(priority) => Some(*priority),
                     _ => None,
                 })
-                .unwrap_or(crate::DEFAULT_PRIORITY),
+                .unwrap_or(xmoq_moqt::params::DEFAULT_SUBSCRIBER_PRIORITY),
             new_group_request: parameters.iter().find_map(|parameter| match parameter {
                 Parameter::NewGroupRequest(group) => Some(*group),
                 _ => None,

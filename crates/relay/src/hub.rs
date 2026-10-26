@@ -3073,11 +3073,7 @@ fn uni_envelope<C: Connection>(session: SessionKey, event: UniEvent) -> Envelope
         UniEvent::SubgroupClosed { stream, end, .. } => Event::DataStreamClosed {
             session,
             stream: StreamKey(stream),
-            end: match end {
-                StreamEnd::Fin => xmoq_relay_core::StreamEnd::Fin,
-                StreamEnd::Aborted(code) => xmoq_relay_core::StreamEnd::Aborted(code),
-                StreamEnd::Lost => xmoq_relay_core::StreamEnd::Lost,
-            },
+            end,
         },
         UniEvent::FetchOpened { stream, header } => Event::FetchStreamOpened {
             session,

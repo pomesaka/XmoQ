@@ -71,17 +71,7 @@ pub enum RequestEnd {
     Aborted,
 }
 
-/// How a subgroup stream of a peer ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamEnd {
-    /// With a FIN: every Object of the Subgroup was delivered (§11.4.3).
-    Fin,
-    /// Without one: reset by the peer, or stopped by the I/O side. The code
-    /// is the peer's Stream Reset Error Code when it gave one.
-    Aborted(Option<u32>),
-    /// Cut off by the end of the peer's connection.
-    Lost,
-}
+pub use xmoq_moqt::data::StreamEnd;
 
 /// How the passing on of a fetch stream ended ([`Action::PipeFetch`]). In
 /// every case but the first the I/O side has reset the stream to the
