@@ -116,6 +116,29 @@ export function fixture(name: string): string {
 	return hexFile(FIXTURE_DIR, name);
 }
 
+/**
+ * The rows of a table of `fixtures/<directory>/`, each split at its tabs.
+ * WHY not filter empty lines away: the README of each table says every row
+ * ends with one line feed, the last one too; an empty row is an error of the
+ * table, and is not passed over. WHY an empty table fails: `test.each`
+ * passes with no rows.
+ */
+export function fixtureTable(directory: string, file: string): string[][] {
+	const path = join(FIXTURES, directory, file);
+	const table = readFileSync(path, "utf8");
+	if (!table.endsWith("\n")) {
+		throw new Error(`${path}: the last row does not end with a line feed`);
+	}
+	const rows = table
+		.slice(0, -1)
+		.split("\n")
+		.map((line) => line.split("\t"));
+	if (rows.some((row) => row.join("") === "")) {
+		throw new Error(`${path} has an empty row, or no rows`);
+	}
+	return rows;
+}
+
 /** SETUP of the moqtail relay 0.15.0. */
 export const MOQTAIL_RELAY_SETUP = fixture("setup-moqtail-relay");
 
