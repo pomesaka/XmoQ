@@ -681,7 +681,12 @@ describe("decodeFetchBody", () => {
 			expect(read.items).toEqual(items);
 			expect(read.error).toBeInstanceOf(MoqtError);
 			expect(read.error).toMatchObject({ code: 3 });
-			await connection.closed;
+			// As for a fault the session finds: an error, not this endpoint's
+			// own close.
+			expect(await connection.closed).toMatchObject({
+				type: "error",
+				error: { code: 3 },
+			});
 			expect(peer.closeInfo()).toMatchObject({ closeCode: 3 });
 		},
 	);
@@ -746,4 +751,32 @@ describe("decodeFetchBody", () => {
 			streamErrorCode: 1,
 		});
 	});
+});
+
+test("a subscription of the session hands on what it holds before it fails, when a fetch stream closes the session", async () => {
+	const { peer, connection } = await connected();
+	// SUBSCRIBE (Request ID 0), answered with SUBSCRIBE_OK, Track Alias 9.
+	const subscribing = connection.subscribe(TRACK);
+	const subscribe = await peer.clientBidi();
+	await subscribe.sent.read();
+	await subscribe.reply.write(hex("04 00 02 09 00"));
+	const subscription = await subscribing;
+	// One Object for it, not read yet: a subgroup stream of Group 0, Subgroup
+	// 0, and Object 0 with the payload 61.
+	await peer.openUni().write(hex("14 09 00 00 00 00 01 61"));
+	await settle();
+	// FETCH (Request ID 2), whose stream breaks §11.4.4.1: a first Object
+	// that refers to a prior one.
+	const fetch = await connection.fetch({ range: RANGE });
+	await (await peer.clientBidi()).sent.read();
+	const stream = peer.openUni();
+	await stream.write(hex("05 02"));
+	await stream.write(hex("00 01 aa"));
+	await decodeAll(decodeFetchBody(connection, fetch));
+	const reader = subscription.objects.getReader();
+	const first = await reader.read();
+	expect({
+		first: first.done ? undefined : toHex(first.value.object.payload),
+		after: await rejection(reader.read()),
+	}).toMatchObject({ first: "61", after: { name: "SubscriptionEndedError" } });
 });
