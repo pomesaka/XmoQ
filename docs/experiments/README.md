@@ -210,6 +210,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-25 [The room names two transcripts](2026-10-25-the-room-names-two-transcripts.md)
 - 2026-10-26 [The room out of the spikes](2026-10-26-the-room-out-of-the-spikes.md)
 - 2026-10-26 [Tokens in the namespaces of the room](2026-10-26-tokens-in-the-namespaces-of-the-room.md)
+- 2026-10-27 [Reactions from page to page, and how many are in the room](2026-10-27-reactions-from-page-to-page.md)
 
 ### Phase 5 — An agent follows a broadcast
 
