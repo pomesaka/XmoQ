@@ -8,6 +8,7 @@ use xmoq_moqt_io::wt::certificate_hash;
 
 use xmoq_speech::command::CommandLimits;
 use xmoq_speech::engine::Engine;
+use xmoq_subscriber::kept::{TIMES, TIMES_MOST};
 
 /// How the transcriber is started without a flag it does not know.
 pub const USAGE: &str = "\
@@ -16,7 +17,7 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
                  [--engine-command '<program> <args>'] [--engine-timeout-ms <n>] [--engine-most-output <n>]
                  [--voice vad|loudness] [--vad-model <file>]
                  [--keep <n>] [--waiting <n>] [--readers <n>] [--tracks <n>]
-                 [--auth-key-hex <hex>]
+                 [--ask-again-times <n>] [--auth-key-hex <hex>]
 
 --namespace     a prefix whose broadcasts are listened to, its fields between slashes, 30 at the most;
                 up to 8, none the same as another or a prefix of it. Its transcript is the track speech of xmoq/transcript/<prefix>
@@ -38,6 +39,9 @@ xmoq-transcriber --url <https://host:port/> --cert-sha256 <64 hex digits> --name
 --readers       threads that read pieces at once: of whisper, each a state of its own over the one model;
                 of command, each runs the program for a piece of its own (1; 1 to 8)
 --tracks        broadcasts listened to at once; one more is passed over (16; 1 to 100)
+--ask-again-times   how many times in a row the catalog of a broadcast is asked again, without a
+                    subscription between, or found malformed, before it is asked again only when
+                    the broadcast's namespace comes again (30; 0 to 10000)
 --auth-key-hex  the relay's key, of which tokens are made: where the relay shares its key with the transcriber";
 
 /// The most `--namespace` flags: as many `SUBSCRIBE_NAMESPACE` requests as
@@ -104,6 +108,8 @@ pub struct Args {
     pub readers: usize,
     /// `--tracks`.
     pub tracks: usize,
+    /// `--ask-again-times`.
+    pub ask_again_times: u32,
     /// `--auth-key-hex`: the key the relay checks tokens with, of which the
     /// transcriber makes its own, as the gatherer of the chat does: for a
     /// relay that shares its key with the transcriber (provisional).
@@ -132,6 +138,34 @@ fn prefix(value: &str) -> Result<TrackNamespace, String> {
     xmoq_transcript_tracks::names::transcript_namespace(&namespace)
         .map_err(|_| format!("--namespace {value:?} has too many fields for its transcript"))?;
     Ok(namespace)
+}
+
+/// `--ask-again-times`: a number from 0 to [`TIMES_MOST`].
+fn times(value: &str) -> Result<u32, String> {
+    value
+        .parse()
+        .ok()
+        .filter(|times| *times <= TIMES_MOST)
+        .ok_or_else(|| {
+            format!("--ask-again-times is a number from 0 to {TIMES_MOST}, not {value:?}")
+        })
+}
+
+/// Adds the prefix of a `--namespace` to `prefixes`.
+fn add_prefix(prefixes: &mut Vec<TrackNamespace>, value: &str) -> Result<(), String> {
+    let namespace = prefix(value)?;
+    // WHY none under another: a broadcast under both would be
+    // read twice, into two transcripts.
+    if prefixes
+        .iter()
+        .any(|other| is_prefix(other, &namespace) || is_prefix(&namespace, other))
+    {
+        return Err(format!(
+            "--namespace {value:?} is the same as another, or a prefix of it, or under it"
+        ));
+    }
+    prefixes.push(namespace);
+    Ok(())
 }
 
 /// Whether `prefix` is a prefix of `of`, or the same.
@@ -189,6 +223,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut timeout, mut most_output) = (None, None);
     let (mut vad, mut vad_model) = (true, None);
     let (mut keep, mut waiting, mut tracks, mut readers) = (1000, 16, 16, 1);
+    let mut ask_again_times = TIMES;
     while let Some(flag) = flags.next() {
         let value = flags
             .next()
@@ -200,20 +235,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
                     .ok_or_else(|| format!("--cert-sha256 is 64 hex digits, not {value:?}"))?;
                 cert_sha256 = Some(hash);
             }
-            "--namespace" => {
-                let namespace = prefix(&value)?;
-                // WHY none under another: a broadcast under both would be
-                // read twice, into two transcripts.
-                if prefixes
-                    .iter()
-                    .any(|other| is_prefix(other, &namespace) || is_prefix(&namespace, other))
-                {
-                    return Err(format!(
-                        "--namespace {value:?} is the same as another, or a prefix of it, or under it"
-                    ));
-                }
-                prefixes.push(namespace);
-            }
+            "--namespace" => add_prefix(&mut prefixes, &value)?,
             "--engine" => {
                 engine = Engine::named(&value).ok_or_else(|| {
                     format!("--engine is one of {}, not {value:?}", Engine::NAMES)
@@ -245,6 +267,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
             "--waiting" => waiting = number_within(&flag, &value, WAITING_MOST)?,
             "--tracks" => tracks = number_within(&flag, &value, TRACKS_MOST)?,
             "--readers" => readers = number_within(&flag, &value, READERS_MOST)?,
+            "--ask-again-times" => ask_again_times = times(&value)?,
             "--auth-key-hex" => {
                 auth_key = Some(
                     xmoq_room_token::key_of_hex(&value)
@@ -279,6 +302,7 @@ pub fn parse(mut flags: impl Iterator<Item = String>) -> Result<Args, String> {
         waiting,
         readers,
         tracks,
+        ask_again_times,
         auth_key,
     })
 }
@@ -315,7 +339,12 @@ mod tests {
             ),
             (None, "auto", 1000, 16, 16, None)
         );
-        assert_eq!((read.vad, read.vad_model, read.readers), (true, None, 1));
+        assert_eq!(
+            (read.vad, read.vad_model, read.readers, read.ask_again_times),
+            (true, None, 1, 30)
+        );
+        let never = args(&["--namespace", "a", "--ask-again-times", "0"]).unwrap();
+        assert_eq!(never.ask_again_times, 0);
         assert_eq!(
             (read.engine, read.command.is_empty(), read.command_limits),
             (Engine::Whisper, true, CommandLimits::default())
@@ -350,7 +379,11 @@ mod tests {
 
     #[test]
     fn flags_that_are_refused() {
-        let cases: [(&[&str], &str); 17] = [
+        let cases: [(&[&str], &str); 18] = [
+            (
+                &["--namespace", "a", "--ask-again-times", "10001"],
+                "--ask-again-times is a number from 0 to 10000, not \"10001\"",
+            ),
             (
                 &["--namespace", "a", "--engine", "claude"],
                 "--engine is one of whisper, command",

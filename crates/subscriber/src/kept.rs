@@ -139,9 +139,11 @@ pub enum Happened {
     /// Its SUBSCRIBE was answered with `SUBSCRIBE_OK`.
     Subscribed,
     /// Its subscription ended: `PUBLISH_DONE`, its stream closed (a FIN, a
-    /// reset, a lost connection), a GOAWAY on its stream (§10.4), or the
-    /// track found malformed (§2.4.2).
+    /// reset, a lost connection), or a GOAWAY on its stream (§10.4).
     Ended,
+    /// The track was found malformed (§2.4.2), and its subscription
+    /// cancelled.
+    Malformed,
     /// Its SUBSCRIBE was refused with `REQUEST_ERROR`.
     Refused {
         /// Its Error Code.
@@ -153,6 +155,18 @@ pub enum Happened {
     /// Its SUBSCRIBE could not be sent, or was not answered.
     NotSent,
 }
+
+/// How many times in a row a track that is kept with a limit (the
+/// gatherer's tracks of a participant, the transcriber's catalog of a
+/// broadcast) is asked again by default, without a subscription that was
+/// established between. **Provisional**: against the own relay, which
+/// refuses a track nobody publishes with `DOES_NOT_EXIST` and a Retry
+/// Interval of 1,001, about two minutes.
+pub const TIMES: u32 = 30;
+
+/// The most the times of [`TIMES`] may be set to. 0 is the least: never
+/// asked again.
+pub const TIMES_MOST: u32 = 10_000;
 
 /// How a track is kept, besides the pauses: what [`decide`] goes by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,11 +182,13 @@ pub struct Keeping {
 }
 
 /// What [`decide`] keeps of one track between what happens to it: the
-/// pauses, and how many times in a row it was asked again.
+/// pauses, how many times in a row it was asked again, and how many times
+/// in a row it was found malformed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tries {
     again: AskAgain,
     asked: u32,
+    malformed: u32,
 }
 
 impl Tries {
@@ -182,6 +198,7 @@ impl Tries {
         Self {
             again: AskAgain::new(pauses),
             asked: 0,
+            malformed: 0,
         }
     }
 }
@@ -213,8 +230,13 @@ pub enum Becomes {
 /// where the track is asked again: as the pages that ask again
 /// (`afterRefusal` of `@xmoq/moqt`). WHY a malformed track is asked again,
 /// as any end: what broke the object model may be one Group of a publisher
-/// that goes on ([`KeptTrack::malformed`]).
+/// that goes on ([`KeptTrack::malformed`]). WHY the times it was found
+/// malformed in a row are not counted anew by a `SUBSCRIBE_OK`, where the
+/// other times are: a publisher that keeps sending a malformed track has
+/// each new subscription answered, and would be asked for ever; an end
+/// that is not malformed counts them anew.
 pub fn decide(happened: Happened, keeping: Keeping, tries: &mut Tries) -> Becomes {
+    let reached = |count: u32| keeping.times.is_some_and(|times| count >= times);
     let pause = match happened {
         Happened::Subscribed => {
             tries.again.subscribed();
@@ -227,10 +249,16 @@ pub fn decide(happened: Happened, keeping: Keeping, tries: &mut Tries) -> Become
             return Becomes::GivenUp;
         }
         Happened::NotSent if !keeping.again_after_failure => return Becomes::GivenUp,
-        _ if keeping.times.is_some_and(|times| tries.asked >= times) => {
-            return Becomes::GivenUp;
+        _ if reached(tries.asked) => return Becomes::GivenUp,
+        Happened::Malformed if reached(tries.malformed) => return Becomes::GivenUp,
+        Happened::Malformed => {
+            tries.malformed += 1;
+            tries.again.after_end()
         }
-        Happened::Ended => tries.again.after_end(),
+        Happened::Ended => {
+            tries.malformed = 0;
+            tries.again.after_end()
+        }
         Happened::Refused { named_ms, .. } => tries.again.after_refusal(named_ms),
         Happened::NotSent => tries.again.after_refusal(None),
     };
@@ -412,7 +440,11 @@ impl<C: Connection> KeptTrack<C> {
     pub fn cut(&mut self, session: &mut Session) -> Option<Said> {
         let subscription = self.subscription.as_ref()?;
         session.cancel(subscription.request);
-        Some(self.ended("cut".to_string(), stream_reset_code::CANCELLED))
+        Some(self.ended(
+            "cut".to_string(),
+            Happened::Ended,
+            stream_reset_code::CANCELLED,
+        ))
     }
 
     /// The session ended the SUBSCRIBE `request` for a malformed track
@@ -436,6 +468,7 @@ impl<C: Connection> KeptTrack<C> {
         }
         Some(self.ended(
             "MALFORMED_TRACK".to_string(),
+            Happened::Malformed,
             stream_reset_code::MALFORMED_TRACK,
         ))
     }
@@ -552,7 +585,9 @@ impl<C: Connection> KeptTrack<C> {
         };
         Ok(Some(
             match answered(session, subscription.request, event)? {
-                Answered::Ended(how) => self.ended(how, stream_reset_code::CANCELLED),
+                Answered::Ended(how) => {
+                    self.ended(how, Happened::Ended, stream_reset_code::CANCELLED)
+                }
                 Answered::Other(other) => Said::Other(other),
             },
         ))
@@ -560,11 +595,11 @@ impl<C: Connection> KeptTrack<C> {
 
     /// The subscription is over, `how`: asked for again after the pause.
     /// Its streams are reset and stopped with `code`.
-    fn ended(&mut self, how: String, code: u32) -> Said {
+    fn ended(&mut self, how: String, happened: Happened, code: u32) -> Said {
         if let Some(subscription) = self.let_go() {
             subscription.cancel_with(code);
         }
-        let pause_ms = self.pause_after(Happened::Ended);
+        let pause_ms = self.pause_after(happened);
         self.ask_in(pause_ms);
         Said::Ended { how, pause_ms }
     }
@@ -616,7 +651,7 @@ mod tests {
         assert!(table.ends_with('\n') && !table.ends_with("\n\n"), "{path}");
         let rows: Vec<Vec<&str>> = table.lines().map(|row| row.split('\t').collect()).collect();
         // A table that lost rows would pass.
-        assert_eq!(rows.len(), 23, "{path}");
+        assert_eq!(rows.len(), 26, "{path}");
         for row in rows {
             let [case, failure, steps, expected, times, publisher] = row.as_slice() else {
                 panic!("a row of six columns: {row:?}");
@@ -643,9 +678,8 @@ mod tests {
                 .map(|step| {
                     let happened = match step {
                         "subscribed" => Happened::Subscribed,
-                        "publish-done" | "fin" | "reset" | "lost" | "goaway" | "malformed" => {
-                            Happened::Ended
-                        }
+                        "publish-done" | "fin" | "reset" | "lost" | "goaway" => Happened::Ended,
+                        "malformed" => Happened::Malformed,
                         "not-sent" | "not-answered" => Happened::NotSent,
                         // The caller's error: the session is closed with its
                         // code.

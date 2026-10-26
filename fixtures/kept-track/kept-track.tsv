@@ -21,3 +21,6 @@ a malformed track and a SUBSCRIBE not answered count among the times	again	subsc
 a track its publisher need not publish is given up where it does not exist	again	refused:0x10	given-up	-	optional
 and is asked again after another refusal and after an end	again	refused:0x5:3000 subscribed publish-done refused:0x10:1001	again:3000 subscribed again:1000 given-up	30	optional
 one it is to publish is asked again where it does not exist	again	refused:0x10:1001	again:1001	30	required
+a track found malformed again and again is given up, its SUBSCRIBE_OK counting nothing anew	again	subscribed malformed subscribed malformed subscribed malformed	subscribed again:1000 subscribed again:1000 subscribed given-up	2	required
+an end that is not malformed counts those times anew	again	subscribed malformed subscribed malformed subscribed publish-done subscribed malformed	subscribed again:1000 subscribed again:1000 subscribed again:1000 subscribed again:1000	2	required
+without a limit a malformed track is asked again for ever	again	subscribed malformed subscribed malformed subscribed malformed	subscribed again:1000 subscribed again:1000 subscribed again:1000	-	required

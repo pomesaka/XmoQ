@@ -541,7 +541,7 @@ impl Gathering<'_> {
     /// what it was for go on without it.
     fn cancel_request(&mut self, token: u64, code: u32) {
         if let Some(purpose) = self.let_go(token, Command::Cancel(code)) {
-            self.request_over(token, &purpose, "its queue was full");
+            self.request_over(token, &purpose, Happened::Ended, "its queue was full");
         }
     }
 
@@ -1191,12 +1191,17 @@ impl Gathering<'_> {
             Heard::NotOpened(why) => {
                 self.session.cancel(request);
                 self.own.forget(token);
-                self.request_over(token, &purpose, &format!("not sent: {why}"));
+                self.request_over(
+                    token,
+                    &purpose,
+                    Happened::NotSent,
+                    &format!("not sent: {why}"),
+                );
                 Ok(None)
             }
             Heard::NotAnswered => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, &purpose, "not answered in time");
+                self.request_over(token, &purpose, Happened::NotSent, "not answered in time");
                 Ok(None)
             }
             Heard::Message(message) => {
@@ -1214,14 +1219,24 @@ impl Gathering<'_> {
             }
             Heard::Closed(how) => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, &purpose, &format!("its stream ended ({how})"));
+                self.request_over(
+                    token,
+                    &purpose,
+                    Happened::Ended,
+                    &format!("its stream ended ({how})"),
+                );
                 Ok(None)
             }
             // §5.1: a subscriber ends a subscription that PUBLISH made with
             // STOP_SENDING.
             Heard::Stopped(code) => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, &purpose, &format!("stopped ({code:?})"));
+                self.request_over(
+                    token,
+                    &purpose,
+                    Happened::Ended,
+                    &format!("stopped ({code:?})"),
+                );
                 Ok(None)
             }
             Heard::Failed(RequestReadError::Peer(error)) => Err(error.into()),
@@ -1254,7 +1269,7 @@ impl Gathering<'_> {
             }
             purpose => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, purpose, "GOAWAY");
+                self.request_over(token, purpose, Happened::Ended, "GOAWAY");
             }
         }
     }
@@ -1269,7 +1284,7 @@ impl Gathering<'_> {
     /// 30 seconds. What it misses: a `NAMESPACE_DONE` that comes while no
     /// request is open; that participant stays followed, and is asked again
     /// for its `said` as many times as `kept::decide` lets it.
-    fn request_over(&mut self, token: u64, purpose: &Purpose, why: &str) {
+    fn request_over(&mut self, token: u64, purpose: &Purpose, end: Happened, why: &str) {
         match purpose {
             Purpose::Watch(index) => {
                 if let Some(watch) = self.watches.get_mut(*index) {
@@ -1278,7 +1293,7 @@ impl Gathering<'_> {
                 }
             }
             Purpose::Person(person, track) => {
-                self.track_over(person, *track, Happened::NotSent, why);
+                self.track_over(person, *track, end, why);
             }
             Purpose::Room(room, track) => {
                 let room = room.clone();
@@ -1307,10 +1322,10 @@ impl Gathering<'_> {
         };
         match &purpose {
             Purpose::Person(person, track) => {
-                let end = Happened::Ended;
+                let end = Happened::Malformed;
                 self.track_over(person, *track, end, "the track is malformed");
             }
-            purpose => self.request_over(token, purpose, "the track is malformed"),
+            purpose => self.request_over(token, purpose, Happened::Ended, "the track is malformed"),
         }
     }
 
@@ -1414,7 +1429,7 @@ impl Gathering<'_> {
             (_, RequestEvent::Rejected(error)) => {
                 self.let_go(token, Command::Finish);
                 let why = format!("refused with {:#x}", error.error_code);
-                self.request_over(token, purpose, &why);
+                self.request_over(token, purpose, Happened::Ended, &why);
             }
             (Purpose::Person(person, track), RequestEvent::SubscriptionDone(done)) => {
                 println!(
@@ -1444,7 +1459,12 @@ impl Gathering<'_> {
                 RequestEvent::TrackNotProcessed { .. } | RequestEvent::TooManyNamespaces { .. },
             ) => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
-                self.request_over(token, purpose, "the session could not take its answer");
+                self.request_over(
+                    token,
+                    purpose,
+                    Happened::Ended,
+                    "the session could not take its answer",
+                );
             }
             // LateMessage, and what is no answer to a request of its kind.
             _ => {}
