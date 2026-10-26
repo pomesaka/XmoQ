@@ -559,14 +559,21 @@ async function servePages(clients: BrowserClient[]): Promise<string> {
 		const page = BROWSER_PAGES[client];
 		// WHY no `outdir`: drivers run at the same time, and a bundle written
 		// to a shared path could be read half-written by another one.
-		const build = await Bun.build({
-			entrypoints: [page.entrypoint],
-			target: "browser",
-			// WHY: Bun otherwise throws an error whose message is only "Bundle
-			// failed" (1.3.12, and 1.3.14 the same); the reasons are in
-			// `build.logs`.
-			throw: false,
-		});
+		log("driver", `bundling ${page.entrypoint}`);
+		// WHY a limit of its own, as the launch below has: a step of the start
+		// that hangs is named by its own message, where the run would end at
+		// the limit of the pairing and say only that nothing was printed.
+		const build = await withTimeout(
+			Bun.build({
+				entrypoints: [page.entrypoint],
+				target: "browser",
+				// WHY: Bun otherwise throws an error whose message is only "Bundle
+				// failed" (1.3.12, and 1.3.14 the same); the reasons are in
+				// `build.logs`.
+				throw: false,
+			}),
+			`Bun to bundle ${page.entrypoint}`,
+		);
 		const [bundle] = build.outputs;
 		if (!build.success || bundle === undefined)
 			throw new Error(
@@ -600,9 +607,15 @@ async function startBrowser(
 ): Promise<{ origin: string; browser: Browser } | undefined> {
 	if (clients.length === 0) return undefined;
 	const origin = await servePages(clients);
+	log("driver", "launching chromium");
 	const browser = await chromium.launch({
 		headless: true,
 		channel: "chromium",
+		// WHY a limit shorter than Playwright's own: that is 180000 ms
+		// (`LaunchOptions.timeout` in the types of playwright-core 1.64.0),
+		// longer than the 120 s a pairing of matrix.ts may take, so a launch
+		// that hung ended the pairing at its limit with no word of the launch.
+		timeout: STEP_TIMEOUT_MS,
 		// WHY off: `stopEverythingOnExit` owns the teardown. The SIGINT handler
 		// of playwright-core 1.64.0 closes the browser and then calls
 		// process.exit(130), which would skip stopping the relay and the Rust
