@@ -10,7 +10,7 @@
 //! store. The names and payloads of the tracks, and the limits of a line,
 //! are `xmoq-chat-tracks`, which the other sides of the chat use too; how
 //! long to wait before asking again and what a FETCH gets are
-//! `xmoq-track-serving`'s.
+//! `xmoq-publisher`'s.
 
 pub mod args;
 pub mod gather;

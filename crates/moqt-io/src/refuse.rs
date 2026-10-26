@@ -3,7 +3,7 @@
 //! stream it refused ([`on_refused_message`], [`on_refused_closed`]).
 //!
 //! WHY here, once: the Rust client, the viewers and the clients that serve
-//! a FETCH (`xmoq-track-serving`) refuse requests by the same rule, and a
+//! a FETCH (`xmoq-publisher`) refuse requests by the same rule, and a
 //! copy in each would part from the others. WHY in this crate: it is the
 //! one all of them depend on that has the events of the peer's request
 //! streams (`PeerRequestStreamEvent`).

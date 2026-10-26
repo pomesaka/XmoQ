@@ -2699,8 +2699,8 @@ dependencies = [
  "xmoq-chat-tracks",
  "xmoq-moqt",
  "xmoq-moqt-io",
+ "xmoq-publisher",
  "xmoq-room-token",
- "xmoq-track-serving",
 ]
 
 [[package]]
@@ -2729,7 +2729,7 @@ dependencies = [
  "xmoq-moqt",
  "xmoq-moqt-io",
  "xmoq-msf",
- "xmoq-track-serving",
+ "xmoq-publisher",
 ]
 
 [[package]]
@@ -2757,6 +2757,15 @@ dependencies = [
  "openh264",
  "png",
  "xmoq-loc",
+]
+
+[[package]]
+name = "xmoq-publisher"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
 ]
 
 [[package]]
@@ -2809,15 +2818,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xmoq-track-serving"
-version = "0.0.0"
-dependencies = [
- "tokio",
- "xmoq-moqt",
- "xmoq-moqt-io",
-]
-
-[[package]]
 name = "xmoq-transcriber"
 version = "0.0.0"
 dependencies = [
@@ -2828,9 +2828,9 @@ dependencies = [
  "xmoq-moqt",
  "xmoq-moqt-io",
  "xmoq-msf",
+ "xmoq-publisher",
  "xmoq-room-token",
  "xmoq-speech",
- "xmoq-track-serving",
  "xmoq-transcript-tracks",
 ]
 

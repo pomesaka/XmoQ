@@ -50,8 +50,8 @@ use xmoq_moqt_io::{
 use crate::fetching::{BodyEnd, Fetches, Happened, Note, Reading, StreamEnded, Tell};
 use crate::io::{DataInbox, RequestStream};
 use crate::published::Published;
-use xmoq_track_serving::answers::{
-    self, Answer, Answers, Bounds, MAX_ANSWERED_AT_ONCE, Over, Pace, SAY_QUEUE_OF_A_PAGE,
+use xmoq_publisher::answers::{
+    self, Answer, Answers, Bounds, Conclusion, MAX_ANSWERED_AT_ONCE, Pace, SAY_QUEUE_OF_A_PAGE,
 };
 
 /// Track Alias this client announces in PUBLISH. It publishes one track per
@@ -84,7 +84,7 @@ const DELIVERY_WAIT: Duration = Duration::from_secs(5);
 /// How long a subgroup stream may take to be written, while the peer takes
 /// nothing of it; then it is reset with `CANCELLED` and the client goes on.
 /// The gatherer and the transcriber give theirs as long (`GROUP_WRITE_WAIT`
-/// of `xmoq-track-serving`). **Provisional.** WHY a limit: the
+/// of `xmoq-publisher`). **Provisional.** WHY a limit: the
 /// `PUBLISH_DONE` of a subscription waits for its streams to be closed
 /// (§10.11), and a peer that takes nothing would hold it for good.
 const SUBGROUP_WRITE_WAIT: Duration = Duration::from_secs(5);
@@ -2802,7 +2802,7 @@ impl Client<'_> {
     }
 
     /// A FETCH this client answered is over, or a step after that.
-    fn fetch_over(&mut self, stream: u64, over: Over) {
+    fn fetch_over(&mut self, stream: u64, over: Conclusion) {
         if let Some(served) = over.served {
             report::fetch_served(served.request_id, served.how, served.code, served.objects);
         }

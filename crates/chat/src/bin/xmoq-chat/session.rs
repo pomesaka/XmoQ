@@ -74,15 +74,15 @@ use xmoq_room_token::{Role as TokenRole, RoomKey};
 
 use xmoq_again::AskAgain as AskingAgain;
 use xmoq_again::next_session::{Growing, Pause, new_url};
-use xmoq_track_serving::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
-use xmoq_track_serving::fetch::{pieces_of, plan};
-use xmoq_track_serving::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
-use xmoq_track_serving::requests::{AskedFetch, FetchAnswer, PeerRequests};
-use xmoq_track_serving::streams::{
+use xmoq_publisher::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
+use xmoq_publisher::fetch::{pieces_of, plan};
+use xmoq_publisher::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
+use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
+use xmoq_publisher::streams::{
     COMMAND_QUEUE, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request,
     send_group,
 };
-use xmoq_track_serving::{shown, sleep_until};
+use xmoq_publisher::{shown, sleep_until};
 
 use crate::storage::Store;
 
@@ -118,7 +118,7 @@ const LINES_WAITING_FOR_A_ROOM: usize = 64;
 const LINES_BEING_SENT: usize = 256;
 
 /// The most bytes of payload the answers to FETCH requests that are being
-/// written hold together (`Held` of `xmoq-track-serving`).
+/// written hold together (`Held` of `xmoq-publisher`).
 ///
 /// Not a flag: with `--fetch-lines` and `--text-bytes` at their most, one
 /// answer could be 100,000 lines of 49 KiB, and 32 are answered at once.
@@ -497,7 +497,7 @@ impl Gathering<'_> {
     /// WHY no command is ever dropped: among them are the answers to the
     /// relay's `REQUEST_UPDATE`s, and §10.9 has "The receiver of a
     /// `REQUEST_UPDATE` MUST respond with exactly one `REQUEST_OK` or
-    /// `REQUEST_ERROR`". Where the queue is full ([`xmoq_track_serving::streams::COMMAND_QUEUE`]),
+    /// `REQUEST_ERROR`". Where the queue is full ([`xmoq_publisher::streams::COMMAND_QUEUE`]),
     /// the relay takes nothing on the stream and sends more than it reads:
     /// the request is cancelled with `EXCESSIVE_LOAD` (§3.3.3), as the own
     /// relay ends a FETCH with too many updates waiting.
@@ -541,7 +541,7 @@ impl Gathering<'_> {
 
     // FIXME: take the steps of a PUBLISH (`publish` to `publish_done`,
     // `send_live`) and of the gatherer's own requests (`open`, `tell`,
-    // `let_go`, `watch`, `watch_again`) from `xmoq-track-serving`; the
+    // `let_go`, `watch`, `watch_again`) from `xmoq-publisher`; the
     // transcriber has a copy of each.
     /// Publishes the `lines` of a room, unless they are published or wait
     /// to be published again.

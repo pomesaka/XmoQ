@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 
 use xmoq_moqt::name::Location;
 use xmoq_moqt::params::GroupOrder;
-use xmoq_track_serving::fetch::{Kept, Plan, plan_kept};
+use xmoq_publisher::fetch::{Plan, PublishedGroups, plan_kept};
 use xmoq_transcript_tracks::payloads::Speech;
 
 /// A piece as a FETCH sends it: its number and its payload.
@@ -86,7 +86,7 @@ impl Transcript {
     }
 
     /// What a Standalone FETCH from `start` to the End Location `end` gets
-    /// (`plan_kept` of `xmoq-track-serving`): the plan, and the pieces kept
+    /// (`plan_kept` of `xmoq-publisher`): the plan, and the pieces kept
     /// in the range, each `(number, payload)`, in the order they are sent.
     /// The pieces of the range that were let go of get the End of Unknown
     /// Range indicator. The numbers before the first piece were never a
@@ -108,7 +108,7 @@ impl Transcript {
             .kept
             .front()
             .zip(self.kept.back())
-            .map(|(oldest, latest)| Kept {
+            .map(|(oldest, latest)| PublishedGroups {
                 first: self.first,
                 first_kept: oldest.number,
                 largest: latest.number,

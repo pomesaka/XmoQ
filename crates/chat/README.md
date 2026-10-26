@@ -38,7 +38,7 @@ The flags, what each is without it and their ranges are `USAGE` in `src/args.rs`
 
 **Ten rooms of a hundred people** are reached with a gatherer for each room, each with `--room` and a store of its own: each follows 100 participants, within the requests the own relay lets one session have open (`MAX_PEER_REQUESTS` of `xmoq-moqt` unless `--peer-requests-per-session` says otherwise; the `SUBSCRIBE_NAMESPACE` and the PUBLISH among them). **Not measured.**
 
-**A FETCH of more lines than `--fetch-lines`** gets the latest lines of its range and, for the lines before them, an End of Unknown Range indicator (§11.4.4.2), before the lines in Ascending order and after them in Descending order. `FETCH_OK` keeps the End Location that was asked for (§10.13). Why not a shorter End Location, no indicator, or a refusal: at the top of `crates/track-serving/src/fetch.rs`.
+**A FETCH of more lines than `--fetch-lines`** gets the latest lines of its range and, for the lines before them, an End of Unknown Range indicator (§11.4.4.2), before the lines in Ascending order and after them in Descending order. `FETCH_OK` keeps the End Location that was asked for (§10.13). Why not a shorter End Location, no indicator, or a refusal: at the top of `crates/publisher/src/fetch.rs`.
 
 What the gatherer holds of what the relay and the participants send has a bound that no flag removes. **All are provisional.**
 
@@ -50,11 +50,11 @@ What the gatherer holds of what the relay and the participants send has a bound 
 | Objects that come before their `SUBSCRIBE_OK` | 64; the oldest is dropped | `session.rs` |
 | Lines that wait for the `PUBLISH_OK` of their room | 64 a room; the oldest is not sent live | `session.rs` |
 | Subgroup streams of lines being written | 256; the rest are not sent live (`LINE_NOT_SENT`) | `session.rs` |
-| FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `MAX_ANSWERED_AT_ONCE` of [`xmoq-track-serving`](../track-serving/README.md) |
+| FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `MAX_ANSWERED_AT_ONCE` of [`xmoq-publisher`](../publisher/README.md) |
 | Bytes of payload the FETCH answers being written hold together | 64 MiB; a FETCH whose answer would go past it is refused with `EXCESSIVE_LOAD`. The lines are read one by one, and the reading stops at the bound | `MAX_BYTES_HELD`, `session.rs` |
-| Messages for one request stream not written yet, the answers to `REQUEST_UPDATE` among them | 64; none is dropped (§10.9: "exactly one"): one more cancels the request with `EXCESSIVE_LOAD` | `COMMAND_QUEUE`, `streams` of `xmoq-track-serving` |
-| A line's subgroup stream | 1 s for the relay to allow it, 5 s for the relay to take it; then it is reset, and the line is not sent live | `streams` of `xmoq-track-serving` |
-| The relay's direction of a FETCH's request stream | Stopped with `CANCELLED` when the gatherer finishes its own, 3 s after the end of the fetch stream at the most, where the relay has not ended it | `answers` of [`xmoq-track-serving`](../track-serving/README.md) |
+| Messages for one request stream not written yet, the answers to `REQUEST_UPDATE` among them | 64; none is dropped (§10.9: "exactly one"): one more cancels the request with `EXCESSIVE_LOAD` | `COMMAND_QUEUE`, `streams` of `xmoq-publisher` |
+| A line's subgroup stream | 1 s for the relay to allow it, 5 s for the relay to take it; then it is reset, and the line is not sent live | `streams` of `xmoq-publisher` |
+| The relay's direction of a FETCH's request stream | Stopped with `CANCELLED` when the gatherer finishes its own, 3 s after the end of the fetch stream at the most, where the relay has not ended it | `answers` of [`xmoq-publisher`](../publisher/README.md) |
 | The relay's SETUP; a stream for a request; the answer to a request | 10 s each | `session.rs` |
 
 A line that is not sent live is in the store, and a FETCH gets it.
@@ -81,7 +81,7 @@ The library (`src/*.rs`) decides, and does no input or output; the tests are the
 | `gather` | What becomes of a line: taken, or dropped and why; who is followed, and whether a room is left empty |
 | `args` | What the flags mean, the limits, and which rooms are taken |
 
-How long to wait before connecting again and before asking for a `SUBSCRIBE_NAMESPACE` again is [`xmoq-again`](../again/README.md)'s; what a FETCH gets, and the tasks that write each stream, are [`xmoq-track-serving`](../track-serving/README.md)'s.
+How long to wait before connecting again and before asking for a `SUBSCRIBE_NAMESPACE` again is [`xmoq-again`](../again/README.md)'s; what a FETCH gets, and the tasks that write each stream, are [`xmoq-publisher`](../publisher/README.md)'s.
 
 The binary (`src/bin/xmoq-chat/`): `session.rs` (the requests and the answers on one session), `storage.rs` (the store), `main.rs` (connecting again, and the signals). What it prints, one line for each thing it does (`WATCHING`, `PARTICIPANT`, `SUBSCRIBED`, `ROOM_PUBLISHED`, `LINE`, `LINE_DROPPED`, `FETCH_ANSWERED`, ...), is what `interop/chat.ts` waits for.
 

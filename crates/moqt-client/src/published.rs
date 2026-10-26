@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use xmoq_moqt::fetch::FetchObject;
 use xmoq_moqt::name::Location;
 use xmoq_moqt::params::GroupOrder;
-use xmoq_track_serving::fetch::{Kept, Piece, pieces_with, plan_kept};
+use xmoq_publisher::fetch::{Piece, PublishedGroups, pieces_with, plan_kept};
 
 /// Objects kept at most. Provisional.
 pub const MAX_KEPT_OBJECTS: usize = 1024;
@@ -56,8 +56,8 @@ impl Published {
 
     /// What this client has of its track: the first Group it published,
     /// the first it keeps, and the Largest Object's (§10.7).
-    fn kept(&self) -> Option<Kept> {
-        Some(Kept {
+    fn kept(&self) -> Option<PublishedGroups> {
+        Some(PublishedGroups {
             first: self.first_group?,
             first_kept: self.kept.front()?.group_id,
             largest: self.kept.back()?.group_id,
@@ -91,7 +91,7 @@ impl Published {
     /// (§10.12.3): every Object it keeps in the range, in the Group Order
     /// that was asked for, and an End of Unknown Range indicator for those
     /// of the range it let go of, as the gatherer and the transcriber answer
-    /// (`plan_kept` of `xmoq-track-serving`, where the reasons are).
+    /// (`plan_kept` of `xmoq-publisher`, where the reasons are).
     ///
     /// # Errors
     ///

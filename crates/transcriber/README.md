@@ -18,7 +18,7 @@ It runs until Ctrl-C or SIGTERM, and connects again after a session ends, as the
 |---|---|
 | Listens to | Every namespace announced under a prefix of `--namespace` (up to 8, none under another), found with one `SUBSCRIBE_NAMESPACE` for each prefix. Of each, the first Opus track with LOC packaging that its catalog names (MSF §5), read with a SUBSCRIBE and a Joining FETCH, as the terminal viewer reads it. A catalog that names another audio track later moves the transcriber to that track |
 | Publishes | The track `speech` of `xmoq/transcript/<prefix>` for each prefix, with PUBLISH, from the start of each session. One piece is one Group, and its payload is in [`xmoq-transcript-tracks`](../transcript-tracks/README.md) |
-| Answers | A FETCH of a transcript, from the latest `--keep` pieces it holds in memory. The pieces of the range that were let go of get one End of Unknown Range indicator, which in Descending order names no number before the first piece, as the Rust client answers (`plan_kept` of `xmoq-track-serving`; `Transcript::fetch`) |
+| Answers | A FETCH of a transcript, from the latest `--keep` pieces it holds in memory. The pieces of the range that were let go of get one End of Unknown Range indicator, which in Descending order names no number before the first piece, as the Rust client answers (`plan_kept` of `xmoq-publisher`; `Transcript::fetch`) |
 
 WHY these, and WHY NOT the other choices (every namespace of the relay; a room that says where the broadcast is; a track `transcript` in the broadcast's namespace; PUBLISH_NAMESPACE): at the top of `src/bin/xmoq-transcriber/session.rs` and of `crates/transcript-tracks/src/names.rs`.
 
@@ -50,7 +50,7 @@ What the relay and the publishers send has a bound that no flag removes. **All a
 | Objects that come before their `SUBSCRIBE_OK` | 64; the oldest is dropped | `session.rs` |
 | Pieces that wait for the `PUBLISH_OK` of their transcript | 64; the oldest is not sent live | `session.rs` |
 | Subgroup streams of pieces being written | 64; the rest are not sent live (`SPEECH_NOT_SENT`) | `session.rs` |
-| FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `MAX_ANSWERED_AT_ONCE` of [`xmoq-track-serving`](../track-serving/README.md) |
+| FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `MAX_ANSWERED_AT_ONCE` of [`xmoq-publisher`](../publisher/README.md) |
 | Bytes of payload the FETCH answers being written hold together | 16 MB; a FETCH whose answer would go past it is refused with `EXCESSIVE_LOAD` | `MAX_BYTES_HELD`, `session.rs` |
 | A piece | 15 s of samples, 960 KB | `Cut`, `xmoq-speech` |
 
