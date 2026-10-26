@@ -677,6 +677,29 @@ describe("connectOver", () => {
 			options: { setupTimeoutMs: Number.NaN },
 			message: "setupTimeoutMs is a whole number from 0 to 2147483647, not NaN",
 		},
+		// 0 would never let the first Object through; NaN and Infinity would
+		// switch the limit off.
+		{
+			options: { subscriptionHighWaterMark: 0 },
+			message: "subscriptionHighWaterMark is a whole number from 1, not 0",
+		},
+		{
+			options: { subscriptionHighWaterMark: -1 },
+			message: "subscriptionHighWaterMark is a whole number from 1, not -1",
+		},
+		{
+			options: { subscriptionHighWaterMark: 2.5 },
+			message: "subscriptionHighWaterMark is a whole number from 1, not 2.5",
+		},
+		{
+			options: { subscriptionHighWaterMark: Number.NaN },
+			message: "subscriptionHighWaterMark is a whole number from 1, not NaN",
+		},
+		{
+			options: { subscriptionHighWaterMark: Number.POSITIVE_INFINITY },
+			message:
+				"subscriptionHighWaterMark is a whole number from 1, not Infinity",
+		},
 	])(
 		"connectOver rejects with a RangeError: $message",
 		async ({ options, message }) => {

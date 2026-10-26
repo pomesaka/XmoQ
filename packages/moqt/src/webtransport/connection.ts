@@ -195,10 +195,10 @@ function timerDelay(name: string, value: number, least = 0): number {
 }
 
 /**
- * A limit on the streams read at once, checked. NaN and Infinity would
- * switch the limit off, and a fraction is no number of streams.
+ * A limit counted in streams or in Objects, checked. NaN and Infinity would
+ * switch the limit off, and a fraction is no count.
  */
-function streamLimit(name: string, value: number, least: number): number {
+function countLimit(name: string, value: number, least: number): number {
 	if (!Number.isInteger(value) || value < least) {
 		throw new RangeError(
 			`${name} is a whole number from ${least}, not ${String(value)}`,
@@ -236,7 +236,8 @@ export interface SessionConnectOptions {
 	limits?: Partial<SessionLimits>;
 	/**
 	 * Objects a `Subscription` holds before the connection stops reading the
-	 * subgroup streams that feed it.
+	 * subgroup streams that feed it; a whole number from 1, or
+	 * `connect` rejects with a `RangeError`.
 	 */
 	subscriptionHighWaterMark?: number;
 	/**
@@ -1243,16 +1244,24 @@ export async function connectOver(
 	// WHY from 2: one place is the peer's control stream for as long as the
 	// session lasts, so with 1 no data stream would ever be read, and with 0
 	// not even SETUP.
-	const maxPeerUniStreams = streamLimit(
+	const maxPeerUniStreams = countLimit(
 		"maxPeerUniStreams",
 		options.maxPeerUniStreams ?? DEFAULT_MAX_PEER_UNI_STREAMS,
 		2,
 	);
 	// WHY from 1: with 0 no request of the peer would ever be read, and so
 	// never answered.
-	const maxPeerBidiStreams = streamLimit(
+	const maxPeerBidiStreams = countLimit(
 		"maxPeerBidiStreams",
 		options.maxPeerBidiStreams ?? DEFAULT_MAX_PEER_BIDI_STREAMS,
+		1,
+	);
+	// WHY from 1: with 0 the first Object would never be let through, and the
+	// subgroup stream it came on, which waits for room and not for bytes, would
+	// hold its place among the streams read at once with no timer to end it.
+	const subscriptionHighWaterMark = countLimit(
+		"subscriptionHighWaterMark",
+		options.subscriptionHighWaterMark ?? DEFAULT_SUBSCRIPTION_HIGH_WATER_MARK,
 		1,
 	);
 	const peerStreamEndTimeoutMs = timerDelay(
@@ -1666,8 +1675,7 @@ export async function connectOver(
 		};
 		const active: ActiveSubscription = {
 			objects: createObjectQueue<ReceivedObject>(
-				options.subscriptionHighWaterMark ??
-					DEFAULT_SUBSCRIPTION_HIGH_WATER_MARK,
+				subscriptionHighWaterMark,
 				cancelRequest,
 			),
 			ended: deferred(),
