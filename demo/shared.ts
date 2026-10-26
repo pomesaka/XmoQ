@@ -9,6 +9,7 @@ import {
 	type MoqtConnection,
 } from "@xmoq/moqt";
 import { NAMESPACE } from "./namespace.ts";
+import { openRoomSocket, tokenOf } from "./room-socket.ts";
 import { startChat } from "./room-chat.ts";
 
 export { NAMESPACE };
@@ -106,8 +107,9 @@ export interface Room {
 	/**
 	 * Asks the room for a token for the relay (an experiment in
 	 * authorization): the Token structure as `@xmoq/moqt` carries it, or
-	 * undefined where the rooms give none. `?token=no` asks for none, to see
-	 * the relay refuse.
+	 * undefined where the rooms give none, or where the room's socket is
+	 * closed (it is opened again). `?token=no` asks for none, to see the
+	 * relay refuse.
 	 */
 	token(role: "pub" | "sub", namespace: string[]): Promise<Uint8Array | undefined>;
 }
@@ -121,9 +123,6 @@ export interface Room {
 export function joinRoom(as: string): Room | undefined {
 	if (XMOQ_DEMO.roomsUrl === null) return undefined;
 	const name = new URLSearchParams(location.search).get("room") ?? "demo";
-	const socket = new WebSocket(
-		`${XMOQ_DEMO.roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(name)}/ws`,
-	);
 	const count = document.getElementById("connected");
 	// Reactions: an emoji somebody pressed is shown to everybody for two
 	// seconds, and counted for a script that looks at the page.
@@ -140,53 +139,56 @@ export function joinRoom(as: string): Room | undefined {
 		while (reactions.childElementCount > 50) reactions.firstElementChild?.remove();
 		setTimeout(() => shown.remove(), 2000);
 	};
-	for (const button of document.querySelectorAll<HTMLButtonElement>(
-		"button[data-reaction]",
-	)) {
-		button.addEventListener("click", () => {
-			socket.send(
-				JSON.stringify({ type: "reaction", emoji: button.dataset.reaction }),
-			);
-		});
-	}
 	let latest: Broadcast | null = null;
-	/** Who waits for a token, in the order they asked: the room answers in that order. */
-	const tokens: ((token: string | null) => void)[] = [];
-	const whenOpen = (send: () => void): void => {
-		if (socket.readyState === WebSocket.OPEN) send();
-		else socket.addEventListener("open", send, { once: true });
-	};
+	/** Where this page publishes, said again each time the socket opens: the room forgets it with the socket. */
+	let published: Broadcast | undefined;
 	/** The callers of `named` that wait for a publisher to register. */
 	const waiting: ((broadcast: Broadcast) => void)[] = [];
 	let first: (broadcast: Broadcast | null) => void = () => {};
 	const broadcast = new Promise<Broadcast | null>((resolve) => {
 		first = resolve;
 	});
-	socket.addEventListener("message", (event) => {
-		const message: RoomMessage = JSON.parse(String(event.data));
-		if (message.type === "hello") first(message.broadcast);
-		if (message.type === "hello" || message.type === "broadcast") {
-			latest = message.broadcast;
-			if (latest !== null) {
-				for (const tell of waiting.splice(0)) tell(latest);
-			}
-		}
-		if (message.type === "reaction") react(message.emoji, 1);
-		if (message.type === "reactions") {
-			for (const [emoji, count] of Object.entries(message.counts)) {
-				react(emoji, count);
-			}
-		}
-		if (message.type === "token") {
-			const waiting = tokens.shift();
-			waiting?.(message.token);
-		}
-		if ((message.type === "hello" || message.type === "connected") && count !== null) {
-			count.textContent = `room “${name}”: ${message.connected} connected`;
-			document.body.dataset.connected = String(message.connected);
-		}
-	});
-	socket.addEventListener("error", () => first(null));
+	const socket = openRoomSocket<RoomMessage>(
+		`${XMOQ_DEMO.roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(name)}/ws`,
+		{
+			open() {
+				if (published !== undefined) {
+					socket.send({ type: "broadcast", broadcast: published });
+				}
+			},
+			message(message) {
+				if (message.type === "hello") first(message.broadcast);
+				if (message.type === "hello" || message.type === "broadcast") {
+					latest = message.broadcast;
+					if (latest !== null) {
+						for (const tell of waiting.splice(0)) tell(latest);
+					}
+				}
+				if (message.type === "reaction") react(message.emoji, 1);
+				if (message.type === "reactions") {
+					for (const [emoji, count] of Object.entries(message.counts)) {
+						react(emoji, count);
+					}
+				}
+				if ((message.type === "hello" || message.type === "connected") && count !== null) {
+					count.textContent = `room “${name}”: ${message.connected} connected`;
+					document.body.dataset.connected = String(message.connected);
+				}
+			},
+			close() {
+				first(null);
+				if (count !== null) count.textContent = `room “${name}”: joining again`;
+				delete document.body.dataset.connected;
+			},
+		},
+	);
+	for (const button of document.querySelectorAll<HTMLButtonElement>(
+		"button[data-reaction]",
+	)) {
+		button.addEventListener("click", () => {
+			socket.send({ type: "reaction", emoji: button.dataset.reaction });
+		});
+	}
 	const token: Room["token"] = async (role, namespace) => {
 		if (new URLSearchParams(location.search).get("token") === "no") {
 			return undefined;
@@ -199,15 +201,8 @@ export function joinRoom(as: string): Room | undefined {
 		if (namespace.some((field) => field.includes("*") || field.includes("/"))) {
 			return undefined;
 		}
-		const text = await new Promise<string | null>((resolve) => {
-			tokens.push(resolve);
-			whenOpen(() =>
-				socket.send(JSON.stringify({ type: "token-for", role, namespace })),
-			);
-		});
-		if (text === null) return undefined;
-		// §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the value.
-		return new Uint8Array([0x03, 0x00, ...new TextEncoder().encode(text)]);
+		const answer = await socket.ask({ type: "token-for", role, namespace }, ["token"]);
+		return answer?.type === "token" ? tokenOf(answer.token) : undefined;
 	};
 	// Two tokens each time it connects for the chat, as the participant
 	// needs them (`publishNamespaceToken` of `joinChat`): `sub` for the
@@ -242,9 +237,8 @@ export function joinRoom(as: string): Room | undefined {
 					})
 				: Promise.resolve(latest),
 		publish(where) {
-			whenOpen(() =>
-				socket.send(JSON.stringify({ type: "broadcast", broadcast: where })),
-			);
+			published = where;
+			socket.send({ type: "broadcast", broadcast: where });
 		},
 		token,
 	};
