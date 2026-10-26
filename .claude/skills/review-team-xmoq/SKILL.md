@@ -2,7 +2,7 @@
 name: review-team-xmoq
 description: XmoQのコードレビュー＆修正ループ。protocol-reviewer-xmoq・rust-reviewer-xmoq・ts-reviewer-xmoq・design-reviewer-xmoq・docs-reviewer-xmoqが並列レビューし、実装したdeckセッションが修正する。
 argument-hint: "[レビュー対象のdeckセッション名。省略するとカレントの main..@]"
-allowed-tools: Agent, Bash, Read, SendMessage, ListAgents
+allowed-tools: Agent, Bash, Read, Edit, Write, SendMessage, ListAgents
 ---
 
 # review-team-xmoq: レビュー＆修正ループ（Coordinator用）
@@ -44,7 +44,7 @@ revset は `main..<change ID>`、作業ディレクトリは `work_dir` にな�
 | 差分に含まれるもの | 起動する |
 |---|---|
 | `crates/` か `Cargo.toml` | rust-reviewer-xmoq |
-| `packages/`、`interop/`（`interop/peers/` を除く）、`demo/` のどれか | ts-reviewer-xmoq |
+| `packages/`、`interop/`、`demo/` のどれか | ts-reviewer-xmoq |
 | `crates/`、`packages/`、`fixtures/`、`interop/` のどれか | protocol-reviewer-xmoq |
 | `crates/`、`packages/`、`fixtures/`、`interop/`、`demo/`、`scripts/`、`mise.toml`、`.github/` のどれか | design-reviewer-xmoq |
 | `.md` か、上のどれか | docs-reviewer-xmoq |
@@ -92,7 +92,7 @@ SendMessage で、対象の deck セッションに `notify_when_idle: true` を
 ```
 レビューの指摘です。全て修正してください。Nitも可能な範囲で一緒に直してください。
 直さない指摘があれば、理由を書いて返してください。
-修正の後、fmt、lint、型検査、テストを実際に走らせ、その出力を含めて SendMessage で返してください。
+修正の後、CLAUDE.md の「開発の流れ」の 1 に従って検査を実際に走らせ、その出力を含めて SendMessage で返してください。
 
 ## 非Nit指摘
 <一覧>
