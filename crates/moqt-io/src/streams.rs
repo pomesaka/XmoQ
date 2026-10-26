@@ -739,18 +739,7 @@ impl<R: RecvStream> RequestReader<R> {
     }
 }
 
-/// How a subgroup stream of the peer ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamEnd {
-    /// With a FIN.
-    Fin,
-    /// Without one: reset by the peer with this code, or stopped by this
-    /// endpoint.
-    Aborted(Option<u32>),
-    /// Cut off by the end of the connection. The peer said nothing about the
-    /// stream itself.
-    Lost,
-}
+pub use xmoq_moqt::data::StreamEnd;
 
 /// What the peer's unidirectional streams produced.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -35,7 +35,7 @@
 //!   would get none of it.
 
 use xmoq_moqt::fetch::{FetchObject, RangeEnd};
-use xmoq_moqt::message::request_error_code;
+use xmoq_moqt::message::{request_error_code, track_property};
 use xmoq_moqt::name::Location;
 use xmoq_moqt::params::GroupOrder;
 
@@ -59,9 +59,9 @@ pub fn pieces_of(
         group_id,
         subgroup_id: Some(0),
         object_id: 0,
-        // §12.4: the default, which the subgroup streams of `send_group`
-        // leave to the track.
-        publisher_priority: 128,
+        // The one the subgroup streams of `send_group` leave to the track
+        // (§12.4).
+        publisher_priority: track_property::DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED,
         properties: vec![],
         payload,
     });

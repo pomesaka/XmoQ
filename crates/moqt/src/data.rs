@@ -82,6 +82,26 @@ pub enum SubgroupId {
     Explicit(u64),
 }
 
+/// How a data stream of the peer ended: a subgroup stream, or for
+/// `xmoq-moqt-io` also a fetch stream. Reading the stream is the caller's
+/// I/O; the type lives here so that the I/O crate and the relay's state
+/// machine share it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// With a FIN. On a subgroup stream, every Object of the Subgroup was
+    /// delivered (§11.4.3: "If a sender has delivered all objects in a
+    /// Subgroup to the QUIC stream ... it MUST close the stream with a FIN").
+    Fin,
+    /// Without one. `Some` is the Stream Reset Error Code the peer reset the
+    /// stream with (§3.3.3). `None` is a reset whose code could not be read,
+    /// or a stream that this endpoint stopped itself (its I/O side: on
+    /// request, on an idle timeout, or on a malformed stream).
+    Aborted(Option<u32>),
+    /// Cut off by the end of the peer's connection. The peer said nothing
+    /// about the stream itself.
+    Lost,
+}
+
 /// `SUBGROUP_HEADER` (§11.4.2), the start of a subgroup stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubgroupHeader {
@@ -91,8 +111,11 @@ pub struct SubgroupHeader {
     pub group_id: u64,
     /// Subgroup ID of every Object on the stream.
     pub subgroup_id: SubgroupId,
-    /// `None` sets `DEFAULT_PRIORITY`: the field is omitted and the subgroup takes
-    /// the priority of the subscription.
+    /// `None` sets `DEFAULT_PRIORITY`: the field is omitted and "this Subgroup
+    /// inherits the Publisher Priority specified in the control message that
+    /// established the subscription" (§11.4.2), or
+    /// [`crate::message::track_property::DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED`]
+    /// where that message has none (§12.4).
     pub publisher_priority: Option<u8>,
     /// PROPERTIES: every Object on the stream carries a Properties field.
     pub properties: bool,

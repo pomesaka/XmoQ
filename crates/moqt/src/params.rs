@@ -32,6 +32,16 @@ const TRACK_NAMESPACE_PREFIX: u64 = 0x34;
 /// no limit, and `XmoQ` has not decided one.
 pub const MAX_PARAMETERS: usize = crate::kvp::MAX_PAIRS;
 
+/// The Subscriber Priority of a SUBSCRIBE, `PUBLISH_OK` or FETCH without
+/// `SUBSCRIBER_PRIORITY`. §10.2.7: "If omitted from SUBSCRIBE, `PUBLISH_OK` or
+/// FETCH, the publisher uses the value 128."
+///
+/// The same number as [`crate::message::track_property::DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED`]
+/// and a separate rule of the draft: §10.2.7 and §12.4 each define their own
+/// default, and both follow §7.3, "Implementations that have a default
+/// priority SHOULD set it to a value in the middle of the range (eg: 128)".
+pub const DEFAULT_SUBSCRIBER_PRIORITY: u8 = 128;
+
 const FILTER_NEXT_GROUP_START: u64 = 0x1;
 const FILTER_LARGEST_OBJECT: u64 = 0x2;
 const FILTER_ABSOLUTE_START: u64 = 0x3;

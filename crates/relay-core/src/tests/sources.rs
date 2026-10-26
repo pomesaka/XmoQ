@@ -1,5 +1,6 @@
 //! Several sources of one track (§9.3, §9.5).
 
+use xmoq_moqt::message::track_property;
 use xmoq_moqt::params::SubscriptionFilter;
 
 use super::*;
@@ -2116,15 +2117,14 @@ fn a_stream_of_a_session_that_is_no_source_of_the_track_is_stopped() {
     assert_eq!((counts.in_streams, counts.remembered_subgroups), (0, 0));
 }
 
-/// DEFAULT PUBLISHER PRIORITY (§12.4), a Track Property.
-const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
-
 /// A relay where the publisher and Bob publish the track "a", each with a
 /// DEFAULT PUBLISHER PRIORITY of its own, or with none.
 fn relay_with_default_priorities(publishers: Option<u64>, bobs: Option<u64>) -> Relay {
     let property = |priority: Option<u64>| -> Vec<KeyValuePair> {
         priority
-            .map(|priority| KeyValuePair::varint(DEFAULT_PUBLISHER_PRIORITY, priority).unwrap())
+            .map(|priority| {
+                KeyValuePair::varint(track_property::DEFAULT_PUBLISHER_PRIORITY, priority).unwrap()
+            })
             .into_iter()
             .collect()
     };
@@ -2163,7 +2163,7 @@ fn known_gap_a_subgroup_without_a_priority_reaches_the_subscriber_under_another_
                 track_alias: 0,
                 parameters: vec![],
                 track_properties: vec![
-                    KeyValuePair::varint(DEFAULT_PUBLISHER_PRIORITY, 200).unwrap()
+                    KeyValuePair::varint(track_property::DEFAULT_PUBLISHER_PRIORITY, 200).unwrap()
                 ],
             }),
         }]
@@ -2581,7 +2581,9 @@ fn publishes_anew_under(relay: &mut Relay, track_alias: u64) {
             full_track_name: track(b"a"),
             track_alias,
             parameters: vec![],
-            track_properties: vec![KeyValuePair::varint(DEFAULT_PUBLISHER_PRIORITY, 200).unwrap()],
+            track_properties: vec![
+                KeyValuePair::varint(track_property::DEFAULT_PUBLISHER_PRIORITY, 200).unwrap(),
+            ],
         }),
     });
 }
@@ -2776,7 +2778,9 @@ fn a_publisher_that_accepted_the_relays_subscribe_has_the_default_priority_it_ga
         message: ControlMessage::SubscribeOk(SubscribeOk {
             track_alias: UPSTREAM_ALIAS,
             parameters: vec![],
-            track_properties: vec![KeyValuePair::varint(DEFAULT_PUBLISHER_PRIORITY, 10).unwrap()],
+            track_properties: vec![
+                KeyValuePair::varint(track_property::DEFAULT_PUBLISHER_PRIORITY, 10).unwrap(),
+            ],
         }),
     });
     publishes_a(&mut relay, BOB, BOBS_ALIAS);

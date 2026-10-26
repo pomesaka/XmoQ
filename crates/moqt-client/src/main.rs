@@ -28,7 +28,7 @@ use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
     ControlMessage, Fetch, FetchRange, GoAway, ReasonPhrase, RequestError, publish_done_status,
-    request_error_code, retry_interval,
+    request_error_code, retry_interval, track_property,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
@@ -2776,9 +2776,12 @@ impl Client<'_> {
             // 0, the Subgroup 0.
             subgroup_id: Some(0),
             object_id: 0,
-            // §12.4: "If omitted, the Default Publisher Priority is 128";
-            // this client sends no Track Property.
-            publisher_priority: self.args.publisher_priority.unwrap_or(128),
+            // This client sends no Track Property, so the track has the
+            // default of §12.4.
+            publisher_priority: self
+                .args
+                .publisher_priority
+                .unwrap_or(track_property::DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED),
             properties: self.args.object_properties.clone(),
             payload: payload.to_vec(),
         });

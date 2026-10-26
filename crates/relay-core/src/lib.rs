@@ -70,7 +70,7 @@ use xmoq_moqt::immutable::{Of, searched_properties};
 use xmoq_moqt::kvp::{KeyValuePair, Value};
 use xmoq_moqt::message::{
     ControlMessage, Publish, ReasonPhrase, Subscribe, publish_done_status, request_error_code,
-    setup_option,
+    setup_option, track_property,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{self, Parameter};
@@ -4960,15 +4960,13 @@ impl OutStreamAllocator<'_> {
                 // (§11.4.2). §12.4: "If omitted, the Default Publisher
                 // Priority is 128", which also stands in where the relay
                 // cannot tell the source (`InStream::priority`).
-                in_stream.priority.unwrap_or(DEFAULT_PRIORITY),
+                in_stream
+                    .priority
+                    .unwrap_or(track_property::DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED),
             ),
         });
     }
 }
-
-/// The Subscriber Priority of a request that names none (§10.2.7), and the
-/// Publisher Priority of a track that names none (§12.4).
-pub(crate) const DEFAULT_PRIORITY: u8 = 128;
 
 /// Where a subgroup stream towards a subscriber stands among the streams of
 /// its session: **the larger number is sent first**, and streams with the
@@ -5106,11 +5104,6 @@ impl TrackEnd {
     }
 }
 
-/// DEFAULT PUBLISHER PRIORITY (§12.4), a Track Property, and what holds
-/// without it: "If omitted, the Default Publisher Priority is 128."
-const DEFAULT_PUBLISHER_PRIORITY_PROPERTY: u64 = 0x0e;
-const DEFAULT_PUBLISHER_PRIORITY: u8 = 128;
-
 /// The Publisher Priority of the Subgroups of a subscription that carry
 /// none, from the Track Properties of the PUBLISH or `SUBSCRIBE_OK` that
 /// established it, outside Immutable Properties or inside (§12.7: "When
@@ -5121,15 +5114,13 @@ const DEFAULT_PUBLISHER_PRIORITY: u8 = 128;
 fn default_publisher_priority(properties: &[KeyValuePair]) -> u8 {
     searched_properties(properties, Of::Track)
         .iter()
-        .find(|property| property.ty() == DEFAULT_PUBLISHER_PRIORITY_PROPERTY)
+        .find(|property| property.ty() == track_property::DEFAULT_PUBLISHER_PRIORITY)
         .and_then(|property| match property.value() {
             Value::Varint(priority) => u8::try_from(*priority).ok(),
             Value::Bytes(_) => None,
         })
-        .unwrap_or(DEFAULT_PUBLISHER_PRIORITY)
+        .unwrap_or(track_property::DEFAULT_PUBLISHER_PRIORITY_IF_OMITTED)
 }
-
-const DYNAMIC_GROUPS_PROPERTY: u64 = 0x30;
 
 /// Whether the Track Properties of a PUBLISH or a `SUBSCRIBE_OK` say that
 /// the Original Publisher starts a new Group on request (§12.6: "The
@@ -5140,7 +5131,7 @@ fn dynamic_groups(properties: &[KeyValuePair]) -> bool {
     searched_properties(properties, Of::Track)
         .iter()
         .any(|property| {
-            property.ty() == DYNAMIC_GROUPS_PROPERTY && *property.value() == Value::Varint(1)
+            property.ty() == track_property::DYNAMIC_GROUPS && *property.value() == Value::Varint(1)
         })
 }
 
