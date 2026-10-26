@@ -11,5 +11,12 @@
 		"@xmoq/msf": "workspace:*",
 		"@xmoq/transcript": "workspace:*",
 		"playwright-core": "1.64.0"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.page.json"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.2",
+		"typescript": "6.0.3"
 	}
 }

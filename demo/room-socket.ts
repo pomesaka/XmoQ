@@ -47,7 +47,9 @@ export function openRoomSocket<M extends { type: string }>(
 		});
 		opened.addEventListener("message", (event) => {
 			const message: M = JSON.parse(String(event.data));
-			const at = asked.findIndex(({ answers }) => answers.includes(message.type));
+			const at = asked.findIndex(({ answers }) =>
+				answers.includes(message.type),
+			);
 			if (at !== -1) asked.splice(at, 1)[0]?.resolve(message);
 			on.message(message);
 		});
@@ -59,24 +61,32 @@ export function openRoomSocket<M extends { type: string }>(
 			unsent = [];
 			for (const { resolve } of unanswered) resolve(undefined);
 			on.close?.();
-			setTimeout(() => {
-				socket = connect();
-			}, next.after("ended", performance.now()));
+			setTimeout(
+				() => {
+					socket = connect();
+				},
+				next.after("ended", performance.now()),
+			);
 		});
 		return opened;
 	}
 	return {
 		send(message) {
-			if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+			if (socket.readyState === WebSocket.OPEN)
+				socket.send(JSON.stringify(message));
 		},
 		ask(message, answers) {
-			if (socket.readyState !== WebSocket.OPEN && socket.readyState !== WebSocket.CONNECTING) {
+			if (
+				socket.readyState !== WebSocket.OPEN &&
+				socket.readyState !== WebSocket.CONNECTING
+			) {
 				return Promise.resolve(undefined);
 			}
 			const answered = new Promise<M | undefined>((resolve) => {
 				asked.push({ answers, resolve });
 			});
-			if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+			if (socket.readyState === WebSocket.OPEN)
+				socket.send(JSON.stringify(message));
 			else unsent.push(JSON.stringify(message));
 			return answered;
 		},

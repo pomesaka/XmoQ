@@ -1,0 +1,11 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"lib": ["ES2022", "DOM", "DOM.Iterable"],
+		"types": []
+	},
+	// WHY a pattern with the Bun side left out, and not the names of the
+	// pages: a page that was added and not named here would not be checked.
+	"include": ["*.ts"],
+	"exclude": ["serve.ts", "check.ts", "open-publish.ts"]
+}

@@ -78,7 +78,8 @@ const KEPT_BACK: Record<KeptBack, (limits: ChatLimits) => string> = {
  * difference is the sender's clock against the gatherer's plus the way
  * there, which a person reading the chat cannot tell apart.
  */
-const shownTime = (at: number): string => new Date(at).toTimeString().slice(0, 8);
+const shownTime = (at: number): string =>
+	new Date(at).toTimeString().slice(0, 8);
 
 /**
  * Shows the chat of the room `room` as `name`, and says what is typed in
@@ -107,14 +108,18 @@ export function startChat(
 	try {
 		limits = limitsOfTheAddress();
 	} catch (error) {
-		say(`the chat's limits of the address: ${String(error)}; the defaults are used`);
+		say(
+			`the chat's limits of the address: ${String(error)}; the defaults are used`,
+		);
 		limits = chatLimits();
 	}
 	let catchUp: number;
 	try {
 		catchUp = catchUpOfTheAddress();
 	} catch (error) {
-		say(`the chat's catching up of the address: ${String(error)}; the default is used`);
+		say(
+			`the chat's catching up of the address: ${String(error)}; the default is used`,
+		);
 		catchUp = catchUpLines();
 	}
 
@@ -128,14 +133,18 @@ export function startChat(
 	 * of the same number or larger.
 	 */
 	const place = (shown: HTMLElement, number: bigint, isGap: boolean): void => {
-		const after = [...log.querySelectorAll<HTMLElement>("div[data-number]")].find((other) => {
+		const after = [
+			...log.querySelectorAll<HTMLElement>("div[data-number]"),
+		].find((other) => {
 			const theirs = BigInt(other.dataset.number ?? "0");
 			return isGap ? theirs >= number : theirs > number;
 		});
 		log.insertBefore(shown, after ?? null);
 		while (log.childElementCount > SHOWN_LINES) log.firstElementChild?.remove();
 		if (after === undefined) log.scrollTop = log.scrollHeight;
-		document.body.dataset.chatLines = String(log.querySelectorAll("div[data-how]").length);
+		document.body.dataset.chatLines = String(
+			log.querySelectorAll("div[data-how]").length,
+		);
 	};
 	const add = (line: ReceivedLine): void => {
 		onLine?.(line);
@@ -168,7 +177,8 @@ export function startChat(
 			lastHad,
 			onLine: add,
 			onGap: addGap,
-			onMalformed: (number, why) => say(`line ${number} of the track is no line: ${why}`),
+			onMalformed: (number, why) =>
+				say(`line ${number} of the track is no line: ${why}`),
 			onStatus: (status) =>
 				say(
 					`chat over the track: ${status.heard ? "the gatherer listens" : "nobody listens yet"}, ${status.following ? "following the room" : `not following the room (${status.lastEnd ?? "not yet"})`}`,
@@ -180,9 +190,14 @@ export function startChat(
 				return;
 			}
 			participant = undefined;
-			if (state.type === "session-ended") say("chat over the track: the session ended; connecting again");
-			if (state.type === "moved") say(`chat over the track: the relay sent it to ${state.goAway.newSessionUri || "itself"}`);
-			if (state.type === "failed") say(`chat over the track: ${String(state.error).slice(0, 120)}`);
+			if (state.type === "session-ended")
+				say("chat over the track: the session ended; connecting again");
+			if (state.type === "moved")
+				say(
+					`chat over the track: the relay sent it to ${state.goAway.newSessionUri || "itself"}`,
+				);
+			if (state.type === "failed")
+				say(`chat over the track: ${String(state.error).slice(0, 120)}`);
 		},
 	});
 
@@ -218,4 +233,3 @@ export function startChat(
 export interface ChatSaying {
 	say(text: string): Promise<string | undefined>;
 }
-

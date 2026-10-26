@@ -9,8 +9,8 @@ import {
 	type MoqtConnection,
 } from "@xmoq/moqt";
 import { NAMESPACE } from "./namespace.ts";
-import { openRoomSocket, tokenOf } from "./room-socket.ts";
 import { startChat } from "./room-chat.ts";
+import { openRoomSocket, tokenOf } from "./room-socket.ts";
 
 export { NAMESPACE };
 /** The pause between sessions, as a page says it: what `keepPublishing` and `keepPlaying` wait where they are given no `againMs`. */
@@ -89,7 +89,7 @@ type RoomMessage =
 			connected: number;
 			broadcast: Broadcast | null;
 			transcript: string[] | null;
-		}
+	  }
 	| { type: "connected"; connected: number }
 	| { type: "reaction"; emoji: string }
 	| { type: "reactions"; counts: Record<string, number> }
@@ -124,7 +124,10 @@ export interface Room {
 	 * closed (it is opened again). `?token=no` asks for none, to see the
 	 * relay refuse.
 	 */
-	token(role: "pub" | "sub", namespace: string[]): Promise<Uint8Array | undefined>;
+	token(
+		role: "pub" | "sub",
+		namespace: string[],
+	): Promise<Uint8Array | undefined>;
 }
 
 /**
@@ -149,7 +152,8 @@ export function joinRoom(as: string): Room | undefined {
 		shown.textContent = count === 1 ? emoji : `${emoji}×${count}`;
 		reactions.append(shown);
 		// The newest 50: how many come in two seconds is the room's to decide.
-		while (reactions.childElementCount > 50) reactions.firstElementChild?.remove();
+		while (reactions.childElementCount > 50)
+			reactions.firstElementChild?.remove();
 		setTimeout(() => shown.remove(), 2000);
 	};
 	let latest: Broadcast | null = null;
@@ -187,7 +191,10 @@ export function joinRoom(as: string): Room | undefined {
 						react(emoji, count);
 					}
 				}
-				if ((message.type === "hello" || message.type === "connected") && count !== null) {
+				if (
+					(message.type === "hello" || message.type === "connected") &&
+					count !== null
+				) {
 					count.textContent = `room “${name}”: ${message.connected} connected`;
 					document.body.dataset.connected = String(message.connected);
 				}
@@ -218,7 +225,9 @@ export function joinRoom(as: string): Room | undefined {
 		if (namespace.some((field) => field.includes("*") || field.includes("/"))) {
 			return undefined;
 		}
-		const answer = await socket.ask({ type: "token-for", role, namespace }, ["token"]);
+		const answer = await socket.ask({ type: "token-for", role, namespace }, [
+			"token",
+		]);
 		return answer?.type === "token" ? tokenOf(answer.token) : undefined;
 	};
 	// Two tokens each time it connects for the chat, as the participant

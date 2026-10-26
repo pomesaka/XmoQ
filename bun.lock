@@ -17,6 +17,10 @@
         "@xmoq/transcript": "workspace:*",
         "playwright-core": "1.64.0",
       },
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "typescript": "6.0.3",
+      },
     },
     "interop": {
       "name": "@xmoq/interop",

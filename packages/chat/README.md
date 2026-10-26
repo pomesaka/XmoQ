@@ -48,7 +48,7 @@ What a participant holds of what comes has a bound that no option removes. **All
 
 Layer 1, beside `@xmoq/msf` (`package_layer` in `scripts/ci/check-layers.sh`). The decoding of the payloads, the limits and which lines were had are in `src/core`, which does no input or output and is type-checked without the DOM (`tsconfig.core.json`); `src/moqt/participant.ts` speaks on the connection, and `src/moqt/keep-in-the-room.ts` keeps one across sessions.
 
-WHY a package and not a part of `demo/`: the reader of the payloads is a second implementation of what `xmoq-chat-tracks` reads, and its tests read the shared table; a test under `demo/` would run in no check (`mise run check` leaves `demo/` out). The interop run (`interop/chat-pages.ts`) drives the same `joinChat` the demo's pages use, which it could not do with code of `demo/`, which nothing may depend on. WHY NOT a part of `@xmoq/media`: the chat has nothing of media, and would sit in layer 2 for no reason.
+WHY a package and not a part of `demo/`: the reader of the payloads is a second implementation of what `xmoq-chat-tracks` reads, and its tests read the shared table; a test under `demo/` would not run (`mise run check` runs the tests of `packages/` alone). The interop run (`interop/chat-pages.ts`) drives the same `joinChat` the demo's pages use, which it could not do with code of `demo/`, which nothing may depend on. WHY NOT a part of `@xmoq/media`: the chat has nothing of media, and would sit in layer 2 for no reason.
 
 ## Not done
 

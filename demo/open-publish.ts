@@ -22,6 +22,11 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "playwright-core";
 
+/** What the callbacks of `evaluate` and `waitForFunction` read, in the page. */
+declare const document: {
+	readonly body: { readonly dataset: Record<string, string | undefined> };
+};
+
 const { values: options } = parseArgs({
 	options: {
 		port: { type: "string", default: "8080" },
@@ -45,11 +50,15 @@ const SILENCE_S = 1.5;
 /** A flag of seconds, 0 or more. */
 function seconds(flag: string, value: string): number {
 	const read = Number(value);
-	if (!Number.isFinite(read) || read < 0) throw new Error(`${flag} ${value}: seconds, 0 or more`);
+	if (!Number.isFinite(read) || read < 0)
+		throw new Error(`${flag} ${value}: seconds, 0 or more`);
 	return read;
 }
 const BEFORE_S = seconds("--before-s", options["before-s"]);
-const AFTER_S = options["after-s"] === undefined ? SILENCE_S : seconds("--after-s", options["after-s"]);
+const AFTER_S =
+	options["after-s"] === undefined
+		? SILENCE_S
+		: seconds("--after-s", options["after-s"]);
 
 /**
  * `wav` with `before` seconds of silence before its samples and `after`
@@ -61,7 +70,10 @@ const AFTER_S = options["after-s"] === undefined ? SILENCE_S : seconds("--after-
  * (docs/experiments/2026-10-25-a-voice-longer-than-a-piece.md).
  */
 function withSilence(wav: Buffer, before: number, after: number): Buffer {
-	if (wav.toString("ascii", 0, 4) !== "RIFF" || wav.toString("ascii", 8, 12) !== "WAVE") {
+	if (
+		wav.toString("ascii", 0, 4) !== "RIFF" ||
+		wav.toString("ascii", 8, 12) !== "WAVE"
+	) {
 		throw new Error("--voice is no WAV file");
 	}
 	let bytesPerSecond: number | undefined;
@@ -74,13 +86,21 @@ function withSilence(wav: Buffer, before: number, after: number): Buffer {
 			blockAlign = wav.readUInt16LE(at + 20);
 		}
 		if (id === "data") {
-			if (bytesPerSecond === undefined) throw new Error("--voice has no fmt chunk before its data");
-			if (at + 8 + size !== wav.length) throw new Error("--voice has a chunk after its data");
+			if (bytesPerSecond === undefined)
+				throw new Error("--voice has no fmt chunk before its data");
+			const rate = bytesPerSecond;
+			if (at + 8 + size !== wav.length)
+				throw new Error("--voice has a chunk after its data");
 			const silence = (s: number): Buffer =>
-				Buffer.alloc(Math.round((bytesPerSecond * s) / blockAlign) * blockAlign);
+				Buffer.alloc(Math.round((rate * s) / blockAlign) * blockAlign);
 			const head = silence(before);
 			const tail = silence(after);
-			const out = Buffer.concat([wav.subarray(0, at + 8), head, wav.subarray(at + 8), tail]);
+			const out = Buffer.concat([
+				wav.subarray(0, at + 8),
+				head,
+				wav.subarray(at + 8),
+				tail,
+			]);
 			out.writeUInt32LE(out.length - 8, 4);
 			out.writeUInt32LE(size + head.length + tail.length, at + 4);
 			return out;
@@ -97,7 +117,10 @@ if (options.voice !== undefined) {
 	const dir = mkdtempSync(join(tmpdir(), "xmoq-open-publish-"));
 	process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
 	voiceFile = join(dir, "voice.wav");
-	writeFileSync(voiceFile, withSilence(readFileSync(options.voice), BEFORE_S, AFTER_S));
+	writeFileSync(
+		voiceFile,
+		withSilence(readFileSync(options.voice), BEFORE_S, AFTER_S),
+	);
 }
 const browser = await chromium.launch({
 	headless: true,
@@ -134,7 +157,9 @@ browser.on("disconnected", () => {
 const page = await browser.newPage();
 const label = options.meet ? "meet" : "publish";
 page.on("console", (message) => console.log(`[${label}] ${message.text()}`));
-page.on("pageerror", (error) => console.log(`[${label}] pageerror: ${error.message}`));
+page.on("pageerror", (error) =>
+	console.log(`[${label}] pageerror: ${error.message}`),
+);
 const url = options.meet
 	? `http://localhost:${options.port}/meet`
 	: `http://localhost:${options.port}/publish${options.voice === undefined ? "" : "?audio=mic"}`;
@@ -147,11 +172,19 @@ if (options.meet) {
 			const meet = document.body.dataset.meet;
 			if (meet === undefined) return undefined;
 			const { self, seat } = JSON.parse(meet);
-			return seat === "seated" ? self : seat.startsWith("the meeting is full") ? `full ${seat}` : undefined;
+			return seat === "seated"
+				? self
+				: seat.startsWith("the meeting is full")
+					? `full ${seat}`
+					: undefined;
 		},
 		undefined,
 		{ timeout: 60_000 },
 	);
 	const said = String(await seated.jsonValue());
-	console.log(said.startsWith("full ") ? `not seated: ${said.slice(5)}` : `seated as ${said}`);
+	console.log(
+		said.startsWith("full ")
+			? `not seated: ${said.slice(5)}`
+			: `seated as ${said}`,
+	);
 }
