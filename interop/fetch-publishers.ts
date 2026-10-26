@@ -50,6 +50,30 @@ export async function startTestPublisher(
 	return publisher;
 }
 
+/** What the relay holds to be sent at most, a subscription and a session, in a run of a large Group. */
+const SEND_BYTES_FOR_A_LARGE_GROUP = String(32 * 1024 * 1024);
+
+/**
+ * Flags of the relay of a run that sends a large Group to its subscribers
+ * and then has it FETCHed: what the relay holds to be sent, a subscription
+ * and a session, is let be more than the run sends at once.
+ *
+ * WHY: under the relay's own limits, 4 MiB a subscription and 8 MiB a
+ * session (`HubConfig` in crates/relay/src/hub.rs), a subscriber that reads
+ * the Group slower than it comes is cut off with TOO_FAR_BEHIND, and the
+ * relay stopped the publisher's stream of the Group with CANCELLED after it. What these
+ * runs are about is how a FETCH is given up, and not those limits. WHY NOT
+ * a smaller Group: it has to be more than the page takes of a fetch stream
+ * that it does not read (its flow control), so that the relay is still
+ * writing when the FETCH is given up.
+ */
+export const RELAY_ARGS_FOR_A_LARGE_GROUP = [
+	"--subscription-send-bytes",
+	SEND_BYTES_FOR_A_LARGE_GROUP,
+	"--session-send-bytes",
+	SEND_BYTES_FOR_A_LARGE_GROUP,
+];
+
 /**
  * Starts a page that announces the namespace and serves the track and its
  * FETCHes, has the relay ask it for the track by a subscriber of its own,

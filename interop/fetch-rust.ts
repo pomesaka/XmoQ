@@ -58,6 +58,7 @@ import { startSubscriber } from "./clients.ts";
 import {
 	PAGE_GROUPS_BEFORE,
 	publishFromAPage,
+	RELAY_ARGS_FOR_A_LARGE_GROUP,
 	startTestPublisher,
 } from "./fetch-publishers.ts";
 import {
@@ -195,6 +196,7 @@ async function largeGroupRequestOnly(): Promise<string> {
 		port: options.port,
 		clients: ["own-browser", "own-browser", "own-rust"],
 		verbose: options.verbose,
+		relayArgs: RELAY_ARGS_FOR_A_LARGE_GROUP,
 	});
 	const publisher = await publishFromAPage("serve", context, sentHex);
 	// Says when the relay has passed an Object on, and so holds it.
