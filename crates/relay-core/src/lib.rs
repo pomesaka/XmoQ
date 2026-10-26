@@ -1802,7 +1802,7 @@ pub struct Relay {
     /// In the order they were announced.
     namespaces: Vec<Announcement>,
     /// The `SUBSCRIBE_NAMESPACE` requests the relay accepted (`discovery`).
-    watches: Vec<discovery::NamespaceWatch>,
+    namespace_subscriptions: Vec<discovery::NamespaceSubscription>,
     /// FETCH requests of subscribers.
     fetches: fetch::Fetches,
     /// Of those, the ones held for an Object the relay is receiving
@@ -1928,7 +1928,7 @@ impl Relay {
             out_streams: HashMap::new(),
             next_out_stream: 0,
             namespaces: Vec::new(),
-            watches: Vec::new(),
+            namespace_subscriptions: Vec::new(),
             fetches: fetch::Fetches::default(),
             track_statuses: track_status::TrackStatuses::default(),
             awaiting_receipt: BTreeMap::new(),
@@ -2831,7 +2831,7 @@ impl Relay {
                 for track in self.tracks.subscribed_in(&namespace) {
                     self.ask_the_publishers(&track, Some(session), None, actions);
                 }
-                self.tell_the_watches(actions);
+                self.tell_the_namespace_subscriptions(actions);
                 self.pass_announcements_upstream(actions);
             }
         }
@@ -3634,14 +3634,14 @@ impl Relay {
                 }
                 // §9.5: cancelling the request withdraws the namespace.
                 self.withdraw_namespace(session, stream);
-                self.tell_the_watches(actions);
+                self.tell_the_namespace_subscriptions(actions);
                 self.pass_announcements_upstream(actions);
             }
             Some(RequestSlot::SubscribeNamespace { request }) => {
                 if stream_gone {
                     state.moqt.on_peer_request_closed(request);
                 }
-                self.end_watch(session, stream);
+                self.end_namespace_subscription(session, stream);
             }
             Some(RequestSlot::Finished(Some(request))) => {
                 if stream_gone {

@@ -17,7 +17,7 @@ use crate::{Action, Relay, RequestSlot, SessionKey, StreamKey};
 /// more is refused with `EXCESSIVE_LOAD`. Decided on 2026-10-24. WHY a limit: each
 /// is looked at with every announcement and every withdrawal, and keeps the
 /// namespaces it was told of.
-pub const MAX_NAMESPACE_WATCHES_PER_SESSION: usize = 8;
+pub const MAX_NAMESPACE_SUBSCRIPTIONS_PER_SESSION: usize = 8;
 
 /// Namespaces under the prefix of one `SUBSCRIBE_NAMESPACE` that the relay
 /// tells of. Decided on 2026-10-24. One more at the request is refused with
@@ -26,15 +26,17 @@ pub const MAX_NAMESPACE_WATCHES_PER_SESSION: usize = 8;
 /// the request stream with `EXCESSIVE_LOAD` (§3.3.3), which the subscriber
 /// takes as a `NAMESPACE_DONE` for each (§10.18).
 ///
-/// WHY 4,096: the gatherer of the chat watches every room with one request,
-/// and the aim was 10 rooms of 100 people when this was set; a relay takes
-/// 1,000 sessions now (`HubConfig::max_sessions` of `xmoq-relay`). WHY a
-/// limit: the relay keeps, for each request, the namespaces it told of.
-pub const MAX_NAMESPACES_OF_A_WATCH: usize = 4096;
+/// WHY 4,096: the gatherer of the chat asks for the namespaces of every room
+/// with one request, and the aim was 10 rooms of 100 people when this was set;
+/// a relay takes 1,000 sessions now (`HubConfig::max_sessions` of
+/// `xmoq-relay`). WHY a limit: the relay keeps, for each request, the
+/// namespaces it told of.
+pub const MAX_NAMESPACES_OF_A_SUBSCRIPTION: usize = 4096;
 
-/// NAMESPACE and `NAMESPACE_DONE` of one watch that the relay has sent and
-/// the I/O side has not reported written ([`crate::Event::NamespaceWritten`]). The
-/// rest of what changed is sent as these are written. Decided on 2026-10-24.
+/// NAMESPACE and `NAMESPACE_DONE` of one namespace subscription that the relay
+/// has sent and the I/O side has not reported written
+/// ([`crate::Event::NamespaceWritten`]). The rest of what changed is sent as
+/// these are written. Decided on 2026-10-24.
 ///
 /// WHY a window, and not everything at once: what waits for a request stream
 /// at the I/O side is bounded (256 messages, `session_queue_len` of
@@ -44,7 +46,7 @@ pub const NAMESPACE_WINDOW: usize = 64;
 
 /// A `SUBSCRIBE_NAMESPACE` the relay accepted.
 #[derive(Debug)]
-pub(crate) struct NamespaceWatch {
+pub(crate) struct NamespaceSubscription {
     session: SessionKey,
     stream: StreamKey,
     prefix: TrackNamespace,
@@ -67,17 +69,17 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let open = self
-            .watches
+            .namespace_subscriptions
             .iter()
-            .filter(|watch| watch.session == session)
+            .filter(|subscription| subscription.session == session)
             .count();
-        if open >= MAX_NAMESPACE_WATCHES_PER_SESSION {
+        if open >= MAX_NAMESPACE_SUBSCRIPTIONS_PER_SESSION {
             let too_many = Refusal::code(request_error_code::EXCESSIVE_LOAD);
             self.refuse(session, stream, request, &too_many, actions);
             return;
         }
         let prefix = &message.track_namespace_prefix;
-        if self.announced_under(prefix) > MAX_NAMESPACES_OF_A_WATCH {
+        if self.announced_under(prefix) > MAX_NAMESPACES_OF_A_SUBSCRIPTION {
             let too_large = Refusal::code(request_error_code::NAMESPACE_TOO_LARGE);
             self.refuse(session, stream, request, &too_large, actions);
             return;
@@ -95,33 +97,36 @@ impl Relay {
             actions,
         );
         self.respond(session, stream, response, actions);
-        self.watches.push(NamespaceWatch {
+        self.namespace_subscriptions.push(NamespaceSubscription {
             session,
             stream,
             prefix: message.track_namespace_prefix.clone(),
             told: BTreeSet::new(),
             in_flight: 0,
         });
-        self.tell_the_watches(actions);
+        self.tell_the_namespace_subscriptions(actions);
     }
 
     /// The `SUBSCRIBE_NAMESPACE` on `stream` is over: the peer ended its
     /// direction, or reset it (§6.1: "can be cancelled by closing the stream
     /// with either a FIN or `RESET_STREAM`").
-    pub(crate) fn end_watch(&mut self, session: SessionKey, stream: StreamKey) {
-        self.watches
-            .retain(|watch| !(watch.session == session && watch.stream == stream));
+    pub(crate) fn end_namespace_subscription(&mut self, session: SessionKey, stream: StreamKey) {
+        self.namespace_subscriptions.retain(|subscription| {
+            !(subscription.session == session && subscription.stream == stream)
+        });
     }
 
-    /// The watches of a session that is gone.
-    pub(crate) fn drop_watches_of(&mut self, session: SessionKey) {
-        self.watches.retain(|watch| watch.session != session);
+    /// The namespace subscriptions of a session that is gone.
+    pub(crate) fn drop_namespace_subscriptions_of(&mut self, session: SessionKey) {
+        self.namespace_subscriptions
+            .retain(|subscription| subscription.session != session);
     }
 
-    /// Sends every watch what changed of the namespaces under its prefix: a
-    /// NAMESPACE for one it was not told of, a `NAMESPACE_DONE` for one it was
-    /// told of that no session announces any more. Called after every change
-    /// of the announced namespaces and of the watches.
+    /// Sends every namespace subscription what changed of the namespaces under
+    /// its prefix: a NAMESPACE for one it was not told of, a `NAMESPACE_DONE`
+    /// for one it was told of that no session announces any more. Called after
+    /// every change of the announced namespaces and of the namespace
+    /// subscriptions.
     ///
     /// §9.5 (relays): "it MUST send a NAMESPACE message to any subscriber that
     /// has sent `SUBSCRIBE_NAMESPACE` for that namespace, or a prefix of that
@@ -133,21 +138,26 @@ impl Relay {
     /// is told of the namespaces it announced itself: §6.1, "including
     /// echoing back Track Namespaces under the prefix that have been
     /// published to it".
-    pub(crate) fn tell_the_watches(&mut self, actions: &mut Vec<Action>) {
+    pub(crate) fn tell_the_namespace_subscriptions(&mut self, actions: &mut Vec<Action>) {
         let announced = self.announced();
         let mut too_many = Vec::new();
-        for watch in &mut self.watches {
-            if !tell(watch, &announced, actions) {
-                too_many.push((watch.session, watch.stream));
+        for subscription in &mut self.namespace_subscriptions {
+            if !tell(subscription, &announced, actions) {
+                too_many.push((subscription.session, subscription.stream));
             }
         }
         for (session, stream) in too_many {
-            self.reset_watch(session, stream, stream_reset_code::EXCESSIVE_LOAD, actions);
+            self.reset_namespace_subscription(
+                session,
+                stream,
+                stream_reset_code::EXCESSIVE_LOAD,
+                actions,
+            );
         }
     }
 
-    /// One NAMESPACE or `NAMESPACE_DONE` of a watch was written: the next is
-    /// sent, if something is left to tell.
+    /// One NAMESPACE or `NAMESPACE_DONE` of a namespace subscription was
+    /// written: the next is sent, if something is left to tell.
     pub(crate) fn on_namespace_written(
         &mut self,
         session: SessionKey,
@@ -155,16 +165,21 @@ impl Relay {
         actions: &mut Vec<Action>,
     ) {
         let announced = self.announced();
-        let Some(watch) = self
-            .watches
+        let Some(subscription) = self
+            .namespace_subscriptions
             .iter_mut()
-            .find(|watch| watch.session == session && watch.stream == stream)
+            .find(|subscription| subscription.session == session && subscription.stream == stream)
         else {
             return;
         };
-        watch.in_flight = watch.in_flight.saturating_sub(1);
-        if !tell(watch, &announced, actions) {
-            self.reset_watch(session, stream, stream_reset_code::EXCESSIVE_LOAD, actions);
+        subscription.in_flight = subscription.in_flight.saturating_sub(1);
+        if !tell(subscription, &announced, actions) {
+            self.reset_namespace_subscription(
+                session,
+                stream,
+                stream_reset_code::EXCESSIVE_LOAD,
+                actions,
+            );
         }
     }
 
@@ -176,17 +191,18 @@ impl Relay {
             .collect()
     }
 
-    /// Ends a watch from the relay's side: its request is over in the session,
-    /// and its stream is reset with `code` and stopped (§3.3.2), which the
-    /// subscriber takes as a `NAMESPACE_DONE` for each namespace (§10.18).
-    pub(crate) fn reset_watch(
+    /// Ends a namespace subscription from the relay's side: its request is over
+    /// in the session, and its stream is reset with `code` and stopped
+    /// (§3.3.2), which the subscriber takes as a `NAMESPACE_DONE` for each
+    /// namespace (§10.18).
+    pub(crate) fn reset_namespace_subscription(
         &mut self,
         session: SessionKey,
         stream: StreamKey,
         code: u32,
         actions: &mut Vec<Action>,
     ) {
-        self.end_watch(session, stream);
+        self.end_namespace_subscription(session, stream);
         if let Some(RequestSlot::SubscribeNamespace { request }) =
             self.take_slot(session, stream, actions)
             && let Some(state) = self.sessions.get_mut(&session)
@@ -211,23 +227,24 @@ impl Relay {
     }
 }
 
-/// Sends `watch` what changed of the namespaces under its prefix, within its
-/// window: `NAMESPACE_DONE` for those it was told of that are gone first, then
-/// NAMESPACE for those it was not told of. `false`: more than
-/// [`MAX_NAMESPACES_OF_A_WATCH`] are under the prefix, and nothing is sent.
+/// Sends `subscription` what changed of the namespaces under its prefix, within
+/// its window: `NAMESPACE_DONE` for those it was told of that are gone first,
+/// then NAMESPACE for those it was not told of. `false`: more than
+/// [`MAX_NAMESPACES_OF_A_SUBSCRIPTION`] are under the prefix, and nothing is
+/// sent.
 fn tell(
-    watch: &mut NamespaceWatch,
+    subscription: &mut NamespaceSubscription,
     announced: &BTreeSet<TrackNamespace>,
     actions: &mut Vec<Action>,
 ) -> bool {
     let now: BTreeSet<&TrackNamespace> = announced
         .iter()
-        .filter(|namespace| watch.prefix.is_prefix_of(namespace))
+        .filter(|namespace| subscription.prefix.is_prefix_of(namespace))
         .collect();
-    if now.len() > MAX_NAMESPACES_OF_A_WATCH {
+    if now.len() > MAX_NAMESPACES_OF_A_SUBSCRIPTION {
         return false;
     }
-    let gone: Vec<TrackNamespace> = watch
+    let gone: Vec<TrackNamespace> = subscription
         .told
         .iter()
         .filter(|namespace| !now.contains(namespace))
@@ -235,7 +252,7 @@ fn tell(
         .collect();
     let new: Vec<TrackNamespace> = now
         .into_iter()
-        .filter(|namespace| !watch.told.contains(*namespace))
+        .filter(|namespace| !subscription.told.contains(*namespace))
         .cloned()
         .collect();
     let changes = gone
@@ -243,21 +260,21 @@ fn tell(
         .map(|namespace| (namespace, true))
         .chain(new.into_iter().map(|namespace| (namespace, false)));
     for (namespace, done) in changes {
-        if watch.in_flight >= NAMESPACE_WINDOW {
+        if subscription.in_flight >= NAMESPACE_WINDOW {
             break;
         }
-        let suffix = suffix(&watch.prefix, &namespace);
+        let suffix = suffix(&subscription.prefix, &namespace);
         let message = if done {
-            watch.told.remove(&namespace);
+            subscription.told.remove(&namespace);
             ControlMessage::NamespaceDone(suffix)
         } else {
-            watch.told.insert(namespace);
+            subscription.told.insert(namespace);
             ControlMessage::Namespace(suffix)
         };
-        watch.in_flight += 1;
+        subscription.in_flight += 1;
         actions.push(Action::SendRequest {
-            session: watch.session,
-            stream: watch.stream,
+            session: subscription.session,
+            stream: subscription.stream,
             message,
         });
     }

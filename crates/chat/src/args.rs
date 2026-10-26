@@ -30,10 +30,10 @@ pub use xmoq_chat_tracks::limits::{
 pub const PAYLOAD_MOST: usize = 64 * 1024;
 
 /// The most `--room` flags: as many `SUBSCRIBE_NAMESPACE` requests as the own
-/// relay lets one session have open (`MAX_NAMESPACE_WATCHES_PER_SESSION` of
-/// `crates/relay-core/src/discovery.rs`, 8, decided on 2026-10-24). WHY refused at
-/// the start and not left to the relay: a ninth request would be refused
-/// with `EXCESSIVE_LOAD` for good, and its room would never be gathered
+/// relay lets one session have open (`MAX_NAMESPACE_SUBSCRIPTIONS_PER_SESSION`
+/// of `crates/relay-core/src/discovery.rs`, 8, decided on 2026-10-24). WHY
+/// refused at the start and not left to the relay: a ninth request would be
+/// refused with `EXCESSIVE_LOAD` for good, and its room would never be gathered
 /// while the gatherer looked as if it ran.
 pub const ROOMS_MOST: usize = 8;
 

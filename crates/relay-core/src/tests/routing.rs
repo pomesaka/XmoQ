@@ -514,18 +514,18 @@ fn a_subscribe_namespace_is_told_of_the_namespaces_under_its_prefix() {
     );
 }
 
-/// A watch under which many namespaces are announced is told of them as the
-/// I/O side writes what it was sent (`NAMESPACE_WINDOW` at a time), each
-/// once. §10.6.2, §10.18: a prefix under which more are announced than the
-/// relay tells of (`MAX_NAMESPACES_OF_A_WATCH`) is refused with
-/// `NAMESPACE_TOO_LARGE`; a watch that grows past it later has its stream
-/// reset with `EXCESSIVE_LOAD`, and is told nothing more.
+/// A namespace subscription under which many namespaces are announced is told
+/// of them as the I/O side writes what it was sent (`NAMESPACE_WINDOW` at a
+/// time), each once. §10.6.2, §10.18: a prefix under which more are announced
+/// than the relay tells of (`MAX_NAMESPACES_OF_A_SUBSCRIPTION`) is refused with
+/// `NAMESPACE_TOO_LARGE`; a namespace subscription that grows past it later has
+/// its stream reset with `EXCESSIVE_LOAD`, and is told nothing more.
 #[test]
 fn a_subscribe_namespace_is_told_of_many_namespaces_as_they_are_written_and_refused_or_reset_past_the_limit()
  {
-    let limit = crate::discovery::MAX_NAMESPACES_OF_A_WATCH;
+    let limit = crate::discovery::MAX_NAMESPACES_OF_A_SUBSCRIPTION;
     let window = crate::discovery::NAMESPACE_WINDOW;
-    let watch = |relay: &mut Relay| {
+    let subscribe_namespace = |relay: &mut Relay| {
         relay.step(Event::RequestOpened {
             session: ALICE,
             stream: StreamKey(0),
@@ -572,7 +572,7 @@ fn a_subscribe_namespace_is_told_of_many_namespaces_as_they_are_written_and_refu
     for n in 0..100 {
         announce_nth(&mut some, n);
     }
-    assert_eq!(named(&watch(&mut some)), window);
+    assert_eq!(named(&subscribe_namespace(&mut some)), window);
     let mut later = 0;
     for _ in 0..100 {
         later += named(&written(&mut some));
@@ -583,7 +583,7 @@ fn a_subscribe_namespace_is_told_of_many_namespaces_as_they_are_written_and_refu
     for n in 0..=limit {
         announce_nth(&mut too_many, n);
     }
-    let refused = watch(&mut too_many);
+    let refused = subscribe_namespace(&mut too_many);
     assert!(
         refused.iter().any(|action| matches!(
             action,
@@ -603,7 +603,7 @@ fn a_subscribe_namespace_is_told_of_many_namespaces_as_they_are_written_and_refu
     for n in 0..limit {
         announce_nth(&mut relay, n);
     }
-    assert_eq!(named(&watch(&mut relay)), window);
+    assert_eq!(named(&subscribe_namespace(&mut relay)), window);
     let grown = announce_nth(&mut relay, limit);
     assert!(
         grown.contains(&Action::ResetRequest {
