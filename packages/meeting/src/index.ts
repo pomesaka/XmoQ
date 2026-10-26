@@ -11,7 +11,13 @@ export {
 	readInboxLine,
 } from "./core/agent-inbox.ts";
 export { type AgentEvent, agentLine, framePath } from "./core/agent-lines.ts";
-export { MEET, meetingPrefix, participantOf } from "./core/names.ts";
+export {
+	MEET,
+	meetingPrefix,
+	participantNamespace,
+	participantOf,
+	seatSubscribeNamespace,
+} from "./core/names.ts";
 export {
 	createPresence,
 	type Presence,

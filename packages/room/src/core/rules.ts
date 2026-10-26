@@ -3,15 +3,21 @@
 // Why each is so is at the top of `src/worker.ts`.
 
 // WHY the names alone: what the room decides does no input or output, and
-// the package itself brings its connections.
+// each package itself brings its connections (and `@xmoq/meeting` the
+// browser's).
 import { type ChatRoom, roomFields } from "@xmoq/chat/room-names";
+import {
+	MEET,
+	participantNamespace,
+	seatSubscribeNamespace,
+} from "@xmoq/meeting/names";
 
 /** The participants of a meeting, the agents among them (decided on 2026-10-25). */
 export const MOST_IN_A_MEETING = 49;
 
 /** Whether the namespace is a meeting's: `xmoq/meet` or under it. */
 export const meetingNamespace = (namespace: readonly string[]): boolean =>
-	namespace[0] === "xmoq" && namespace[1] === "meet";
+	namespace[0] === MEET[0] && namespace[1] === MEET[1];
 
 /** Whether `id` can be the last field of a participant's namespace. */
 export const participantId = (id: unknown): id is string =>
@@ -176,8 +182,8 @@ export function seatFor(
 	if (held.length >= MOST_IN_A_MEETING) return { type: "full" };
 	return {
 		type: "seat",
-		publish: ["xmoq", "meet", room, id],
-		subscribe: ["xmoq", "meet", room, "*"],
+		publish: participantNamespace(room, id),
+		subscribe: seatSubscribeNamespace(room),
 	};
 }
 

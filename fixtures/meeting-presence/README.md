@@ -1,10 +1,12 @@
 # Who is in a meeting
 
-Every participant of a meeting publishes under `xmoq/meet/<room>/<id>`, and a reader learns who is there from one SUBSCRIBE_NAMESPACE for `xmoq/meet/<room>` (NAMESPACE and NAMESPACE_DONE, draft 18 §6.1; decided on 2026-10-25, `docs/scale-and-meetings.md`). Two implementations keep who is there by the same rule: `Presence` and `participant_of` of `xmoq-viewer` (`crates/viewer/src/presence.rs`, `crates/viewer/src/meeting.rs`), which the reader for agents uses, and `createPresence` and `participantOf` of `@xmoq/meeting` (`packages/meeting/src/core/`), which a page uses. These rows pin it; the reasons are in those files.
+Every participant of a meeting publishes under `xmoq/meet/<room>/<id>`, and a reader learns who is there from one SUBSCRIBE_NAMESPACE for `xmoq/meet/<room>` (NAMESPACE and NAMESPACE_DONE, draft 18 §6.1; decided on 2026-10-25, `docs/scale-and-meetings.md`). Two implementations keep who is there by the same rule: `Presence` of `xmoq-viewer` (`crates/viewer/src/presence.rs`) with `participant_of` of `xmoq-meeting-tracks` (`crates/meeting-tracks`), which the reader for agents uses, and `createPresence` and `participantOf` of `@xmoq/meeting` (`packages/meeting/src/core/`), which a page uses. These rows pin it; the reasons are in those files.
+
+`namespaces.tsv` pins the namespaces themselves: `xmoq-meeting-tracks` (`prefix`, `participant`, `seat_subscribe`) and `@xmoq/meeting` (`meetingPrefix`, `participantNamespace`, `seatSubscribeNamespace`) read it, and so does the room (`packages/room/test/rules.test.ts`), whose seats give the namespaces of its rows `participant` and `seat-subscribe`.
 
 ## Format
 
-Both files have one row per case, columns separated by tabs, no header. Every row ends with one line feed. `-` for none.
+Every file has one row per case, columns separated by tabs, no header. Every row ends with one line feed. `-` for none.
 
 `who-is-there.tsv`:
 
@@ -23,3 +25,13 @@ Both files have one row per case, columns separated by tabs, no header. Every ro
 | 2 | The room |
 | 3 | The fields of a namespace, separated by spaces |
 | 4 | The participant it is the broadcast of |
+
+`namespaces.tsv`:
+
+| Column | Content |
+|---|---|
+| 1 | Name of the row; unique |
+| 2 | The room |
+| 3 | The participant's id; `-` where the namespace is of no participant |
+| 4 | Which namespace: `prefix` (`xmoq/meet/<room>`), `participant` (the one the participant publishes under), `seat-subscribe` (the one of a seat's token to subscribe) |
+| 5 | Its fields, separated by spaces |

@@ -12,6 +12,7 @@ workspace = true
 xmoq-again = { path = "../again" }
 xmoq-chat-tracks = { path = "../chat-tracks" }
 xmoq-loc = { path = "../loc" }
+xmoq-meeting-tracks = { path = "../meeting-tracks" }
 xmoq-moqt = { path = "../moqt" }
 xmoq-moqt-io = { path = "../moqt-io" }
 xmoq-msf = { path = "../msf" }

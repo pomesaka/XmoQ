@@ -72,6 +72,11 @@
 // SUBSCRIBE_NAMESPACE at the relay.
 
 import {
+	meetingPrefix,
+	participantNamespace,
+	seatSubscribeNamespace,
+} from "@xmoq/meeting/names";
+import {
 	type HeldSeat,
 	holdsSeat,
 	MOST_IN_A_MEETING,
@@ -273,7 +278,7 @@ export class MeetingRoom {
 		if (route === "GET " && rest.length === 0) {
 			return json({
 				relay: relayAnswer(this.env),
-				namespace: ["xmoq", "meet", name],
+				namespace: meetingPrefix(name),
 				transcript,
 				most: MOST_IN_A_MEETING,
 			});
@@ -319,8 +324,8 @@ export class MeetingRoom {
 			const seat = { lease: String(lease), expiresAt: now + times.seatMs };
 			await this.ctx.storage.put(`${SEAT_KEY}${id}`, seat);
 			return this.seatAnswer(
-				["xmoq", "meet", name, id],
-				["xmoq", "meet", name, "*"],
+				participantNamespace(name, id),
+				seatSubscribeNamespace(name),
 				seat,
 				times.renewMs,
 			);

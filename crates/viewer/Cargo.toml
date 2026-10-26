@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+xmoq-meeting-tracks = { path = "../meeting-tracks" }
 serde_json = "=1.0.152"
 xmoq-moqt = { path = "../moqt" }
 xmoq-room-token = { path = "../room-token", default-features = false }
