@@ -1837,8 +1837,6 @@ pub struct Relay {
     fetches_for_one: usize,
     /// [`Self::set_held_beyond_the_cache`].
     held_beyond_cache_limit: usize,
-    /// [`Self::set_held_beyond_the_cache`].
-    held_beyond_cache_share: usize,
     /// The cache of a track let go of a Group, or a track ended, while
     /// this event was handled: what the fetch streams keep of it is looked
     /// at before the event is done with.
@@ -1946,8 +1944,6 @@ impl Relay {
             requests_for_one: MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER,
             fetches_for_one: MAX_OWN_FETCHES_FOR_ONE_SUBSCRIBER,
             held_beyond_cache_limit: fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE,
-            held_beyond_cache_share: fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE
-                / fetch::SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE,
             cache_let_go: false,
             upstream_answer_wait_ms: UPSTREAM_ANSWER_WAIT_MS,
             upstream: None,
@@ -1988,12 +1984,11 @@ impl Relay {
     }
 
     /// How many bytes the fetch streams the relay writes may keep alive
-    /// beyond its cache, and how many of them for one subscriber's session,
-    /// in place of [`fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE`] and an eighth
-    /// of it.
-    pub fn set_held_beyond_the_cache(&mut self, bytes: usize, for_one_session: usize) {
+    /// beyond its cache, in place of
+    /// [`fetch::MAX_BYTES_HELD_BEYOND_THE_CACHE`]; one subscriber's session
+    /// has an eighth of them (`SHARE_OF_BYTES_HELD_BEYOND_THE_CACHE`).
+    pub fn set_held_beyond_the_cache(&mut self, bytes: usize) {
         self.held_beyond_cache_limit = bytes;
-        self.held_beyond_cache_share = for_one_session;
     }
 
     /// A session sends a `PUBLISH_NAMESPACE`: whether it may, by how many

@@ -1093,8 +1093,7 @@ pub fn spawn_with_upstream<C: Connection>(
         relay.set_upstream(upstream.namespace.clone());
     }
     if let Some(bytes) = config.held_beyond_cache_bytes {
-        // An eighth for one session, as of the relay's own number.
-        relay.set_held_beyond_the_cache(bytes, bytes / 8);
+        relay.set_held_beyond_the_cache(bytes);
     }
     relay.set_share_of_one_subscriber(
         config
