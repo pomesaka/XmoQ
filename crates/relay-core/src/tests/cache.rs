@@ -984,6 +984,32 @@ fn what_a_fetch_stream_keeps_of_a_group_the_cache_let_go_of_is_counted_until_it_
     assert_eq!(relay.counts().held_beyond_cache_bytes, 0);
 }
 
+/// What a fetch stream keeps of a Group the cache let go of counts the
+/// properties of its Objects as the cache does (`object_size`): an Object
+/// without a payload is not kept for nothing.
+#[test]
+fn what_is_kept_beyond_the_cache_counts_the_properties_of_the_objects() {
+    let mut relay = relay_with_track();
+    assert_eq!(data_stream_opened(&mut relay, 7), []);
+    for object_id in 0..3 {
+        let object = SubgroupObject {
+            properties: vec![KeyValuePair::bytes(0x0d, vec![7; 8]).unwrap()],
+            payload: vec![],
+            ..object(object_id)
+        };
+        relay.step(Event::Object {
+            session: PUBLISHER,
+            stream: StreamKey(7),
+            object,
+        });
+    }
+    // 16 bytes a pair, and the 8 of its value, for each of three.
+    assert_eq!(relay.counts().cached_bytes, 72);
+    assert_eq!(fetches_group(&mut relay, ALICE, 7, 3), "written");
+    assert_eq!(the_cache_moves_on_to(&mut relay, 8), []);
+    assert_eq!(relay.counts().held_beyond_cache_bytes, 72);
+}
+
 #[test]
 fn a_session_that_has_its_share_kept_beyond_the_cache_is_refused_and_no_other() {
     // 24 bytes for the relay, so 3 for a session: what Group 3 has.

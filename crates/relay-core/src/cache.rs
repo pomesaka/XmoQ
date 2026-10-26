@@ -101,18 +101,9 @@ pub struct CachedObject {
 }
 
 impl CachedObject {
-    /// What it counts against the limits in bytes.
+    /// What it counts against the limits in bytes ([`crate::object_size`]).
     fn size(&self) -> usize {
-        let properties: usize = self
-            .object
-            .properties
-            .iter()
-            .map(|property| match property.value() {
-                Value::Varint(_) => 8,
-                Value::Bytes(bytes) => bytes.len(),
-            })
-            .sum();
-        self.object.payload.len().saturating_add(properties)
+        crate::object_size(&self.object)
     }
 
     /// The Object IDs before this one that it says do not exist (§12.9:
@@ -1050,10 +1041,11 @@ mod tests {
         assert_eq!(in_use, 256 * MIB - 1);
         assert_eq!(ids(&cache, at(5, 0), at(5, 0)), None);
 
-        // Object Properties count: a number as 8 bytes, and bytes as what
-        // they are long.
+        // Object Properties count as every limit of the relay counts them
+        // (`object_size`): 16 bytes a pair, and the bytes of a value as
+        // what they are long. A payload of 2 and a Prior Object ID Gap.
         let (_, in_use) = cache_of(vec![object(5, 1, 1)]);
-        assert_eq!(in_use, 10);
+        assert_eq!(in_use, 18);
         let with_bytes = CachedObject {
             group_id: 5,
             subgroup_id: 0,
@@ -1069,7 +1061,8 @@ mod tests {
             }),
         };
         let (_, in_use) = cache_of(vec![with_bytes]);
-        assert_eq!(in_use, 3 + 5 + 8);
+        // 3 of payload, 16 and 5 of the first pair, 16 of the second.
+        assert_eq!(in_use, 40);
     }
 
     /// What a test says of an Object: (Object ID; Prior Object ID Gap;

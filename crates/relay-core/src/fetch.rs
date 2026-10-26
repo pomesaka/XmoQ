@@ -266,9 +266,10 @@ enum Standing {
     /// reported its fetch stream written yet.
     Written {
         track: FullTrackName,
-        /// The Group the stream carries Objects of, and how many bytes of
-        /// payload: what the write keeps alive when the cache lets go of
-        /// that Group ([`MAX_BYTES_HELD_BEYOND_THE_CACHE`]). `None` for a
+        /// The Group the stream carries Objects of, and how many bytes they
+        /// count for ([`crate::object_size`]): what the write keeps alive
+        /// when the cache lets go of that Group
+        /// ([`MAX_BYTES_HELD_BEYOND_THE_CACHE`]). `None` for a
         /// stream without an Object.
         holds: Option<(KeptGroup, usize)>,
         /// The I/O side was told to give the stream up
@@ -1811,19 +1812,17 @@ impl Relay {
         acknowledge_updates(session, stream, owed, actions);
         // The Objects of the answer are of one Group, the one the cache
         // has.
-        let payload = |piece: &FetchPiece| match piece {
-            FetchPiece::Object(cached) => Some((cached.group_id, cached.object.payload.len())),
+        let size = |piece: &FetchPiece| match piece {
+            FetchPiece::Object(cached) => {
+                Some((cached.group_id, crate::object_size(&cached.object)))
+            }
             FetchPiece::EndOfRange(..) => None,
         };
         let born = self.tracks.live(track).map_or(0, |live| live.born);
-        let holds = pieces.iter().find_map(payload).map(|(group, _)| {
+        let holds = pieces.iter().find_map(size).map(|(group, _)| {
             (
                 KeptGroup { track: born, group },
-                pieces
-                    .iter()
-                    .filter_map(payload)
-                    .map(|(_, bytes)| bytes)
-                    .sum(),
+                pieces.iter().filter_map(size).map(|(_, bytes)| bytes).sum(),
             )
         });
         actions.push(Action::WriteFetchStream {

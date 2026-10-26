@@ -260,7 +260,8 @@ pub struct HubConfig {
 
 impl HubConfig {
     /// How long a subscriber has for the whole of a fetch stream the relay
-    /// writes from its cache, whose Objects have `bytes` bytes of payload:
+    /// writes from its cache, whose Objects count for `bytes`
+    /// (`object_size` of `xmoq-relay-core`, their payload and properties):
     /// [`Self::cached_fetch_whole_ms`], or as long as the bytes take at
     /// [`Self::cached_fetch_least_kbps`] where that is longer.
     ///
@@ -2294,7 +2295,7 @@ impl<C: Connection> Hub<C> {
         let pieces_bytes: usize = pieces
             .iter()
             .map(|piece| match piece {
-                FetchPiece::Object(cached) => cached.object.payload.len(),
+                FetchPiece::Object(cached) => xmoq_relay_core::object_size(&cached.object),
                 FetchPiece::EndOfRange(..) => 0,
             })
             .sum();
