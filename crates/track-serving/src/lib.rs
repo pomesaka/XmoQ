@@ -5,10 +5,11 @@
 //! a Group for each prefix, and answers the relay's FETCH for it.
 //!
 //! The parts: how long to wait before asking again ([`backoff`]), what a
-//! FETCH gets of such a track ([`fetch`]), the FETCH requests being answered
-//! ([`answers`]), the PUBLISH of a track ([`publication`]; these four
-//! without input or output), the requests the relay opens ([`requests`]),
-//! and the tasks that write the streams ([`streams`]).
+//! FETCH gets of such a track ([`fetch`]), the PUBLISH of a track
+//! ([`publication`]; these three without input or output), the requests the
+//! relay opens ([`requests`]), the FETCH requests being answered and the
+//! tasks that answer them ([`answers`], by which the Rust client answers
+//! too), and the tasks that write the other streams ([`streams`]).
 //!
 //! WHY a crate of its own, apart from the gatherer: a transcriber of the
 //! broadcasts, and an agent in a meeting, serve tracks the same way, and

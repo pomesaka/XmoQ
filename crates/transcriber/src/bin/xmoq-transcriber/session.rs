@@ -57,13 +57,14 @@ use xmoq_speech::cut::Cut;
 use xmoq_speech::judge::{Judge, ModelJudge, VOICE_DBFS};
 use xmoq_speech::vad::Silero;
 use xmoq_speech::{AudioPacket, Listener};
-use xmoq_track_serving::answers::{self, FETCHES_AT_ONCE, Fetches};
+use xmoq_track_serving::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
 use xmoq_track_serving::backoff::Backoff;
 use xmoq_track_serving::fetch::pieces_of;
 use xmoq_track_serving::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
 use xmoq_track_serving::requests::{AskedFetch, FetchAnswer, PeerRequests};
 use xmoq_track_serving::streams::{
-    Answered, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request, send_group,
+    COMMAND_QUEUE, Command, GroupToSend, Heard, RequestTask, Sending, Waits, open_request,
+    send_group,
 };
 use xmoq_track_serving::{shown, sleep_until};
 use xmoq_transcriber::args::Args;
@@ -309,7 +310,6 @@ pub async fn transcribe(
     );
     kept.readers.extend([uni_readers, request_readers]);
     let (heard, mut heard_by_loop) = mpsc::channel(HEARD_QUEUE);
-    let (fetch_done, mut fetches_done) = mpsc::channel(FETCHES_AT_ONCE);
     let (drained, mut drained_publishes) = mpsc::channel(PEER_REQUEST_QUEUE);
     let (catalogs, mut catalogs_read) = mpsc::channel(PEER_REQUEST_QUEUE);
     let mut transcribing = Transcribing {
@@ -345,7 +345,11 @@ pub async fn transcribe(
         catalog_fetches: HashMap::new(),
         catalogs,
         early: EarlyObjects::default(),
-        requests: PeerRequests::new(Fetches::new(FETCHES_AT_ONCE, MAX_BYTES_HELD), fetch_done),
+        requests: PeerRequests::new(Bounds {
+            at_once: MAX_ANSWERED_AT_ONCE,
+            bytes: MAX_BYTES_HELD,
+            say_queue: COMMAND_QUEUE,
+        }),
         ending: HashMap::new(),
         drained,
         sends: JoinSet::new(),
@@ -380,6 +384,9 @@ pub async fn transcribe(
     }
 
     let ended = loop {
+        // WHY taken before the select: its arms borrow parts of the state
+        // mutably, the task notes of the FETCH answers among them.
+        let (next_watch, next_ask) = (transcribing.next_watch(), transcribing.next_ask());
         tokio::select! {
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
@@ -409,12 +416,11 @@ pub async fn transcribe(
                     transcribing.on_catalog(&namespace, &payload)?;
                 }
             }
-            Some((stream, answered)) = fetches_done.recv() => transcribing.fetch_over(stream, answered),
+            note = transcribing.requests.next_note() => transcribing.fetch_noted(note),
             Some(token) = drained_publishes.recv() => transcribing.publish_done(token)?,
-            () = sleep_until(transcribing.next_watch()) => transcribing.watch_again()?,
-            () = sleep_until(transcribing.next_ask()) => transcribing.ask_again()?,
+            () = sleep_until(next_watch) => transcribing.watch_again()?,
+            () = sleep_until(next_ask) => transcribing.ask_again()?,
             Some(_) = transcribing.sends.join_next() => {}
-            Some(_) = transcribing.requests.replies().join_next() => {}
         }
     };
     // The pieces under way are read: what was said before the end is not
@@ -1355,7 +1361,7 @@ impl Transcribing<'_> {
 
     /// The fetch stream of a broadcast's catalog was read: its request is
     /// finished, and the relay's direction is waited for
-    /// (`xmoq_track_serving::streams::PEER_END_WAIT`). WHY: a request left
+    /// (`xmoq_track_serving::answers::PEER_END_WAIT`). WHY: a request left
     /// open for each broadcast stays in the session, which holds 256 at the
     /// most.
     fn catalog_fetched(&mut self, namespace: &TrackNamespace) {
@@ -1568,7 +1574,7 @@ impl Transcribing<'_> {
         };
         let count = speeches.len();
         let pieces = pieces_of(speeches, planned.left_out);
-        if !self.requests.hold(&pieces) {
+        if !self.requests.fits(&pieces) {
             return self.refuse(asked, request_error_code::EXCESSIVE_LOAD);
         }
         let answer = FetchAnswer {
@@ -1591,8 +1597,7 @@ impl Transcribing<'_> {
     }
 
     /// What the task of a FETCH said.
-    fn fetch_over(&mut self, stream: u64, answered: Answered) {
-        self.requests
-            .over(&mut self.session, &self.stops, stream, answered);
+    fn fetch_noted(&mut self, note: Note) {
+        self.requests.on_note(&mut self.session, &self.stops, note);
     }
 }

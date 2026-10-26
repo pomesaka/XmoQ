@@ -50,11 +50,11 @@ What the gatherer holds of what the relay and the participants send has a bound 
 | Objects that come before their `SUBSCRIBE_OK` | 64; the oldest is dropped | `session.rs` |
 | Lines that wait for the `PUBLISH_OK` of their room | 64 a room; the oldest is not sent live | `session.rs` |
 | Subgroup streams of lines being written | 256; the rest are not sent live (`LINE_NOT_SENT`) | `session.rs` |
-| FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `FETCHES_AT_ONCE` of [`xmoq-track-serving`](../track-serving/README.md) |
+| FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `MAX_ANSWERED_AT_ONCE` of [`xmoq-track-serving`](../track-serving/README.md) |
 | Bytes of payload the FETCH answers being written hold together | 64 MiB; a FETCH whose answer would go past it is refused with `EXCESSIVE_LOAD`. The lines are read one by one, and the reading stops at the bound | `MAX_BYTES_HELD`, `session.rs` |
 | Messages for one request stream not written yet, the answers to `REQUEST_UPDATE` among them | 64; none is dropped (§10.9: "exactly one"): one more cancels the request with `EXCESSIVE_LOAD` | `COMMAND_QUEUE`, `streams` of `xmoq-track-serving` |
 | A line's subgroup stream | 1 s for the relay to allow it, 5 s for the relay to take it; then it is reset, and the line is not sent live | `streams` of `xmoq-track-serving` |
-| The relay's direction of a FETCH's request stream | Stopped with `CANCELLED` when the gatherer finishes its own, 3 s after the end of the fetch stream at the most, where the relay has not ended it | `Fetches::over` of [`xmoq-track-serving`](../track-serving/README.md) |
+| The relay's direction of a FETCH's request stream | Stopped with `CANCELLED` when the gatherer finishes its own, 3 s after the end of the fetch stream at the most, where the relay has not ended it | `answers` of [`xmoq-track-serving`](../track-serving/README.md) |
 | The relay's SETUP; a stream for a request; the answer to a request | 10 s each | `session.rs` |
 
 A line that is not sent live is in the store, and a FETCH gets it.

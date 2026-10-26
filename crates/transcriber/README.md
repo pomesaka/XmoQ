@@ -50,7 +50,7 @@ What the relay and the publishers send has a bound that no flag removes. **All a
 | Objects that come before their `SUBSCRIBE_OK` | 64; the oldest is dropped | `session.rs` |
 | Pieces that wait for the `PUBLISH_OK` of their transcript | 64; the oldest is not sent live | `session.rs` |
 | Subgroup streams of pieces being written | 64; the rest are not sent live (`SPEECH_NOT_SENT`) | `session.rs` |
-| FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `FETCHES_AT_ONCE` of [`xmoq-track-serving`](../track-serving/README.md) |
+| FETCH requests answered at once | 32; one more is refused with `EXCESSIVE_LOAD` | `MAX_ANSWERED_AT_ONCE` of [`xmoq-track-serving`](../track-serving/README.md) |
 | Bytes of payload the FETCH answers being written hold together | 16 MB; a FETCH whose answer would go past it is refused with `EXCESSIVE_LOAD` | `MAX_BYTES_HELD`, `session.rs` |
 | A piece | 15 s of samples, 960 KB | `Cut`, `xmoq-speech` |
 

@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use xmoq_moqt::fetch::FetchHeader;
 use xmoq_moqt::message::{ControlMessage, Fetch, ReasonPhrase, request_error_code, retry_interval};
 use xmoq_moqt::name::Location;
 use xmoq_moqt::params::GroupOrder;
@@ -22,9 +22,8 @@ use xmoq_moqt_io::{
     Connection, PeerRequestStreamEvent, SendStream as _, StreamStops, Trace, send_message,
 };
 
-use crate::answers::{self, Fetches, Step};
-use crate::fetch::{Piece, payload_bytes};
-use crate::streams::{Answer, Answered, answer_fetch};
+use crate::answers::{self, Answer, Answers, Bounds, Happened, Note, Over, Pace};
+use crate::fetch::Piece;
 
 type Send = <WtConnection as Connection>::Send;
 
@@ -108,34 +107,27 @@ pub struct FetchAnswer {
 }
 
 /// The requests of the relay on one session.
+// FIXME: generic over `Connection`, as `crate::answers` is, so that tests on
+// `MemoryConnection` reach it.
 pub struct PeerRequests {
-    fetches: Fetches,
-    /// The requests the session keeps after they were refused, by their
-    /// stream, until the stream is gone.
+    answers: Answers,
+    /// The requests the session keeps after the client ended them, refused
+    /// or answered, by their stream, until the stream is gone.
     refused: HashMap<u64, PeerRequestId>,
-    /// Where the tasks that answer a FETCH say how it went.
-    done: mpsc::Sender<(u64, Answered)>,
     /// The answers and refusals being written.
     replies: JoinSet<()>,
 }
 
 impl PeerRequests {
-    /// None yet, with `fetches` for the FETCH requests, whose tasks say how
-    /// they went on `done` ([`Self::over`]).
+    /// None yet; the FETCH requests are answered within `bounds`.
     #[must_use]
-    pub fn new(fetches: Fetches, done: mpsc::Sender<(u64, Answered)>) -> Self {
+    pub fn new(bounds: Bounds) -> Self {
         Self {
-            fetches,
+            // Such a client answers as fast as it can.
+            answers: Answers::new(Pace::default(), bounds),
             refused: HashMap::new(),
-            done,
             replies: JoinSet::new(),
         }
-    }
-
-    /// The answers and refusals being written, for the loop to take as they
-    /// end.
-    pub fn replies(&mut self) -> &mut JoinSet<()> {
-        &mut self.replies
     }
 
     /// An event of the relay's request streams; a FETCH, for the client.
@@ -182,21 +174,25 @@ impl PeerRequests {
                 }
             },
             PeerRequestStreamEvent::Message { stream, message } => {
-                if let Some(request) = self.fetches.request(stream) {
+                if let Some(request) = self.answers.request_on(stream) {
+                    // A REQUEST_UPDATE for a FETCH that is answered changes
+                    // nothing and gets its REQUEST_OK.
                     let event = session.on_peer_request_message(request, message)?;
-                    if let PeerRequestEvent::UpdateAccepted { response, .. } = event {
-                        let to_do = self.fetches.updated(stream, response);
-                        apply(to_do, session, stops);
+                    if let PeerRequestEvent::UpdateAccepted { response, .. } = event
+                        && let Some(over) = self.answers.say(stream, response)
+                    {
+                        self.over(session, stops, stream, &over);
                     }
                 } else {
-                    // What crossed the refusal.
+                    // What crossed the refusal or the end of the answer.
                     on_refused_message(session, &self.refused, stream, message)?;
                 }
             }
             PeerRequestStreamEvent::Closed { stream, how } => {
+                if let Some(over) = self.answers.happened(stream, Happened::PeerClosed(how)) {
+                    self.over(session, stops, stream, &over);
+                }
                 on_refused_closed(session, &mut self.refused, stream);
-                let to_do = self.fetches.closed(stream, how);
-                apply(to_do, session, stops);
             }
             PeerRequestStreamEvent::Failed(error) => return Err(error.into()),
             PeerRequestStreamEvent::ReaderPanicked => return Err(RequestError::ReaderPanicked),
@@ -244,24 +240,25 @@ impl PeerRequests {
     /// is refused with `EXCESSIVE_LOAD`.
     #[must_use]
     pub fn full(&self) -> bool {
-        self.fetches.full()
+        !self.answers.has_room()
     }
 
     /// The bytes an answer may take now.
     #[must_use]
     pub fn room(&self) -> usize {
-        self.fetches.room()
+        self.answers.room()
     }
 
-    /// The answer of `pieces` is to be held, where it fits ([`Self::room`]).
+    /// Whether an answer of `pieces` fits in what the answers may hold.
     /// Where it does not, the FETCH is to be refused with `EXCESSIVE_LOAD`.
-    pub fn hold(&mut self, pieces: &[Piece]) -> bool {
-        self.fetches.hold(payload_bytes(pieces))
+    #[must_use]
+    pub fn fits(&self, pieces: &[Piece]) -> bool {
+        self.answers.fits(pieces)
     }
 
     /// Answers the FETCH `asked` (End Of Track 0: the track goes on) on its
-    /// request stream and a fetch stream of its own, with what was held for
-    /// it ([`Self::hold`]).
+    /// request stream and a fetch stream of its own, with an answer that
+    /// fits ([`Self::fits`]).
     ///
     /// # Errors
     ///
@@ -280,28 +277,46 @@ impl PeerRequests {
             ..
         } = asked;
         let messages = answers::accepted(session, request, answer.end_location)?;
-        let bytes = payload_bytes(&answer.pieces);
         let answer = Answer {
             messages,
-            request_id: request.value(),
+            header: FetchHeader {
+                request_id: request.value(),
+            },
             group_order: answer.group_order,
             pieces: answer.pieces,
         };
-        let task = answer_fetch(connection, stream, send, answer, self.done.clone());
-        self.fetches.answering(stream, request, task, bytes);
+        self.answers
+            .start(stream, request, send, answer, connection, &Trace::default());
         Ok(())
     }
 
-    /// What the task that answers the FETCH on `stream` said.
-    pub fn over(
-        &mut self,
-        session: &mut Session,
-        stops: &StreamStops,
-        stream: u64,
-        answered: Answered,
-    ) {
-        let to_do = self.fetches.over(stream, answered);
-        apply(to_do, session, stops);
+    /// The next note of a task that answers a FETCH, for [`Self::on_note`];
+    /// the answers and refusals written meanwhile are let go of. Never,
+    /// while no task has one.
+    pub async fn next_note(&mut self) -> Note {
+        loop {
+            tokio::select! {
+                Some(_) = self.replies.join_next() => {}
+                note = self.answers.next_note() => return note,
+            }
+        }
+    }
+
+    /// What a task that answers a FETCH noted.
+    pub fn on_note(&mut self, session: &mut Session, stops: &StreamStops, note: Note) {
+        let Note(stream, happened) = note;
+        if let Some(over) = self.answers.happened(stream, happened) {
+            self.over(session, stops, stream, &over);
+        }
+    }
+
+    /// The FETCH on `stream` is over, or a step after that: the log, the
+    /// session and the subscriber's direction.
+    fn over(&mut self, session: &mut Session, stops: &StreamStops, stream: u64, over: &Over) {
+        if let Some(served) = over.served {
+            println!("{served}");
+        }
+        answers::conclude(over, stream, session, &mut self.refused, stops);
     }
 
     /// Writes the last message on a request stream of the relay, then a FIN
@@ -312,17 +327,5 @@ impl PeerRequests {
             let _ = send_message(&mut send, &response, &Trace::default(), "reply").await;
             send.finish();
         });
-    }
-}
-
-/// Carries `to_do` out on `session` and `stops`, and prints the lines.
-fn apply(to_do: Vec<Step<PeerRequestId>>, session: &mut Session, stops: &StreamStops) {
-    for step in to_do {
-        match step {
-            Step::AnswerEnded(request) => session.on_fetch_answer_ended(request),
-            Step::Closed(request) => session.on_peer_request_closed(request),
-            Step::Stop { stream, code } => stops.stop(stream, code),
-            Step::Say(said) => println!("{said}"),
-        }
     }
 }

@@ -11,7 +11,6 @@ mod hex;
 mod io;
 mod published;
 mod report;
-mod serving;
 mod video;
 
 use std::collections::HashMap;
@@ -28,8 +27,8 @@ use xmoq_moqt::fetch::{FetchHeader, FetchObject};
 use xmoq_moqt::immutable::TrackRefusal;
 use xmoq_moqt::kvp::KeyValuePair;
 use xmoq_moqt::message::{
-    ControlMessage, Fetch, FetchRange, GoAway, ReasonPhrase, RequestError, RequestOk,
-    publish_done_status, request_error_code, retry_interval,
+    ControlMessage, Fetch, FetchRange, GoAway, ReasonPhrase, RequestError, publish_done_status,
+    request_error_code, retry_interval,
 };
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, SubscriptionFilter};
@@ -51,7 +50,9 @@ use xmoq_moqt_io::{
 use crate::fetching::{BodyEnd, Fetches, Happened, Note, Reading, StreamEnded, Tell};
 use crate::io::{DataInbox, RequestStream};
 use crate::published::Published;
-use crate::serving::{Answer, Answers, Over, Pace};
+use xmoq_track_serving::answers::{
+    self, Answer, Answers, Bounds, MAX_ANSWERED_AT_ONCE, Over, Pace, SAY_QUEUE_OF_A_PAGE,
+};
 
 /// Track Alias this client announces in PUBLISH. It publishes one track per
 /// session, so any value is unique (§11.1).
@@ -63,6 +64,15 @@ const STREAM_COUNT_UNKNOWN: u64 = (1 << 62) - 1;
 
 /// How long the peer gets to acknowledge the close before the process exits.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// The bytes of payload the answers to the peer's FETCH requests being
+/// written hold together ([`Bounds::bytes`]), as the gatherer and the
+/// transcriber hold theirs; a FETCH whose answer does not fit is refused
+/// with `EXCESSIVE_LOAD`. **Provisional.** WHY: each answer is a copy of
+/// what the client keeps, up to `MAX_KEPT_BYTES` (4 MiB), and
+/// [`MAX_ANSWERED_AT_ONCE`] of them would be 128 MiB. WHY 32 MiB: eight
+/// answers of all the client keeps.
+const MAX_BYTES_HELD: usize = 32 * 1024 * 1024;
 
 /// How long the peer gets to take what was written to a stream before this
 /// client goes on, which in the end means closing the session. Provisional.
@@ -1071,7 +1081,7 @@ fn refusal_code(serves: bool, request: &PeerRequest) -> u64 {
 enum Attention {
     Peer(PeerRequestStreamEvent<<WtConnection as Connection>::Send>),
     /// A task that answers a FETCH has something to tell.
-    Note(serving::Note),
+    Note(answers::Note),
     /// A unidirectional stream of the peer.
     Data(UniEvent),
 }
@@ -2686,7 +2696,7 @@ impl Client<'_> {
                 self.on_peer_request_event(event, track, serving, stdin)
                     .await
             }
-            Attention::Note(serving::Note(stream, happened)) => {
+            Attention::Note(answers::Note(stream, happened)) => {
                 if let Some(over) = self.answers.happened(stream, happened) {
                     self.fetch_over(stream, over);
                 }
@@ -2743,27 +2753,26 @@ impl Client<'_> {
         });
     }
 
-    /// A FETCH this client answered is over.
+    /// A FETCH this client answered is over, or a step after that.
     fn fetch_over(&mut self, stream: u64, over: Over) {
-        if over.peer_gone {
-            self.session.on_peer_request_closed(over.request);
-            return;
+        if let Some(served) = over.served {
+            report::fetch_served(served.request_id, served.how, served.code, served.objects);
         }
-        // The subscriber's direction is still open: what comes on it is the
-        // session's to see, which answers none of it from here on.
-        self.session.on_fetch_answer_ended(over.request);
-        self.said_the_last.insert(stream, over.request);
-        // §3.3.2: "Implementations SHOULD cancel requests by abruptly
-        // terminating any directions of a stream that are still open by
-        // resetting or sending STOP_SENDING." The relay does the same.
-        if let Some(code) = over.reset {
-            self.stops.stop(stream, code);
-        }
+        answers::conclude(
+            &over,
+            stream,
+            &mut self.session,
+            &mut self.said_the_last,
+            &self.stops,
+        );
     }
 
     /// The mode is done: the FETCH requests that are still answered end.
     fn leave_answers(&mut self) {
         for over in self.answers.leave() {
+            if let Some(served) = over.served {
+                report::fetch_served(served.request_id, served.how, served.code, served.objects);
+            }
             self.session.on_peer_request_closed(over.request);
         }
     }
@@ -2814,21 +2823,19 @@ impl Client<'_> {
             return Err(request_error_code::DOES_NOT_EXIST);
         }
         report::fetch_asked(request.value(), *start, *end);
-        // §10.2.8: "If omitted from FETCH, the receiver uses Ascending".
-        let group_order = fetch
-            .parameters
-            .iter()
-            .find_map(|parameter| match parameter {
-                Parameter::GroupOrder(order) => Some(*order),
-                _ => None,
-            })
-            .unwrap_or(GroupOrder::Ascending);
+        let group_order = answers::group_order(fetch);
         let answer = if self.answers.has_room() {
             self.published.answer(*start, *end, group_order)
         } else {
             Err(request_error_code::EXCESSIVE_LOAD)
         };
-        let answer = answer.and_then(|answer| self.answers.admit(answer));
+        let answer = answer.and_then(|answer| {
+            if self.answers.fits(&answer.pieces) {
+                Ok(answer)
+            } else {
+                Err(request_error_code::EXCESSIVE_LOAD)
+            }
+        });
         match answer {
             Ok(answer) => Ok((answer, group_order)),
             Err(code) => {
@@ -2847,11 +2854,7 @@ impl Client<'_> {
         (answer, group_order): (published::Answer, GroupOrder),
     ) -> Result<()> {
         // End Of Track 0: the track goes on while this client answers.
-        let (ok, owed) = self
-            .session
-            .accept_fetch(request, false, answer.end_location, vec![])?;
-        let mut messages = vec![ok];
-        messages.extend((0..owed).map(|_| ControlMessage::RequestOk(RequestOk::default())));
+        let messages = answers::accepted(&mut self.session, request, answer.end_location)?;
         report::fetch_answered(request.value(), answer.end_location);
         self.answers.start(
             stream,
@@ -3000,7 +3003,7 @@ impl Client<'_> {
                 }
             }
             PeerRequestStreamEvent::Closed { stream, how } => {
-                let closed = serving::Happened::PeerClosed(how);
+                let closed = answers::Happened::PeerClosed(how);
                 if let Some(over) = self.answers.happened(stream, closed) {
                     self.fetch_over(stream, over);
                 }
@@ -3120,7 +3123,14 @@ async fn run_session(
         largest: Largest::default(),
         later: tokio::task::JoinSet::new(),
         published: Published::default(),
-        answers: Answers::new(args.fetch.answering.unwrap_or_default()),
+        answers: Answers::new(
+            args.fetch.answering.unwrap_or_default(),
+            Bounds {
+                at_once: MAX_ANSWERED_AT_ONCE,
+                bytes: MAX_BYTES_HELD,
+                say_queue: SAY_QUEUE_OF_A_PAGE,
+            },
+        ),
         args,
     };
     // The session inbox is watched for the rest of the session: it reports a
