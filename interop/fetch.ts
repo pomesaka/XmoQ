@@ -119,7 +119,11 @@
 
 import { parseArgs } from "node:util";
 import { type Publisher, startPublisher, startSubscriber } from "./clients.ts";
-import { publishFromAPage, startTestPublisher } from "./fetch-publishers.ts";
+import {
+	publishFromAPage,
+	RELAY_ARGS_FOR_A_LARGE_GROUP,
+	startTestPublisher,
+} from "./fetch-publishers.ts";
 import {
 	type Client,
 	captureGroup,
@@ -806,6 +810,7 @@ async function largeGroupCancelled(): Promise<string> {
 		port: options.port,
 		clients: ["own-browser", "own-browser", "own-rust"],
 		verbose: options.verbose,
+		relayArgs: RELAY_ARGS_FOR_A_LARGE_GROUP,
 	});
 	const publisher = await publishFromAPage("serve", context, sentHex);
 	const page = await startSubscriber(
