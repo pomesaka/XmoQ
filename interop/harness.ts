@@ -884,10 +884,32 @@ export async function startMoqlivemockPublisher(setup: {
 	]);
 	defer(() => stopProcess(publisher, "SIGINT"));
 	await publisher.waitForLine(/Starting MoQ server/);
-	const fingerprint = await withTimeout(
-		fetch(`http://127.0.0.1:${sidePort}/fingerprint`),
-		"mlmpub to serve the fingerprint of the certificate it made",
-	);
+	// WHY asked until it answers, and not once after that line: mlmpub
+	// v0.16.1 starts the server of the fingerprint in a goroutine of its own,
+	// beside the MoQ server whose line is waited for above, and prints no
+	// line once it listens ("Starting HTTP side server" comes before
+	// ListenAndServe; cmd/mlmpub/handler.go). A port that does not listen
+	// yet refuses: Bun 1.3.14 fails the fetch with code ConnectionRefused.
+	const fingerprint = await pollFor(async () => {
+		if (publisher.matches(/side server failed/).length > 0) {
+			throw new Error("mlmpub could not serve the fingerprint");
+		}
+		if (publisher.child.exitCode !== null) {
+			throw new Error(`mlmpub exited with ${publisher.child.exitCode}`);
+		}
+		try {
+			return await fetch(`http://127.0.0.1:${sidePort}/fingerprint`);
+		} catch (error) {
+			if (
+				error instanceof Error &&
+				"code" in error &&
+				error.code === "ConnectionRefused"
+			) {
+				return undefined;
+			}
+			throw error;
+		}
+	}, "mlmpub to serve the fingerprint of the certificate it made");
 	const certSha256Hex = (await fingerprint.text()).trim();
 	if (!fingerprint.ok || !/^[0-9a-f]{64}$/.test(certSha256Hex)) {
 		throw new Error(
