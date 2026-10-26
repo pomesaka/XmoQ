@@ -5,7 +5,7 @@ The transcriber (decided on 2026-10-25). It is a client of the relay beside it, 
 ```sh
 mise run speech-model                       # the default model, once
 mise run speech-model -- silero-v5.1.2      # and the model of voice activity
-mise run transcriber -- --url https://127.0.0.1:4443/ --cert-sha256 <64 hex digits> --namespace xmoq/demo
+mise run transcriber -- --url https://127.0.0.1:4443/ --cert-sha256 <64 hex digits> --namespace xmoq/broadcast/demo
 ```
 
 The demo (`mise run demo`) starts it beside the relay, and the watching page shows its transcript as captions (`demo/serve.ts`, `demo/captions.ts`).

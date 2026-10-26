@@ -8,6 +8,7 @@
 // The sound is the microphone; `?audio=none` sends none. The picture is
 // one the page paints, small (320x180), with its id on it.
 
+import { type ChatRoom, roomFields } from "@xmoq/chat";
 import {
 	createAudioTrackEncoder,
 	createVideoTrackEncoder,
@@ -37,7 +38,6 @@ import {
 } from "@xmoq/room-client";
 import { keepFollowingTranscript, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
 import { startChat } from "./room-chat.ts";
-import { tokenOf } from "./room-socket.ts";
 import {
 	AUDIO_TRACK,
 	type Broadcast,
@@ -48,6 +48,7 @@ import {
 	SAMPLE_RATE,
 	say,
 	TRACK,
+	tokenOf,
 	why,
 } from "./shared.ts";
 
@@ -401,14 +402,15 @@ async function main(): Promise<void> {
 	// The chat of the room, under the page's id, as the other pages have it
 	// (`room-chat.ts`): the person and Claude Code share it, as they share
 	// the seat. Its tokens are asked of the room each time, as theirs.
+	const chatRoom: ChatRoom = { kind: "meeting", name: room };
 	const chat = startChat(
-		room,
+		chatRoom,
 		self,
 		async (goAway) => {
 			const seat = await theRoom.seat();
 			const [sub, pub] = await Promise.all([
-				theRoom.token("sub", ["xmoq", "chat", room]),
-				theRoom.token("pub", ["xmoq", "chat", room, self]),
+				theRoom.token("sub", roomFields(chatRoom)),
+				theRoom.token("pub", [...roomFields(chatRoom), self]),
 			]);
 			return {
 				connection: await connectToRelay(movedTo(seat.relay, goAway), sub),

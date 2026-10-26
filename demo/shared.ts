@@ -3,16 +3,20 @@
 // page puts out; the namespace, the sample rate of the sound and the mark
 // are agreed on here.
 
+import { type ChatRoom, roomFields } from "@xmoq/chat";
 import {
 	connect,
 	DEFAULT_RECONNECT_DELAY_MS,
 	type MoqtConnection,
+	waitFor,
 } from "@xmoq/moqt";
-import { NAMESPACE } from "./namespace.ts";
+import {
+	type BroadcastRoom,
+	broadcastRoom,
+	tokenOfARoom,
+} from "@xmoq/room-client";
 import { startChat } from "./room-chat.ts";
-import { openRoomSocket, tokenOf } from "./room-socket.ts";
 
-export { NAMESPACE };
 /** The pause between sessions, as a page says it: what `keepPublishing` and `keepPlaying` wait where they are given no `againMs`. */
 export const AGAIN = `${DEFAULT_RECONNECT_DELAY_MS / 1000} s`;
 export const TRACK = "video";
@@ -57,7 +61,7 @@ export const SIZES = {
 } as const;
 
 const utf8 = new TextEncoder();
-export const namespace = (fields: string[] = NAMESPACE): Uint8Array[] =>
+export const namespace = (fields: string[]): Uint8Array[] =>
 	fields.map((field) => utf8.encode(field));
 export const trackName = (): Uint8Array => utf8.encode(TRACK);
 export const audioTrackName = (): Uint8Array => utf8.encode(AUDIO_TRACK);
@@ -75,54 +79,43 @@ declare const XMOQ_DEMO: {
 	certSha256Hex: string;
 	roomsUrl: string | null;
 };
-/** The broadcast of the demo where no room says otherwise. */
+/** The room of the page, `?room=NAME`: "demo" when left out. */
+export const ROOM_NAME =
+	new URLSearchParams(location.search).get("room") ?? "demo";
+/**
+ * The broadcast of the page's room where no rooms run: the relay this page
+ * was served with, and the namespace a room of that name names
+ * (`xmoq/broadcast/<name>`, `packages/room/src/worker.ts`).
+ */
 export const HERE: Broadcast = {
 	relayUrl: XMOQ_DEMO.relayUrl,
 	certSha256Hex: XMOQ_DEMO.certSha256Hex,
-	namespace: NAMESPACE,
+	namespace: ["xmoq", "broadcast", ROOM_NAME],
 };
 
-/** What a room says on its WebSocket (`packages/room/src/worker.ts`). */
-type RoomMessage =
-	| {
-			type: "hello";
-			connected: number;
-			broadcast: Broadcast | null;
-			transcript: string[] | null;
-	  }
-	| { type: "connected"; connected: number }
-	| { type: "reaction"; emoji: string }
-	| { type: "reactions"; counts: Record<string, number> }
-	| { type: "token"; role: string; namespace: string[]; token: string | null }
-	| { type: "broadcast"; broadcast: Broadcast | null };
+/** §10.2.2: Alias Type USE_VALUE (0x3), Token Type 0, the text the room gave. */
+export const tokenOf = (text: string | null): Uint8Array | undefined =>
+	text === null
+		? undefined
+		: new Uint8Array([0x03, 0x00, ...new TextEncoder().encode(text)]);
+
+/** The room of a broadcast, as the page goes by it. */
 export interface Room {
-	/** Resolves with the broadcast the room has when this page comes, or null. */
-	readonly broadcast: Promise<Broadcast | null>;
-	/** The broadcast the room has now, as it last said; null without one, or before it said anything. */
-	current(): Broadcast | null;
+	/** Where the room's one broadcast is, whether anybody publishes there yet or not. */
+	broadcast: Broadcast;
 	/**
-	 * The prefix the room says a transcriber listens under for its broadcast
-	 * (`transcript` of its hello), the fields of `xmoq/transcript/<prefix>`
-	 * the room gives a token in; null without one, or before the hello.
-	 * WHY from the room: it gives tokens in its own prefix alone
-	 * (`tokenForNamespace` of `packages/room/src/core/rules.ts`).
+	 * The prefix a transcriber listens under for the broadcast, the fields
+	 * of `xmoq/transcript/<prefix>` the room gives a token in; null where
+	 * the room names none. WHY from the room: it gives tokens in its own
+	 * prefix alone (`tokenForNamespace` of `packages/room/src/core/rules.ts`).
 	 */
-	transcript(): string[] | null;
-	/**
-	 * Resolves with the broadcast of the room: at once where it has one, and
-	 * else when a publisher registers one (the room says so to everybody in
-	 * it as it happens). WHY: a viewer that asked `current` every 2 seconds
-	 * had its picture up to 2 seconds after the publisher had begun.
-	 */
-	named(): Promise<Broadcast>;
-	/** Says where this page publishes; holds as long as this page is connected to the room. */
-	publish(broadcast: Broadcast): void;
+	transcript: string[] | null;
 	/**
 	 * Asks the room for a token for the relay (an experiment in
 	 * authorization): the Token structure as `@xmoq/moqt` carries it, or
-	 * undefined where the rooms give none, or where the room's socket is
-	 * closed (it is opened again). `?token=no` asks for none, to see the
-	 * relay refuse.
+	 * undefined where the rooms give none, or where the room could not be
+	 * asked (the relay then refuses, and the page connects again).
+	 * `?token=no` asks for none, to see the relay refuse.
 	 */
 	token(
 		role: "pub" | "sub",
@@ -131,104 +124,57 @@ export interface Room {
 }
 
 /**
- * Joins the room `?room=NAME` ("demo" when left out) of the rooms `serve.ts`
- * started, shows how many are connected, and starts the chat of that room
- * (over MoQ tracks, not this WebSocket). Undefined where
- * no rooms run: the demo then works without one.
+ * Asks the room `?room=NAME` of the rooms `serve.ts` started where its
+ * relay and its broadcast are, and starts the chat of that room (over MoQ
+ * tracks). Where no rooms run, the broadcast is `HERE`, and no token is
+ * given. A room that does not answer is asked again after `AGAIN`, and the
+ * line `#room` says so: the page has nothing to play or publish without
+ * it. Nothing more is asked of the room afterwards: what happens in it
+ * (a broadcast that begins) comes over MoQ (decided on 2026-10-26).
  */
-export function joinRoom(as: string): Room | undefined {
-	if (XMOQ_DEMO.roomsUrl === null) return undefined;
-	const name = new URLSearchParams(location.search).get("room") ?? "demo";
-	const count = document.getElementById("connected");
-	// Reactions: an emoji somebody pressed is shown to everybody for two
-	// seconds, and counted for a script that looks at the page.
-	const reactions = document.getElementById("reactions");
-	let reacted = 0;
-	const react = (emoji: string, count: number): void => {
-		reacted += count;
-		document.body.dataset.reactions = String(reacted);
-		if (reactions === null) return;
-		const shown = document.createElement("span");
-		shown.textContent = count === 1 ? emoji : `${emoji}×${count}`;
-		reactions.append(shown);
-		// The newest 50: how many come in two seconds is the room's to decide.
-		while (reactions.childElementCount > 50)
-			reactions.firstElementChild?.remove();
-		setTimeout(() => shown.remove(), 2000);
-	};
-	let latest: Broadcast | null = null;
-	let transcript: string[] | null = null;
-	/** Where this page publishes, said again each time the socket opens: the room forgets it with the socket. */
-	let published: Broadcast | undefined;
-	/** The callers of `named` that wait for a publisher to register. */
-	const waiting: ((broadcast: Broadcast) => void)[] = [];
-	let first: (broadcast: Broadcast | null) => void = () => {};
-	const broadcast = new Promise<Broadcast | null>((resolve) => {
-		first = resolve;
-	});
-	const socket = openRoomSocket<RoomMessage>(
-		`${XMOQ_DEMO.roomsUrl.replace("http", "ws")}rooms/${encodeURIComponent(name)}/ws`,
-		{
-			open() {
-				if (published !== undefined) {
-					socket.send({ type: "broadcast", broadcast: published });
-				}
-			},
-			message(message) {
-				if (message.type === "hello") {
-					transcript = message.transcript;
-					first(message.broadcast);
-				}
-				if (message.type === "hello" || message.type === "broadcast") {
-					latest = message.broadcast;
-					if (latest !== null) {
-						for (const tell of waiting.splice(0)) tell(latest);
-					}
-				}
-				if (message.type === "reaction") react(message.emoji, 1);
-				if (message.type === "reactions") {
-					for (const [emoji, count] of Object.entries(message.counts)) {
-						react(emoji, count);
-					}
-				}
-				if (
-					(message.type === "hello" || message.type === "connected") &&
-					count !== null
-				) {
-					count.textContent = `room “${name}”: ${message.connected} connected`;
-					document.body.dataset.connected = String(message.connected);
-				}
-			},
-			close() {
-				first(null);
-				if (count !== null) count.textContent = `room “${name}”: joining again`;
-				delete document.body.dataset.connected;
-			},
-		},
-	);
-	for (const button of document.querySelectorAll<HTMLButtonElement>(
-		"button[data-reaction]",
-	)) {
-		button.addEventListener("click", () => {
-			socket.send({ type: "reaction", emoji: button.dataset.reaction });
-		});
+export async function joinRoom(as: string): Promise<Room> {
+	const line = document.getElementById("room");
+	const roomsUrl = XMOQ_DEMO.roomsUrl;
+	if (roomsUrl === null) {
+		return {
+			broadcast: HERE,
+			transcript: HERE.namespace,
+			token: async () => undefined,
+		};
 	}
+	const address = { rooms: roomsUrl, name: ROOM_NAME };
+	let described: BroadcastRoom | undefined;
+	while (described === undefined) {
+		try {
+			described = await broadcastRoom(address);
+		} catch (error) {
+			if (line !== null) {
+				line.textContent = `room “${ROOM_NAME}”: ${String(error).slice(0, 120)}; asking again every ${AGAIN}`;
+			}
+			await waitFor(DEFAULT_RECONNECT_DELAY_MS, new AbortController().signal);
+		}
+	}
+	if (line !== null) line.textContent = `room “${ROOM_NAME}”`;
+	const relay = described.relay ?? {
+		url: HERE.relayUrl,
+		certSha256Hex: HERE.certSha256Hex,
+	};
+	const broadcast: Broadcast = {
+		relayUrl: relay.url,
+		certSha256Hex: relay.certSha256Hex,
+		namespace: described.namespace,
+	};
 	const token: Room["token"] = async (role, namespace) => {
 		if (new URLSearchParams(location.search).get("token") === "no") {
 			return undefined;
 		}
-		// The room says nothing for a namespace with a `*` or a `/` in a
-		// field (`tokenForNamespace` of `packages/room/src/core/rules.ts`), and the answers
-		// are matched to the askers by their order: one asked for and never
-		// answered would have every later asker take the answer of the one
-		// before it.
-		if (namespace.some((field) => field.includes("*") || field.includes("/"))) {
+		try {
+			return tokenOf(
+				await tokenOfARoom("broadcasts", address, role, namespace),
+			);
+		} catch {
 			return undefined;
 		}
-		const answer = await socket.ask({ type: "token-for", role, namespace }, [
-			"token",
-		]);
-		return answer?.type === "token" ? tokenOf(answer.token) : undefined;
 	};
 	// Two tokens each time it connects for the chat, as the participant
 	// needs them (`publishNamespaceToken` of `joinChat`): `sub` for the
@@ -239,36 +185,22 @@ export function joinRoom(as: string): Room | undefined {
 	// both are undefined. After a GOAWAY the next session goes to its URI
 	// with the same certificate's hash, as the broadcast's does (the relay
 	// that sends it away, `--when-full`, names one with the same certificate).
-	startChat(name, as, async (goAway) => {
+	const chatRoom: ChatRoom = { kind: "broadcast", name: ROOM_NAME };
+	startChat(chatRoom, as, async (goAway) => {
 		const [sub, pub] = await Promise.all([
-			token("sub", ["xmoq", "chat", name]),
-			token("pub", ["xmoq", "chat", name, as]),
+			token("sub", roomFields(chatRoom)),
+			token("pub", [...roomFields(chatRoom), as]),
 		]);
 		const to =
 			goAway === undefined || goAway.newSessionUri === ""
-				? HERE
-				: { ...HERE, relayUrl: goAway.newSessionUri };
+				? broadcast
+				: { ...broadcast, relayUrl: goAway.newSessionUri };
 		return {
 			connection: await connectToRelay(to, sub),
 			...(pub === undefined ? {} : { publishNamespaceToken: pub }),
 		};
 	});
-	return {
-		broadcast,
-		current: () => latest,
-		transcript: () => transcript,
-		named: () =>
-			latest === null
-				? new Promise((resolve) => {
-						waiting.push(resolve);
-					})
-				: Promise.resolve(latest),
-		publish(where) {
-			published = where;
-			socket.send({ type: "broadcast", broadcast: where });
-		},
-		token,
-	};
+	return { broadcast, transcript: described.transcript, token };
 }
 
 /**

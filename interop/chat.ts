@@ -1,6 +1,6 @@
 // The gatherer of the chat (`crates/chat`, `xmoq-chat`) through a relay:
 // own-rust clients are the participants of one room, each announcing
-// `xmoq/chat/r/<name>` and sending a line on its track `said` for every line
+// `xmoq/chat/broadcast/r/<name>` and sending a line on its track `said` for every line
 // of its input; own-rust clients are the viewers of the room's `lines`.
 //
 // Usage: bun chat.ts --relay own|moqtail [--restart yes|no] [--port N] [--verbose]
@@ -28,11 +28,11 @@
 // Written before the runs after the review (2026-10-24):
 //
 //   - The second gatherer gathers room r alone (`--room r`): it watches
-//     `xmoq/chat/r`, and a participant of room s is never asked for its
+//     `xmoq/chat/broadcast/r`, and a participant of room s is never asked for its
 //     track.
 //   - When every participant of r has left, the gatherer ends the room's
 //     PUBLISH with PUBLISH_DONE TRACK_ENDED, counting the one stream it
-//     opened (`ROOM_DONE room="r" status=0x2 streams=1`), and a FETCH for
+//     opened (`ROOM_DONE room="broadcast/r" status=0x2 streams=1`), and a FETCH for
 //     the room is refused by the own relay with DOES_NOT_EXIST (0x10): no
 //     publisher of it is left.
 //   - `--restart no` (the run through moqtail's relay): no restart; the
@@ -83,7 +83,7 @@ const { values: options } = parseArgs({
 
 stopEverythingOnExit();
 
-const ROOM = "r";
+const ROOM = "broadcast/r";
 
 /** What a participant says: the JSON of `said`, in hex for `--payload-hex`. */
 function said(text: string): string {
@@ -304,7 +304,7 @@ async function main(): Promise<void> {
 		await pollFor(
 			() =>
 				first.matches(taken("d")).length +
-					first.matches(/^LINE_DROPPED room="r" name="d" /).length >=
+					first.matches(/^LINE_DROPPED room="broadcast\/r" name="d" /).length >=
 				8
 					? true
 					: undefined,
@@ -317,7 +317,9 @@ async function main(): Promise<void> {
 		expect(
 			"the lines of d that were dropped as too fast",
 			String(
-				first.matches(/^LINE_DROPPED room="r" name="d" why=too-fast /).length,
+				first.matches(
+					/^LINE_DROPPED room="broadcast\/r" name="d" why=too-fast /,
+				).length,
 			),
 			"3",
 		);
@@ -356,7 +358,7 @@ async function main(): Promise<void> {
 			"--room",
 			ROOM,
 		]);
-		await second.waitForLine(/^WATCHING prefix=xmoq\/chat\/r$/);
+		await second.waitForLine(/^WATCHING prefix=xmoq\/chat\/broadcast\/r$/);
 		await second.waitForLine(/^STORE .* rooms=1$/);
 		await second.waitForLine(
 			new RegExp(`^ROOM_PUBLISHED room="${ROOM}" forward=true largest=8$`),
@@ -372,7 +374,7 @@ async function main(): Promise<void> {
 			"said",
 			[
 				"--namespace",
-				"xmoq/chat/s/x",
+				"xmoq/chat/broadcast/s/x",
 				"--payload-hex",
 				said("in another room"),
 				"--timeout-secs",
@@ -396,12 +398,12 @@ async function main(): Promise<void> {
 
 		for (const who of [a, b, c, d, e]) who.child.stdin.end();
 		const [done] = await second.waitForLine(
-			/^ROOM_DONE room="r" status=0x2 streams=\d+$/,
+			/^ROOM_DONE room="broadcast\/r" status=0x2 streams=\d+$/,
 		);
 		expect(
 			"the room's PUBLISH_DONE",
 			done,
-			'ROOM_DONE room="r" status=0x2 streams=2',
+			'ROOM_DONE room="broadcast/r" status=0x2 streams=2',
 		);
 		const empty = spawnRustClient(
 			context,
@@ -432,7 +434,7 @@ async function main(): Promise<void> {
 			String(askedElsewhere),
 			"0",
 		);
-		if (second.matches(/room="s"/).length > 0) {
+		if (second.matches(/room="broadcast\/s"/).length > 0) {
 			throw new Error("the gatherer of room r took something of room s");
 		}
 

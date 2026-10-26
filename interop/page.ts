@@ -1236,7 +1236,7 @@ window.xmoqOwn = {
 			// A page that left joins again with a participant of its own.
 			if (chat.stop.signal.aborted) chat.stop = new AbortController();
 			chat.participant = await joinChat(connected(), {
-				room,
+				room: { kind: "broadcast", name: room },
 				name,
 				signal: chat.stop.signal,
 				...(publishNamespaceTokenHex === undefined
@@ -1305,7 +1305,7 @@ window.xmoqOwn = {
 					return { connection: await connectAnew(at, certSha256Hex) };
 				},
 				join: () => ({
-					room,
+					room: { kind: "broadcast", name: room },
 					name,
 					onLine(line) {
 						if (chat.lines.length < 1_000) {

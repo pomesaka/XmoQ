@@ -1,7 +1,7 @@
 // Pages chat over the tracks of the chat through a relay and the gatherer
 // (`crates/chat`, `xmoq-chat`): each page is a participant with `joinChat`
 // of `@xmoq/chat`, which the demo's pages use. It announces
-// `xmoq/chat/r/<name>`, says its lines on `said`, and reads the room's
+// `xmoq/chat/broadcast/r/<name>`, says its lines on `said`, and reads the room's
 // `lines` with SUBSCRIBE and a Joining FETCH for the newest 16.
 //
 // Usage: bun chat-pages.ts [--relay own|moqtail] [--restart yes|no] [--port N] [--verbose]
@@ -34,9 +34,9 @@
 //   - Every page has each line once, and says by which way it came: a and
 //     b had 0 to 20 live, c 4 to 19 as history and 20 live.
 //   - Page b stops (the `signal` of `joinChat`; added on 2026-10-24,
-//     written before its first run): it withdraws `xmoq/chat/r/b`, the
+//     written before its first run): it withdraws `xmoq/chat/broadcast/r/b`, the
 //     relay tells the gatherer NAMESPACE_DONE, the gatherer prints
-//     `PARTICIPANT_GONE room="r" name="b"` and cancels its SUBSCRIBE for
+//     `PARTICIPANT_GONE room="broadcast/r" name="b"` and cancels its SUBSCRIBE for
 //     b's `said`, so that b is no longer heard. The others go on: a's next
 //     line is numbered 21. No other participant is let go.
 //
@@ -120,7 +120,7 @@ async function participant(
 		`page ${name} to join the room`,
 	);
 	await gatherer.waitForLine(
-		new RegExp(`^SUBSCRIBED room="${ROOM}" name="${name}"$`),
+		new RegExp(`^SUBSCRIBED room="broadcast/${ROOM}" name="${name}"$`),
 	);
 	await pollFor(async () => {
 		const { heard, following } = await report(page);
@@ -135,7 +135,9 @@ async function leave(
 	page: Page,
 	name: string,
 ): Promise<void> {
-	const gone = new RegExp(`^PARTICIPANT_GONE room="${ROOM}" name="${name}"$`);
+	const gone = new RegExp(
+		`^PARTICIPANT_GONE room="broadcast/${ROOM}" name="${name}"$`,
+	);
 	const before = gatherer.matches(gone).length;
 	await withTimeout(
 		page.evaluate(() => window.xmoqOwn.chatLeave()),
@@ -154,7 +156,9 @@ async function rejoin(
 	name: string,
 	catchUp: PageChatCatchUp,
 ): Promise<void> {
-	const subscribed = new RegExp(`^SUBSCRIBED room="${ROOM}" name="${name}"$`);
+	const subscribed = new RegExp(
+		`^SUBSCRIBED room="broadcast/${ROOM}" name="${name}"$`,
+	);
 	const before = gatherer.matches(subscribed).length;
 	await withTimeout(
 		page.evaluate(([room, as, up]) => window.xmoqOwn.joinChat(room, as, up), [
@@ -174,10 +178,10 @@ async function rejoin(
 	}, `page ${name} to be heard and to follow the room again`);
 }
 
-/** The FETCH answers the gatherer printed: what follows `FETCH_ANSWERED room="r" `, one each. */
+/** The FETCH answers the gatherer printed: what follows `FETCH_ANSWERED room="broadcast/r" `, one each. */
 const answers = (gatherer: LoggedProcess): string[] =>
 	gatherer
-		.matches(/^FETCH_ANSWERED room="r" (.*)$/)
+		.matches(/^FETCH_ANSWERED room="broadcast\/r" (.*)$/)
 		.map((match) => captureGroup(match, 1));
 
 /** Has the page say a line, and returns what became of it: "sent", or "kept-back <why>", or "not-sent <why>". */
@@ -192,7 +196,7 @@ async function say(page: Page, text: string): Promise<string> {
 	return "why" in outcome ? `${type} ${String(outcome.why)}` : type;
 }
 
-const taken = /^LINE room="r" number=(\d+) name="([^"]*)" /;
+const taken = /^LINE room="broadcast\/r" number=(\d+) name="([^"]*)" /;
 
 /** Has the page say a line that is to be sent, and waits for the gatherer to number it. */
 async function sayOne(
@@ -383,7 +387,9 @@ async function main(): Promise<void> {
 			b.evaluate(() => window.xmoqOwn.chatLeave()),
 			"page b to stop",
 		);
-		await gatherer.waitForLine(/^PARTICIPANT_GONE room="r" name="b"$/);
+		await gatherer.waitForLine(
+			/^PARTICIPANT_GONE room="broadcast\/r" name="b"$/,
+		);
 		await pollFor(
 			async () => ((await report(b)).heard ? undefined : true),
 			"the gatherer to end its subscription to the `said` of page b",
@@ -392,7 +398,7 @@ async function main(): Promise<void> {
 		expect(
 			"the participants the gatherer let go",
 			gatherer
-				.matches(/^PARTICIPANT_GONE room="r" name="([^"]*)"$/)
+				.matches(/^PARTICIPANT_GONE room="broadcast\/r" name="([^"]*)"$/)
 				.map((match) => captureGroup(match, 1))
 				.join(","),
 			"b",
@@ -459,7 +465,7 @@ async function main(): Promise<void> {
 				[c, "c"],
 			] as const) {
 				await second.waitForLine(
-					new RegExp(`^SUBSCRIBED room="${ROOM}" name="${name}"$`),
+					new RegExp(`^SUBSCRIBED room="broadcast/${ROOM}" name="${name}"$`),
 				);
 				await pollFor(async () => {
 					const { heard, following } = await report(page);

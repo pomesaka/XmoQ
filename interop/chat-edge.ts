@@ -65,7 +65,7 @@ const { values: options } = parseArgs({
 
 stopEverythingOnExit();
 
-const ROOM = "r";
+const ROOM = "broadcast/r";
 
 /** What a participant says: the JSON of `said`, in hex for `--payload-hex`. */
 function said(text: string): string {

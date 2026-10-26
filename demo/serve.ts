@@ -13,8 +13,8 @@
 // `--no-auth` is for debugging and experiments: no key, and the relay takes
 // every request.
 //
-// The rooms (a count, where the broadcast is, and reactions) are
-// packages/room, run locally with Miniflare. They start when the workspace
+// The rooms (where the relay and the broadcast are, tokens, and the seats
+// of a meeting) are packages/room, run locally with Miniflare. They start when the workspace
 // has its dependencies (`bun install`); without them the demo runs without a
 // room.
 //
@@ -32,7 +32,7 @@
 // The transcriber (`xmoq-transcriber`, a release build) starts beside the
 // relay where it is built and its models are in the cache (`mise run
 // speech-model`, and `mise run speech-model -- silero-v5.1.2`). It listens
-// under the publishing page's namespace, and the watching page shows its
+// under the broadcast of the room "demo", and the watching page shows its
 // transcript as captions. Without it, or without the models, the demo runs
 // without captions and says how to have them. Unless `--no-auth` it is given the
 // relay's key, as the gatherer is. The publishing page sends a tone unless
@@ -50,7 +50,6 @@ import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { NAMESPACE } from "./namespace.ts";
 
 const { values: options } = parseArgs({
 	options: {
@@ -83,6 +82,8 @@ const { values: options } = parseArgs({
 });
 
 const here = import.meta.dir;
+/** The broadcast the transcriber reads: that of the room `/publish` and `/watch` open when no `?room=` says. */
+const BROADCAST_PREFIX = "xmoq/broadcast/demo";
 /** The meeting the transcriber reads: that of the room `/meet` opens when no `?room=` says. */
 const MEETING_PREFIX = "xmoq/meet/demo";
 const relayBinary =
@@ -192,18 +193,13 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 				...process.env,
 				// Not set with --no-auth: the rooms then have no key (an empty one would stop them).
 				...(authKeyHex === undefined ? {} : { AUTH_KEY_HEX: authKeyHex }),
-				// The namespace of the demo's one broadcast, whatever the room:
-				// the room gives tokens for broadcasts in it alone.
-				BROADCAST_NAMESPACES: NAMESPACE.join("/"),
-				// The relay the rooms name in their hello, with a broadcast
-				// and without one.
+				// The relay the rooms name.
 				RELAY_URL: `https://127.0.0.1:${options["relay-port"]}/`,
 				RELAY_CERT_SHA256_HEX: certSha256Hex,
 				// The prefixes the transcriber listens under for a room: the
-				// demo's one broadcast, whatever the room (`NAMESPACE` of
-				// `shared.ts`), and the room's meeting (`/meet`), which it
-				// reads for the room "demo" alone (`MEETING_PREFIX`).
-				TRANSCRIPT_PREFIX: NAMESPACE.join("/"),
+				// room's broadcast and its meeting, which it reads for the
+				// room "demo" alone (`BROADCAST_PREFIX`, `MEETING_PREFIX`).
+				TRANSCRIPT_PREFIX: "xmoq/broadcast/{room}",
 				MEETING_TRANSCRIPT_PREFIX: "xmoq/meet/{room}",
 			},
 		})
@@ -271,11 +267,12 @@ const transcriber =
 					`https://127.0.0.1:${options["relay-port"]}/`,
 					"--cert-sha256",
 					certSha256Hex,
+					// The broadcast and the meeting of the room "demo" alone:
+					// the transcript is one for each prefix, and a room names
+					// that of its own, `xmoq/broadcast/<room>` and
+					// `xmoq/meet/<room>`.
 					"--namespace",
-					NAMESPACE.join("/"),
-					// The meeting of the room "demo" alone: the transcript is
-					// one for each prefix, and a room's hello names that of
-					// its own meeting, `xmoq/meet/<room>`.
+					BROADCAST_PREFIX,
 					"--namespace",
 					MEETING_PREFIX,
 					"--language",
@@ -362,15 +359,14 @@ const html = (path: string): string => `<!doctype html>
 		<p><button id="agent-link">link a folder for Claude Code</button> <button id="agent-call">call Claude Code</button> <span id="agent-note"></span></p>`
 				: roomsUrl === null
 					? "<p>no rooms: bun install, and start again</p>"
-					: `<p id="connected"></p>
+					: `<p id="room"></p>
 		${
 			chat === undefined
 				? `<p>${noChat}</p>`
 				: `<div id="chat" style="height: 8em; overflow-y: auto; border: 1px solid #444; padding: 4px;"></div>
 		<form><input size="40" placeholder="say something" /> <button>send</button></form>
 		<p id="chat-note"></p>`
-		}
-		<p>${["👍", "❤️", "😂", "👏"].map((emoji) => `<button data-reaction="${emoji}">${emoji}</button>`).join(" ")} <span id="reactions"></span></p>`
+		}`
 		}
 		<script type="module" src="${path}.js"></script>
 	</body>
@@ -408,7 +404,7 @@ console.log(
 );
 console.log(
 	noCaptions ??
-		`captions: the transcriber reads ${NAMESPACE.join("/")} and ${MEETING_PREFIX} in ${options["transcribe-language"]}; open /publish?audio=mic to be heard`,
+		`captions: the transcriber reads ${BROADCAST_PREFIX} and ${MEETING_PREFIX} in ${options["transcribe-language"]}; open /publish?audio=mic to be heard`,
 );
 if (authKeyHex !== undefined) {
 	console.log(
