@@ -252,6 +252,28 @@ impl Reader {
             }
         }
     }
+
+    /// Waits `wait_ms` before a next try; `false` where the reader is to end
+    /// first.
+    async fn pause(&mut self, wait_ms: u64) -> Result<bool> {
+        if wait_ms == 0 {
+            return Ok(true);
+        }
+        let wait = Duration::from_millis(wait_ms);
+        let waiting = async {
+            tokio::time::sleep(wait).await;
+            Ok(())
+        };
+        Ok(self
+            .unless_ended("the wait", wait * 2, waiting)
+            .await?
+            .is_some())
+    }
+}
+
+/// Milliseconds from `began`, the clock [`NextSession`] is given.
+fn ms_since(began: Instant) -> u64 {
+    u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// `sub` in `xmoq/transcript/<prefix>`, of the room, as an AUTHORIZATION
@@ -581,26 +603,14 @@ async fn run(args: &Args, reader: &mut Reader, pictures: &mut Option<Pictures>) 
     // start it again; it waits as for a broadcast that broke off.
     let mut rule = NextSession::new(BETWEEN_TRIES_MS, room.is_some(), false);
     let began = Instant::now();
-    let now_ms = || u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
     loop {
         let Some(mut place) = place(args, &mut room, reader).await? else {
             return Ok(());
         };
-        let next = rule.next(&place.url, now_ms());
+        let next = rule.next(&place.url, ms_since(began));
         place.url = next.url;
-        if next.wait_ms > 0 {
-            let wait = Duration::from_millis(next.wait_ms);
-            let waiting = async {
-                tokio::time::sleep(wait).await;
-                Ok(())
-            };
-            if reader
-                .unless_ended("the wait", wait * 2, waiting)
-                .await?
-                .is_none()
-            {
-                return Ok(());
-            }
+        if !reader.pause(next.wait_ms).await? {
+            return Ok(());
         }
         tell_broadcast(reader, &place, BroadcastState::Began);
         let streams = StreamConfig::default();
@@ -693,19 +703,41 @@ async fn the_room<'a>(
 }
 
 /// Joins the room at `address`, which may begin listening only later
-/// (`ROOM_COMES_WITHIN`), and is asked again after that, with an `error`
-/// each time; `None` where the reader is to end first.
+/// (`ROOM_COMES_WITHIN`), and is asked again after that by the rule of the
+/// next session (`BETWEEN_TRIES_MS` from the try before), with an `error`
+/// where the failure is not the one told last; `None` where the reader is
+/// to end first.
 ///
 /// WHY on and on, where `xmoq-watch` ends: as for a first session that
-/// fails (`run`), nobody looks at the reader to start it again.
+/// fails (`run`), nobody looks at the reader to start it again. WHY not
+/// at once: a failure other than a refusal (a 404, a room that does not
+/// begin with hello) comes back as fast as it is asked. WHY the same
+/// failure told once: an agent reads `events.jsonl` to its end, and a
+/// room that is wrong for hours would fill it with one line.
 async fn join_room(args: &Args, address: &str, reader: &mut Reader) -> Result<Option<RoomSocket>> {
+    let mut rule = NextSession::new(BETWEEN_TRIES_MS, true, false);
+    let began = Instant::now();
+    let mut told: Option<String> = None;
     loop {
+        if !reader
+            .pause(rule.next(address, ms_since(began)).wait_ms)
+            .await?
+        {
+            return Ok(None);
+        }
         let joining = RoomSocket::join_when_there(address, &args.name, ROOM_COMES_WITHIN);
         // The last try may begin as the refusals' time ends.
         let wait = ROOM_COMES_WITHIN + Duration::from_millis(args.room_wait_ms);
         match reader.unless_ended("the room", wait, joining).await {
             Ok(joined) => return Ok(joined),
-            Err(error) => reader.error(format!("the room: {error:#}; asking again")),
+            Err(error) => {
+                let message = format!("the room: {error:#}; asking again");
+                if told.as_ref() != Some(&message) {
+                    reader.error(message.clone());
+                    told = Some(message);
+                }
+                rule.ended(Ended::Failed { began: false });
+            }
         }
     }
 }
