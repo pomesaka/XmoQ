@@ -415,6 +415,13 @@ export interface Requests {
 	/** The caller's wait for late streams after PUBLISH_DONE ran out. */
 	subscriptionExpired(requestId: bigint, out: SessionOutput[]): void;
 	/**
+	 * The caller's wait for the streams of a subscription whose
+	 * REQUEST_UPDATE was refused ran out (`update-refused`): the streams that
+	 * are left are reset, and PUBLISH_DONE UPDATE_FAILED is sent. Does
+	 * nothing where it has ended.
+	 */
+	updateRefusalExpired(requestId: bigint, out: SessionOutput[]): void;
+	/**
 	 * The wait for the subscriber to end its direction of the request stream
 	 * after this endpoint's PUBLISH_DONE is over: that direction is stopped.
 	 * Does nothing when the subscriber has ended it.
@@ -488,6 +495,11 @@ interface PublishEntry extends RequestCommon {
 	trackAlias: bigint;
 	/** The Forward State of §5.1. */
 	forward: boolean;
+	/**
+	 * A REQUEST_UPDATE of the subscriber was refused: the subscription ends
+	 * with PUBLISH_DONE UPDATE_FAILED once its streams are closed.
+	 */
+	endsWithUpdateFailed?: true;
 }
 
 /** A SUBSCRIBE of the peer that waits for the application's answer: Pending (Publisher) of §5.1. */
@@ -684,7 +696,15 @@ export function createRequests(options: RequestsOptions): Requests {
 	let nextServedAlias = 0n;
 	/** The FETCHes of the peer that are being served, by the number of their fetch stream. */
 	const fetchStreams = new Map<number, PeerFetchEntry>();
-	const outgoing = createOutgoingSubgroups(options.allocateStream);
+	const outgoing = createOutgoingSubgroups(
+		options.allocateStream,
+		(requestId, out) => {
+			const request = requests.get(requestId);
+			if (request?.kind === "PUBLISH" && request.endsWithUpdateFailed) {
+				endWithUpdateFailed(request, out);
+			}
+		},
+	);
 	// The three callbacks are function declarations further down, so that this
 	// table of dependencies can stand before the code that uses it.
 	const incoming = createIncomingSubgroups({
@@ -1402,6 +1422,9 @@ export function createRequests(options: RequestsOptions): Requests {
 		// §10.1: REQUEST_UPDATE consumes a Request ID of its sender.
 		options.checkPeerRequestId(message.requestId);
 		checkUpdateOfSubscription(message);
+		// §10.9.1 lets one REQUEST_ERROR answer several updates; what comes
+		// while the subscription ends gets nothing, as in the Rust session.
+		if (request.endsWithUpdateFailed) return;
 		const { stream, requestId } = request;
 		if (
 			Object.keys(message.parameters).every(
@@ -1431,15 +1454,33 @@ export function createRequests(options: RequestsOptions): Requests {
 				errorReason: "REQUEST_UPDATE is not implemented",
 			}),
 		});
-		// §10.11: PUBLISH_DONE is not sent until every stream of the subscription
-		// is closed, so the count is taken before `endRequest` resets them and
-		// the message is written after.
-		const streamCount = outgoing.streamCount(requestId);
+		// WHY the streams that are being written are let end, and not reset:
+		// it is the update that is refused, and the subscriber has given up
+		// none of the Objects it was sent; a reset would lose the ones of the
+		// Group under way. §10.11: PUBLISH_DONE "after all data streams are
+		// closed". The Rust client does the same (it refuses between two
+		// Objects, each on a stream it has closed).
+		request.endsWithUpdateFailed = true;
+		if (!outgoing.hasOpen(requestId)) endWithUpdateFailed(request, out);
+		else {
+			out.push({ type: "event", event: { type: "update-refused", requestId } });
+		}
+	};
+
+	/**
+	 * The subscription whose REQUEST_UPDATE was refused has no stream open:
+	 * PUBLISH_DONE UPDATE_FAILED, with the streams it opened, ends it.
+	 */
+	const endWithUpdateFailed = (
+		request: PublishEntry,
+		out: SessionOutput[],
+	): void => {
+		const streamCount = outgoing.streamCount(request.requestId);
 		request.endedLocally = true;
 		endRequest(request, out, () => {
 			out.push({
 				type: "send",
-				stream,
+				stream: request.stream,
 				data: encodeControlMessage({
 					type: "PUBLISH_DONE",
 					statusCode: UPDATE_FAILED,
@@ -2394,6 +2435,11 @@ export function createRequests(options: RequestsOptions): Requests {
 		// (Publisher) or Established states by sending PUBLISH_DONE".
 		publishDone(requestId, statusCode, errorReason) {
 			const request = activePublish(requestId);
+			if (request.endsWithUpdateFailed) {
+				throw new InactiveError(
+					"a refused REQUEST_UPDATE ends the subscription with UPDATE_FAILED (§10.9.1)",
+				);
+			}
 			if (outgoing.hasOpen(requestId)) {
 				throw new Error(
 					"PUBLISH_DONE must not be sent while subgroup streams are open (§10.11)",
@@ -2457,10 +2503,24 @@ export function createRequests(options: RequestsOptions): Requests {
 			if (!request.forward) {
 				throw new Error("the subscription is in Forward State 0 (§5.1)");
 			}
+			if (request.endsWithUpdateFailed) {
+				throw new InactiveError(
+					"the subscription ends: a REQUEST_UPDATE of it was refused (§10.9.1)",
+				);
+			}
 			return outgoing.open(requestId, request.trackAlias, subgroupOptions);
 		},
 
 		subscriptionExpired: endAfterPublishDone,
+
+		updateRefusalExpired(requestId, out) {
+			const request = requests.get(requestId);
+			// Its streams were closed in time, and it has ended.
+			if (request?.kind !== "PUBLISH" || !request.endsWithUpdateFailed) return;
+			// The streams that are left are reset (`endRequest`), and then
+			// PUBLISH_DONE follows (§10.11).
+			endWithUpdateFailed(request, out);
+		},
 
 		receiveStreamData(stream, data, fin, out) {
 			const request = requestStreams.get(stream);

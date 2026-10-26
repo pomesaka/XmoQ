@@ -170,6 +170,8 @@ export interface Session {
 	 * belongs to the caller; the session has none.
 	 */
 	expireSubscription(requestId: bigint): SessionOutput[];
+	/** The wait for the streams of a subscription whose REQUEST_UPDATE was refused ran out (`update-refused`). */
+	expireUpdateRefusal(requestId: bigint): SessionOutput[];
 	/**
 	 * The wait for the peer to end its direction of a request stream is
 	 * over, on which this endpoint has finished its own: after `publishDone`,
@@ -566,8 +568,9 @@ export function createSession(options: SessionOptions = {}): Session {
 		resetSubgroup: (stream, code) =>
 			whileOpen(() => requests.outgoing.reset(stream, code)),
 		subgroupNotOpened: (stream) => {
-			if (!closed) requests.outgoing.notOpened(stream);
-			return [];
+			const out: SessionOutput[] = [];
+			if (!closed) requests.outgoing.notOpened(stream, out);
+			return out;
 		},
 
 		// Cancelling and expiring race with the end of the session, so after the
@@ -578,6 +581,8 @@ export function createSession(options: SessionOptions = {}): Session {
 			whileOpen(() => requests.updateSubscription(requestId, parameters)),
 		expireSubscription: (requestId) =>
 			guard((out) => requests.subscriptionExpired(requestId, out)),
+		expireUpdateRefusal: (requestId) =>
+			guard((out) => requests.updateRefusalExpired(requestId, out)),
 		finishServedFetchSend: (requestId) =>
 			guard((out) => requests.finishServedFetchSend(requestId, out)),
 		expirePeerEnd: (requestId) =>

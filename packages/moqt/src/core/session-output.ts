@@ -211,6 +211,13 @@ export type SessionEvent =
 	 */
 	| { type: "new-group-request"; requestId: bigint; group: bigint }
 	/**
+	 * A REQUEST_UPDATE of a subscription this endpoint publishes was refused
+	 * while subgroup streams of it are open: its PUBLISH_DONE UPDATE_FAILED
+	 * waits for them to be closed. The caller gives them a time, and then
+	 * calls `expireUpdateRefusal`.
+	 */
+	| { type: "update-refused"; requestId: bigint }
+	/**
 	 * The peer asks for a subscription with SUBSCRIBE. The caller answers
 	 * with `acceptSubscribe` or `rejectPeerRequest`; `request-closed` for the
 	 * same Request ID says that the request went before it was answered.

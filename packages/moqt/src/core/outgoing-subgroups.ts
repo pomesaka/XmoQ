@@ -54,7 +54,7 @@ export interface OutgoingSubgroups {
 	 * (§10.11: "the number of data streams the publisher opened for this
 	 * subscription"). Does nothing for a stream that is gone.
 	 */
-	notOpened(stream: number): void;
+	notOpened(stream: number, out: SessionOutput[]): void;
 	/** The peer sent STOP_SENDING for the stream: it is reset, as §11.4.3 asks ("The publisher SHOULD respond with a reset"). */
 	stopped(stream: number, out: SessionOutput[]): void;
 	/** Resets every open stream of a subscription (§5.1.1, §11.4.3). */
@@ -80,6 +80,12 @@ interface SubscriptionStreams {
 
 export function createOutgoingSubgroups(
 	allocateStream: () => number,
+	/**
+	 * The last open stream of a subscription was closed, reset, stopped or
+	 * not opened; what follows goes into `out`, after what ended the stream.
+	 * Not called by `resetAll`.
+	 */
+	onNoneOpen: (requestId: bigint, out: SessionOutput[]) => void = () => {},
 ): OutgoingSubgroups {
 	const streams = new Map<number, OutgoingSubgroup>();
 	const subscriptions = new Map<bigint, SubscriptionStreams>();
@@ -94,10 +100,12 @@ export function createOutgoingSubgroups(
 		return subgroup;
 	};
 
-	const forgetStream = (stream: number): void => {
+	const forgetStream = (stream: number, out: SessionOutput[]): void => {
 		const subgroup = openStream(stream);
 		streams.delete(stream);
-		subscriptions.get(subgroup.requestId)?.open.delete(stream);
+		const subscription = subscriptions.get(subgroup.requestId);
+		subscription?.open.delete(stream);
+		if (subscription?.open.size === 0) onNoneOpen(subgroup.requestId, out);
 	};
 
 	return {
@@ -156,27 +164,32 @@ export function createOutgoingSubgroups(
 		},
 
 		close(stream) {
-			forgetStream(stream);
-			return [{ type: "finish", stream }];
+			openStream(stream);
+			const out: SessionOutput[] = [{ type: "finish", stream }];
+			forgetStream(stream, out);
+			return out;
 		},
 
 		reset(stream, code) {
-			forgetStream(stream);
-			return [{ type: "reset", stream, code }];
+			openStream(stream);
+			const out: SessionOutput[] = [{ type: "reset", stream, code }];
+			forgetStream(stream, out);
+			return out;
 		},
 
-		notOpened(stream) {
+		notOpened(stream, out) {
 			const subgroup = streams.get(stream);
 			if (subgroup === undefined) return;
-			forgetStream(stream);
+			// Not among the streams opened, before what follows is told.
 			const subscription = subscriptions.get(subgroup.requestId);
 			if (subscription !== undefined) subscription.opened -= 1n;
+			forgetStream(stream, out);
 		},
 
 		stopped(stream, out) {
 			if (!streams.has(stream)) return;
-			forgetStream(stream);
 			out.push({ type: "reset", stream, code: StreamResetErrorCode.CANCELLED });
+			forgetStream(stream, out);
 		},
 
 		resetAll(requestId, out) {
