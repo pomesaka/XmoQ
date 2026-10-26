@@ -2681,11 +2681,30 @@ async function publishAnew(run: Run): Promise<ScenarioResult> {
 	// the relay does with a PUBLISH that comes in time. A relay that does not
 	// wait at all ends here too; the time tells the two apart.
 	//
-	// A line that is there says so for certain. That none comes later is
-	// seen below, before the Group that is sent next.
-	const gone = subscribers.filter((subscriber) =>
-		run.context.relay.hasPrinted(publishDoneSent(sessionOf(subscriber, run))),
+	// The fence: the relay's answer to the new PUBLISH, the first REQUEST_OK
+	// it sends the publisher after its DRAIN_TIMER line. That none comes
+	// later is seen below, before the Group that is sent next.
+	const publisherSession = sessionOf(publisher, run);
+	const requestOk = new RegExp(
+		`^SEND session=${publisherSession} stream=\\d+ REQUEST_OK`,
 	);
+	const okBefore = await run.context.relay.linesBefore(
+		{
+			line: new RegExp(
+				`^DRAIN_TIMER session=${publisherSession} track_alias=${firstAlias}$`,
+			),
+		},
+		requestOk,
+	);
+	const answered: Fence = { line: requestOk, nth: okBefore.length + 1 };
+	const gone: typeof subscribers = [];
+	for (const subscriber of subscribers) {
+		const done = await run.context.relay.linesBefore(
+			answered,
+			publishDoneSent(sessionOf(subscriber, run)),
+		);
+		if (done.length > 0) gone.push(subscriber);
+	}
 	if (gone.length > 0) {
 		throw new Error(
 			`the track was over when the relay read the new PUBLISH of ${publisher.label}: it had sent PUBLISH_DONE to ${gone.map(({ label }) => label).join(", ")}. The PUBLISH was established ${seconds(anew.publishedAfterMs)} after this driver read the relay's DRAIN_TIMER line, and the relay waits ${seconds(RELAY_DRAIN_TIMEOUT_MS)} from that line. The run did not reach the state it is about`,

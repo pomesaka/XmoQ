@@ -371,11 +371,6 @@ export interface RelayLog extends Omit<LoggedProcess, "matches"> {
 		pattern: RegExp,
 		timeoutMs?: number,
 	): Promise<RegExpMatchArray[]>;
-	/**
-	 * Whether a line that matches has been read. For waiting on the relay
-	 * only: true is final, and false says nothing about what the relay did.
-	 */
-	hasPrinted(pattern: RegExp): boolean;
 }
 
 /** Spawns a child, echoes its output, and lets callers wait for a matching line. */
@@ -517,8 +512,24 @@ function spawnLogged(
 			const at = await indexOfNth(fence.line, fence.nth ?? 1, timeoutMs);
 			return matchesIn(complete(lines.slice(0, at)), pattern);
 		},
-		hasPrinted: (pattern) => lines.some((line) => pattern.test(line)),
 	};
+}
+
+/**
+ * Connects a client of the own Rust implementation now, for a check of
+ * what the relay, or the quiet peer, had printed by now: `sessionLine` is
+ * the line it prints for that client's session, and the fence to give
+ * `linesBefore`. It prints one stream of lines, so what stands before that
+ * line was printed before the client came.
+ *
+ * For a check that no step of the run itself ends: one that ends with a
+ * line the check could use has that line for its fence instead.
+ */
+export function connectedNow(context: RunContext, sessionLine: Fence): Fence {
+	// A TRACK_STATUS of a track nobody publishes: the client asks once and
+	// leaves, and the session is all the check needs of it.
+	spawnRustClient(context, "fence", "own-rust", "track-status", "fence");
+	return sessionLine;
 }
 
 /** Asks a child to stop, and kills it if it has not exited after the grace period. */

@@ -80,7 +80,7 @@ Every driver starts what it needs (the certificate, the relay, the pages in a he
 
 One side of a pairing has to be an own client: a run between two moqtail peers checks nothing of this repository.
 
-**The runs wait for lines of the own relay's log**, so changing the form of such a line breaks them. What a run counts in the relay's log, or expects not to be there, it counts before a line of the relay that it names, and never "so far": the lines of the relay and of a client reach the driver in no order, and a count taken when a client had reported something missed the relay's line that was on its way, three times in CI. `RelayLog` in `harness.ts` has no other way to count, so a run that does not name such a line does not pass the type check.
+**The runs wait for lines of the own relay's log**, so changing the form of such a line breaks them. What a run counts in the relay's log, or expects not to be there, it counts before a line of the relay that it names, and never "so far": the lines of the relay and of a client reach the driver in no order, and a count taken when a client had reported something missed the relay's line that was on its way, three times in CI. `RelayLog` in `harness.ts` has no other way to count, so a run that does not name such a line does not pass the type check. A run with no step of its own after the moment it checks has `connectedNow` connect a client, whose session line is the fence.
 
 ## Certificate
 

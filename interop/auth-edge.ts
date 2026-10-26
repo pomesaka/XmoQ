@@ -168,9 +168,15 @@ async function main(): Promise<void> {
 				`the viewer got ${received.payloadHex}, not ${PAYLOAD_HEX}`,
 			);
 		}
-		if (context.relay.hasPrinted(/UNAUTHORIZED|authorization/i)) {
+		// The fence: the stream that carried the Object down. A refusal of the
+		// relay below's SUBSCRIBE, or of its session, came before it.
+		const turnedDown = await context.relay.linesBefore(
+			{ line: /^OPEN_DATA session=\d+ out=\d+ track_alias=\d+ group=\d+$/ },
+			/^(SEND session=\d+ stream=\d+ REQUEST_ERROR error_code=0x1\b|CLOSE_SESSION )/,
+		);
+		if (turnedDown.length > 0) {
 			throw new Error(
-				"the relay above turned something of the relay below down",
+				`the relay above turned something of the relay below down: ${turnedDown.map(([line]) => line).join("; ")}`,
 			);
 		}
 
