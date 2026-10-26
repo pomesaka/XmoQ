@@ -29,6 +29,55 @@ pub const SETUP_WAIT_MS: u64 = 10_000;
 /// [`SETUP_WAIT_MS`] as a [`Duration`].
 pub const SETUP_WAIT: Duration = Duration::from_millis(SETUP_WAIT_MS);
 
+/// The events of the peer's data streams that a client holds while it waits
+/// for the peer's SETUP ([`setup`]); one more ends the wait
+/// ([`HeldTooMuch`]). **Provisional**, decided on 2026-10-26. WHY
+/// held: §3.3, "Unidirectional streams containing Objects ... could arrive
+/// prior to the control streams, in which case the data SHOULD be buffered
+/// until both control streams arrive and setup is complete". WHY a number
+/// of events and not of bytes: each holds no more than one stream may
+/// (`StreamConfig`), and a client has asked for nothing before its session
+/// is set up, so that a peer that sends more than a few is not one to wait
+/// for.
+pub const MOST_HELD_BEFORE_SETUP: usize = 64;
+
+/// What [`setup`] got.
+#[derive(Debug)]
+pub struct SetUp {
+    /// What the session made of the peer's SETUP.
+    pub peer: ControlEvent,
+    /// The events of the peer's data streams that came before it, in their
+    /// order, for the client to take before any other
+    /// ([`MOST_HELD_BEFORE_SETUP`] at most).
+    pub early: Vec<UniEvent>,
+}
+
+/// The peer's data streams brought more before its SETUP than a client
+/// holds ([`MOST_HELD_BEFORE_SETUP`]).
+///
+/// WHY the session is closed with `INTERNAL_ERROR` (§3.5: "An
+/// implementation specific error occurred"): a limit of this endpoint was
+/// reached, as when the relay is full (`HubConfig::max_sessions` of
+/// `xmoq-relay`). WHY NOT `EXCESSIVE_LOAD`: §3.5 has no such Session
+/// Termination Error Code (it is a code of a stream reset, of `REQUEST_ERROR`
+/// and of `PUBLISH_DONE`), and its value, 0x9, is `MALFORMED_PATH` there.
+/// WHY NOT reset the streams beyond the limit and go on: §3.3 lets an
+/// endpoint that "does not want to buffer" reset only "such bidirectional
+/// streams", and a client has asked for nothing such a stream could carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldTooMuch;
+
+impl std::fmt::Display for HeldTooMuch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the peer's data streams brought more than {MOST_HELD_BEFORE_SETUP} events before its SETUP"
+        )
+    }
+}
+
+impl std::error::Error for HeldTooMuch {}
+
 /// The peer sent no SETUP within the time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoSetupInTime(pub Duration);
@@ -57,8 +106,10 @@ pub enum SetupError {
     /// The session failed before the peer's SETUP, or on what came first:
     /// to be closed with its code.
     Session(xmoq_moqt::Error),
-    /// Something else came first, or the readers stopped before a SETUP.
+    /// The readers stopped before a SETUP.
     NoSetup(&'static str),
+    /// More data came first than is held.
+    HeldTooMuch(HeldTooMuch),
     /// None came in time.
     TimedOut(NoSetupInTime),
 }
@@ -72,6 +123,7 @@ impl std::fmt::Display for SetupError {
             Self::Session(error) => write!(formatter, "before the peer's SETUP: {error}"),
             Self::NoSetup(what) => write!(formatter, "no SETUP from the peer: {what}"),
             Self::TimedOut(error) => write!(formatter, "{error}"),
+            Self::HeldTooMuch(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -85,6 +137,7 @@ impl std::error::Error for SetupError {
             Self::Session(error) => Some(error),
             Self::NoSetup(_) => None,
             Self::TimedOut(error) => Some(error),
+            Self::HeldTooMuch(error) => Some(error),
         }
     }
 }
@@ -154,7 +207,8 @@ impl UniEvents for mpsc::Receiver<UniEvent> {
 
 /// Opens the control stream, sends SETUP with `options`, and hands the
 /// first message of the peer's control stream to `session`, which takes a
-/// SETUP alone there.
+/// SETUP alone there. The events of data streams that come before it are
+/// held and returned with it ([`SetUp::early`]).
 /// The control stream goes into `control` as soon as it is open, also where
 /// what follows fails ([`UntilClosed`]).
 ///
@@ -168,30 +222,43 @@ pub async fn setup<C: Connection, E: UniEvents>(
     control: &mut Option<C::Send>,
     options: Vec<KeyValuePair>,
     wait: Duration,
-) -> Result<ControlEvent, SetupError> {
+) -> Result<SetUp, SetupError> {
     let control = control.insert(connection.open_uni().await.map_err(SetupError::Lost)?);
     let setup = session.setup(options).map_err(SetupError::Usage)?;
     send_message(control, &setup, &Trace::default(), "control")
         .await
         .map_err(SetupError::Send)?;
-    match tokio::time::timeout(wait, events.next_event()).await {
-        Ok(Some(UniEvent::Control(message))) => session
-            .on_control_message(message)
-            .map_err(SetupError::Session),
-        // WHY the error itself: the session is closed with its code, as a
-        // datagram of an unknown type that comes before the SETUP has it
-        // (§11).
-        Ok(Some(UniEvent::Failed(error))) => Err(SetupError::Session(error)),
-        Ok(Some(_)) => Err(SetupError::NoSetup("a stream of data came first")),
-        Ok(None) => Err(SetupError::NoSetup("the readers of the streams stopped")),
-        Err(_) => Err(SetupError::TimedOut(NoSetupInTime(wait))),
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut early = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline, events.next_event()).await {
+            Ok(Some(UniEvent::Control(message))) => {
+                let peer = session
+                    .on_control_message(message)
+                    .map_err(SetupError::Session)?;
+                return Ok(SetUp { peer, early });
+            }
+            // WHY the error itself: the session is closed with its code, as
+            // a datagram of an unknown type that comes before the SETUP has
+            // it (§11).
+            Ok(Some(UniEvent::Failed(error))) => return Err(SetupError::Session(error)),
+            Ok(Some(event)) => {
+                if early.len() == MOST_HELD_BEFORE_SETUP {
+                    return Err(SetupError::HeldTooMuch(HeldTooMuch));
+                }
+                early.push(event);
+            }
+            Ok(None) => return Err(SetupError::NoSetup("the readers of the streams stopped")),
+            Err(_) => return Err(SetupError::TimedOut(NoSetupInTime(wait))),
+        }
     }
 }
 
 /// The code to close the session with after `error` (§3.5):
 /// `CONTROL_MESSAGE_TIMEOUT` for a SETUP that did not come, as `@xmoq/moqt`
-/// has it; the one a protocol error asks for; and `NO_ERROR` for everything
-/// else, a request that is given up alone among them.
+/// has it; `INTERNAL_ERROR` for more data before it than is held
+/// ([`HeldTooMuch`]); the one a protocol error asks for; and `NO_ERROR` for
+/// everything else, a request that is given up alone among them.
 ///
 /// WHY the chain of sources: a wrapper (`anyhow`'s `context`, a
 /// [`SetupError`]) hides the cause, which may be under any number of them.
@@ -201,6 +268,9 @@ pub fn termination_code(error: &(dyn std::error::Error + 'static)) -> u32 {
     let causes = || std::iter::successors(Some(error), |cause| cause.source());
     if causes().any(<dyn std::error::Error>::is::<NoSetupInTime>) {
         return TerminationCode::ControlMessageTimeout.code();
+    }
+    if causes().any(<dyn std::error::Error>::is::<HeldTooMuch>) {
+        return TerminationCode::InternalError.code();
     }
     causes()
         .find_map(|cause| cause.downcast_ref::<xmoq_moqt::Error>())
@@ -225,6 +295,9 @@ where
 mod tests {
     use std::sync::Arc;
 
+    use xmoq_moqt::data::{
+        ObjectStatus, SubgroupHeader, SubgroupId, SubgroupObject, SubgroupStreamEncoder,
+    };
     use xmoq_moqt::message::{ControlMessage, RequestOk, Setup};
     use xmoq_moqt::session::{Role, Transport};
 
@@ -235,9 +308,10 @@ mod tests {
     #[test]
     fn a_session_is_closed_with_the_code_its_failure_asks_for() {
         // (what failed; the code the session is closed with)
-        let cases: [(Box<dyn std::error::Error>, u32); 6] = [
+        let cases: [(Box<dyn std::error::Error>, u32); 7] = [
             (Box::new(SetupError::NoSetup("the readers stopped")), 0x0),
             (Box::new(NoSetupInTime(SETUP_WAIT)), 0x11),
+            (Box::new(SetupError::HeldTooMuch(HeldTooMuch)), 0x1),
             (
                 Box::new(SetupError::TimedOut(NoSetupInTime(SETUP_WAIT))),
                 0x11,
@@ -271,7 +345,9 @@ mod tests {
     fn client() -> Client {
         let (local, peer) = pair();
         let local = Arc::new(local);
-        let (queue, events) = mpsc::channel(16);
+        // Room for every event a case sends before `setup` reads one: a
+        // full queue would hold the peer's writes up for ever.
+        let (queue, events) = mpsc::channel(128);
         let readers = read_uni_streams(
             Arc::clone(&local),
             StreamConfig::default(),
@@ -297,6 +373,8 @@ mod tests {
         SendsADatagram,
         /// The readers of the client stop.
         ReadersStop,
+        /// A data stream with this many Objects, ended, and then a SETUP.
+        DataThenSetup(u64),
     }
 
     async fn peer_says(peer: &MemoryConnection, message: &ControlMessage) {
@@ -308,19 +386,50 @@ mod tests {
         std::mem::forget(control);
     }
 
+    /// A data stream of `objects` Objects, ended: as many events and two.
+    async fn peer_sends_a_subgroup(peer: &MemoryConnection, objects: u64) {
+        let mut encoder = SubgroupStreamEncoder::new(&SubgroupHeader {
+            track_alias: 7,
+            group_id: 0,
+            subgroup_id: SubgroupId::Zero,
+            publisher_priority: Some(0),
+            properties: false,
+            end_of_group: false,
+            first_object: true,
+        });
+        for object_id in 0..objects {
+            encoder
+                .object(&SubgroupObject {
+                    object_id,
+                    properties: vec![],
+                    status: ObjectStatus::Normal,
+                    payload: vec![0x61],
+                })
+                .unwrap();
+        }
+        let mut stream = peer.open_uni().await.unwrap();
+        stream.write_all(&encoder.take_bytes()).await.unwrap();
+        stream.finish();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn the_peers_setup_is_waited_for() {
-        // (what the peer does first; the code of the failure, or `None`
-        // where the session was set up)
-        let cases: [(First, Option<u32>); 5] = [
-            (First::Says(ControlMessage::Setup(Setup::default())), None),
-            (First::Nothing, Some(0x11)),
+        // (what the peer does first; the code of the failure, or the
+        // events held before the SETUP where the session was set up)
+        let cases: [(First, Result<usize, u32>); 8] = [
+            (First::Says(ControlMessage::Setup(Setup::default())), Ok(0)),
+            // §3.3: data before the SETUP is held, and given after it.
+            (First::DataThenSetup(1), Ok(3)),
+            (First::DataThenSetup(62), Ok(64)),
+            // One event beyond `MOST_HELD_BEFORE_SETUP`.
+            (First::DataThenSetup(63), Err(0x1)),
+            (First::Nothing, Err(0x11)),
             (
                 First::Says(ControlMessage::RequestOk(RequestOk::default())),
-                Some(0x3),
+                Err(0x3),
             ),
-            (First::SendsADatagram, Some(0x3)),
-            (First::ReadersStop, Some(0x0)),
+            (First::SendsADatagram, Err(0x3)),
+            (First::ReadersStop, Err(0x0)),
         ];
         for (first, code) in cases {
             let mut client = client();
@@ -329,6 +438,13 @@ mod tests {
                 First::Nothing => {}
                 First::SendsADatagram => client.peer.send_datagram(&[]),
                 First::ReadersStop => client.readers = None,
+                First::DataThenSetup(objects) => {
+                    peer_sends_a_subgroup(&client.peer, *objects).await;
+                    // The readers take the data stream before the control
+                    // stream is there.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    peer_says(&client.peer, &ControlMessage::Setup(Setup::default())).await;
+                }
             }
             let mut control = None;
             let options = setup_options(Some(b"token"), "test").unwrap();
@@ -343,11 +459,21 @@ mod tests {
             .await;
             assert!(control.is_some(), "{first:?}: the control stream is kept");
             match code {
-                None => assert!(
-                    matches!(result, Ok(ControlEvent::Setup(_))),
-                    "{first:?}: {result:?}"
-                ),
-                Some(code) => {
+                Ok(held) => {
+                    let set_up = result.unwrap();
+                    assert!(matches!(set_up.peer, ControlEvent::Setup(_)), "{first:?}");
+                    assert_eq!(set_up.early.len(), held, "{first:?}");
+                    assert!(
+                        set_up.early.iter().all(|event| matches!(
+                            event,
+                            UniEvent::SubgroupOpened { .. }
+                                | UniEvent::Object { .. }
+                                | UniEvent::SubgroupClosed { .. }
+                        )),
+                        "{first:?}"
+                    );
+                }
+                Err(code) => {
                     let error = result.unwrap_err();
                     assert_eq!(termination_code(&error), code, "{first:?}: {error}");
                 }

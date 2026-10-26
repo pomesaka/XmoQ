@@ -678,7 +678,9 @@ impl client::UniEvents for Events {
 /// Opens the control stream, sends SETUP with `token` where there is one
 /// and `implementation` as `MOQT_IMPLEMENTATION`, and hands the relay's
 /// SETUP to the session: `client::setup` of `xmoq-moqt-io`, which keeps the
-/// control stream in `control` and has the errors.
+/// control stream in `control` and has the errors. The events of data
+/// streams that came before the SETUP are put back in `events`, to come
+/// first.
 ///
 /// # Errors
 ///
@@ -695,7 +697,8 @@ pub async fn setup(
 ) -> Result<()> {
     let options = client::setup_options(token, implementation)?;
     let wait = Duration::from_millis(setup_wait_ms);
-    client::setup(connection, session, events, control, options, wait).await?;
+    let set_up = client::setup(connection, session, events, control, options, wait).await?;
+    events.put_back(set_up.early.into());
     Ok(())
 }
 

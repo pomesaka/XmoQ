@@ -318,7 +318,7 @@ pub async fn gather(
     // The relay looks at no namespace or role of the token of a SETUP.
     let token = gathering.token(TokenRole::Sub);
     let options = client::setup_options(token.as_deref(), implementation)?;
-    client::setup(
+    let set_up = client::setup(
         connection.as_ref(),
         &mut gathering.session,
         &mut uni,
@@ -328,6 +328,12 @@ pub async fn gather(
     )
     .await?;
     println!("SETUP_OK");
+    // What came before the SETUP (§3.3) is taken first.
+    for event in set_up.early {
+        if let Some(ended) = gathering.on_uni(event)? {
+            return Ok(ended);
+        }
+    }
     // Who is in the rooms is what this session is told; the numbering of
     // the rooms goes on.
     gathering.gatherer.leave_everybody();
