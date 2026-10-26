@@ -4,7 +4,7 @@
 // long, and the caller waits. The rule on the same session is also the
 // Rust clients' (`crates/again`), and both read
 // `fixtures/ask-again/same-session.tsv`; the rule of the next session is
-// also `reconnect` of `xmoq-viewer`, and both read `next-session.tsv`.
+// also `NextSession` of `xmoq-again`, and both read `next-session.tsv`.
 //
 // WHY here, in @xmoq/moqt, and not in a package of its own: the loop that
 // follows a GOAWAY (`keepMoving`, `src/webtransport`) needs the connection's
@@ -105,6 +105,30 @@ export function createAskAgain(pauses: Partial<AskAgainPauses> = {}): AskAgain {
  */
 export const DEFAULT_RECONNECT_DELAY_MS = 1000;
 
+/**
+ * The pause from one try at a session to the next, where the next is not
+ * the one made at once after a GOAWAY: `firstMs` at first, twice the one
+ * before after each try, up to `mostMs`, and `firstMs` again after a
+ * session that lasted `wentWellMs` from its try (never where left out).
+ * `Pause` of `xmoq-again`, whose roles have their own.
+ */
+export interface Pause {
+	firstMs: number;
+	mostMs: number;
+	wentWellMs?: number;
+}
+
+/**
+ * **Provisional**: the pages' pause, `Pause::VIEWER` of `xmoq-again`:
+ * `DEFAULT_RECONNECT_DELAY_MS` from one try to the next, however often.
+ * WHY it does not grow: a person waits for the picture. The roles whose
+ * pause grows (the gatherer, the transcriber) are Rust's alone.
+ */
+export const VIEWER_PAUSE: Pause = {
+	firstMs: DEFAULT_RECONNECT_DELAY_MS,
+	mostMs: DEFAULT_RECONNECT_DELAY_MS,
+};
+
 /** How a session ended, for the pause before the next. */
 export type SessionEnding =
 	/** A GOAWAY ended it (transport §10.4), or one on the stream of what it played. */
@@ -121,15 +145,16 @@ export interface NextSession {
 }
 
 /**
- * The pause before each next try at a session: what is left of `againMs`
- * since the last try began, so that a session that lasted longer is
- * followed at once; and none after one that a GOAWAY ended, where the try
- * before was no such one. Tested with `fixtures/ask-again/next-session.tsv`
- * (the FIXME at the top of this file).
+ * The pause before each next try at a session: what is left of the
+ * `pause` of this try since the last try began, so that a session that
+ * lasted longer is followed at once; and none after one that a GOAWAY
+ * ended, where the try before was no such one, which leaves the pause as it
+ * was. Tested with `fixtures/ask-again/next-session.tsv`, as `NextSession`
+ * of `xmoq-again` is.
  *
  * WHY from the try, and not from the end: a session that broke after an
  * hour is one break, and its next is made at once; one that cannot be made
- * is tried once in `againMs`. WHY none after a GOAWAY: what was played or
+ * is tried once in a pause. WHY none after a GOAWAY: what was played or
  * published stands still until the next session, and the relay that sent
  * it may close the old one before its Timeout is over (transport §10.4:
  * "This is a hint"). WHY not twice in a row: a relay that sends GOAWAY on
@@ -139,18 +164,28 @@ export interface NextSession {
  * one break.
  */
 export function createNextSession(
-	againMs: number,
+	pause: Pause,
 	firstTriedMs: number,
 ): NextSession {
 	let tried = firstTriedMs;
 	/** The try that was last began at once, after a GOAWAY. */
 	let atOnce = false;
+	/** The pause of the next try that is not made at once. */
+	let nextMs = pause.firstMs;
 	return {
 		after(ending, nowMs) {
 			atOnce = ending === "moved" && !atOnce;
-			const pause = atOnce ? 0 : Math.max(0, againMs - (nowMs - tried));
-			tried = nowMs + pause;
-			return pause;
+			const lasted = Math.max(0, nowMs - tried);
+			let wait = 0;
+			if (!atOnce) {
+				if (pause.wentWellMs !== undefined && lasted >= pause.wentWellMs) {
+					nextMs = pause.firstMs;
+				}
+				wait = Math.max(0, nextMs - lasted);
+				nextMs = Math.min(nextMs * 2, pause.mostMs);
+			}
+			tried = nowMs + wait;
+			return wait;
 		},
 	};
 }

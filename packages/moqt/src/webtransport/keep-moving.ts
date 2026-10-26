@@ -159,10 +159,10 @@ export async function keepMoving<S extends MovingSession, R>(
 	const signal = options.signal ?? new AbortController().signal;
 	const wait = options.wait ?? waitFor;
 	const now = options.now ?? Date.now;
-	const next = createNextSession(
-		options.againMs ?? DEFAULT_RECONNECT_DELAY_MS,
-		now(),
-	);
+	const againMs = options.againMs ?? DEFAULT_RECONNECT_DELAY_MS;
+	// A pause that does not grow, as `VIEWER_PAUSE`: every client of this
+	// loop is a page that a person waits on.
+	const next = createNextSession({ firstMs: againMs, mostMs: againMs }, now());
 	let movedBy: GoAwayNotice | undefined;
 
 	const session = async (): Promise<MovingOutcome<R>> => {

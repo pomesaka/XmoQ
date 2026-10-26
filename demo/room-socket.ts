@@ -7,7 +7,7 @@
 // had closed asked on it for ever, and the connections it would make again
 // (its broadcast, what it watches, the chat, the transcript) waited with it.
 
-import { createNextSession, DEFAULT_RECONNECT_DELAY_MS } from "@xmoq/moqt";
+import { createNextSession, VIEWER_PAUSE } from "@xmoq/moqt";
 
 export interface RoomSocket<M extends { type: string }> {
 	/** Sends `message` where the socket is open; nothing where it is not. */
@@ -32,7 +32,7 @@ export function openRoomSocket<M extends { type: string }>(
 	url: string,
 	on: { message(message: M): void; open?(): void; close?(): void },
 ): RoomSocket<M> {
-	const next = createNextSession(DEFAULT_RECONNECT_DELAY_MS, performance.now());
+	const next = createNextSession(VIEWER_PAUSE, performance.now());
 	/** Who waits for an answer, in the order they asked. */
 	let asked: { answers: M["type"][]; resolve(message: M | undefined): void }[] =
 		[];
