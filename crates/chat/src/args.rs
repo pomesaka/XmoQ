@@ -4,7 +4,7 @@
 pub const USAGE: &str = "\
 xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file>
           [--room <room>]... [--text-bytes <n>] [--lines-per-second <n>] [--fetch-lines <n>]
-          [--ask-again-times <n>] [--ask-again-ms <ms>]
+          [--ask-again-times <n>] [--ask-again-ms <ms>] [--auth-key-hex <hex>]
 
 --store             the SQLite file of the history, this gatherer's alone; made where it is not there
 --room              a room to gather, up to 8; every room without it
@@ -12,7 +12,8 @@ xmoq-chat --url <https://host:port/> --cert-sha256 <64 hex digits> --store <file
 --lines-per-second  the most lines one person may say in any second (5)
 --fetch-lines       the most lines one FETCH gets (1000)
 --ask-again-times   how many times in a row a participant whose subscription ended is asked again (30; 0 never)
---ask-again-ms      the pause before it is, after an end or a refusal that names no time (1000)";
+--ask-again-ms      the pause before it is, after an end or a refusal that names no time (1000)
+--auth-key-hex      the key the relay checks tokens with; the gatherer makes its own tokens (the demo alone)";
 
 use crate::said_again::{PAUSE_MS_LEAST, PAUSE_MS_MOST, Settings, TIMES_MOST};
 

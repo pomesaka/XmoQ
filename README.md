@@ -55,18 +55,13 @@ Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise ins
 | `mise run check:layers` | Dependency rules: the layers of the packages (`package_layer` in `scripts/ci/check-layers.sh`), `xmoq-moqt` free of I/O crates, nothing depending on `spikes/`, packages not depending on `interop/` |
 | `mise run check:workflows` | `actionlint` and `shellcheck` |
 | `mise run check:docs` | The index of `docs/experiments/` and the list of files of `interop/` are what `scripts/ci/experiments-index.sh` and `scripts/ci/interop-index.sh` write (`mise run fmt` writes them) |
-| `mise run demo` | Starts the own relay and a web server; a page publishes video (a painted clock or the camera) and other pages watch it, in Chromium, with captions from the transcriber where its models are fetched. See [`demo/README.md`](demo/README.md). Outside lint and type checking |
-| `mise run watch -- <flags>` | The viewer for the terminal, `xmoq-watch`: the picture of a broadcast in Ghostty or kitty, its sound, and the chat of its room. `-- --room http://127.0.0.1:8787/rooms/demo` next to `mise run demo`. See [`crates/watch/README.md`](crates/watch/README.md) |
-| `mise run chat -- <flags>` | The gatherer of the chat, `xmoq-chat`: numbers the lines of every room, keeps them in a SQLite file and publishes them as one track a room. See [`crates/chat/README.md`](crates/chat/README.md) |
-| `mise run agent -- <flags>` | The reader of a room for an agent, `xmoq-agent`: what happens in a room (its chat, who comes, pictures asked for, the words of a transcript) as lines of JSON on stdout and in a file; a line of stdin is said in the chat. See [`crates/agent/README.md`](crates/agent/README.md) |
-| `mise run agent-demo -- start --out <dir>` | A demo of its own on ports apart from `mise run demo`'s, the reader in its room, and the publishing page in a headless Chromium with a voice as its microphone, all in the background; with `--meeting N`, N participants of the meeting (`/meet`) and the reader in it; `stop --out <dir>` ends what `<dir>/pids` names. See the head of [`scripts/agent-demo.sh`](scripts/agent-demo.sh) |
-| `mise run transcriber -- <flags>` | The transcriber, `xmoq-transcriber`: reads the voices of the broadcasts under a prefix with whisper.cpp and publishes their words as one track a prefix. See [`crates/transcriber/README.md`](crates/transcriber/README.md) |
-| `mise run speech-model [-- <model>]` | Fetches a model of whisper.cpp into `~/.cache/xmoq/whisper/` and checks its sha256. See [`crates/speech/README.md`](crates/speech/README.md) |
 | `mise run interop` | Builds the `moqtail` relay and the Rust clients, then moves an Object through each relay for every pairing of own and `moqtail` clients, and runs the scenarios in which a client leaves through the own relay, in a real Chromium. Not part of `check` |
-| `mise run fmt` | Apply formatting and safe fixes |
+| `mise run fmt` | Apply formatting and safe fixes, and write the generated parts of the documents again (the index of `docs/experiments/` and the list of files of `interop/`) |
+
+The tasks that run a part (the demo, the terminal viewer, the chat's gatherer, the transcriber and its model, the reader for an agent and its demo) are listed with a line of use each by `mise tasks`; their flags are in the part's README (above).
 
 The relay's flags are in [its README](crates/relay/README.md), the pages' and `demo/serve.ts`'s in [the demo's README](demo/README.md), the terminal viewer's in `USAGE` of `crates/watch/src/args.rs`.
 
 CI (`.github/workflows/ci.yml`) runs the same tasks. A task whose target does not exist yet prints `SKIP` and succeeds; `spikes/` is outside every check, and `interop/peers/`, copies of `spikes/moqtail/` written with the `moqtail` library, is outside lint and formatting. The interop run is a CI job of its own, which calls `mise run interop`; for a pull request that touches nothing the run depends on, the job reports that it skipped the pairings.
 
-License, deployment, supported platforms, codec profiles, authentication, and performance targets are undecided.
+What is undecided is in the [open questions](docs/open-questions.md).

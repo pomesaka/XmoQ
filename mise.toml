@@ -32,11 +32,11 @@ description = "cargo fmt --check, clippy and test for the workspace"
 run = "scripts/ci/check-rust.sh"
 
 [tasks."check:ts"]
-description = "Biome, oxlint, typecheck and bun test for packages/"
+description = "Biome, oxlint, typecheck and bun test for packages/ and interop/"
 run = "scripts/ci/check-ts.sh"
 
 [tasks."check:layers"]
-description = "Dependency rules: I/O-free crates, nothing depends on spikes/"
+description = "Dependency rules: the layers of the packages, I/O-free crates, nothing depends on spikes/ or interop/"
 run = "scripts/ci/check-layers.sh"
 
 [tasks."check:workflows"]
@@ -70,7 +70,7 @@ description = "The reader of a room for an agent: mise run agent -- --room http:
 run = "cargo run --release --locked -p xmoq-agent --"
 
 [tasks.agent-demo]
-description = "A demo of its own on other ports, the agent's reader in its room and the publishing page in a headless Chromium, in the background: mise run agent-demo -- start --out /tmp/room, then stop --out /tmp/room"
+description = "A demo of its own on other ports, the agent's reader in its room and the publishing page in a headless Chromium, in the background: mise run agent-demo -- start --out /tmp/room [--meeting N], then stop --out /tmp/room"
 run = "scripts/agent-demo.sh"
 
 [tasks.speech-model]
@@ -82,5 +82,5 @@ description = "Start the own relay, the gatherer of the chat, the transcriber an
 run = "cargo build --locked -p xmoq-relay -p xmoq-chat && cargo build --release --locked -p xmoq-transcriber && bun install --frozen-lockfile && (test -d spikes/durable-objects-room/node_modules || npm ci --prefix spikes/durable-objects-room --no-audit --no-fund) && bun demo/serve.ts"
 
 [tasks.fmt]
-description = "Apply formatting and safe lint fixes"
+description = "Apply formatting and safe lint fixes, and write the generated parts of the documents again"
 run = "scripts/ci/fmt.sh"
