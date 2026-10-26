@@ -388,7 +388,8 @@ fn connection_end(error: SessionError) -> ConnectionEnd {
         // WT_CLOSE_SESSION capsule, which is every `wtransport` 0.7.2 peer,
         // closes the QUIC connection with its Session Termination Error Code
         // as the application code. The library reports that as a connection
-        // error because the code is outside the WebTransport range.
+        // error because the code is outside the WebTransport range, where it
+        // reports it at all (FIXME at `closed`).
         //
         // WHY NOT every code: an HTTP/3 stack closes its connection the same
         // way, with a code of HTTP/3 (0x100 to 0x110, RFC 9114 §8.1) or of
@@ -491,6 +492,16 @@ impl Connection for WtConnection {
         });
     }
 
+    // FIXME: tell a peer that closed the QUIC connection without a capsule,
+    // with its code, and one that finished the CONNECT stream without a
+    // capsule (`draft-ietf-webtrans-http3-16` §6: as a close with code 0),
+    // from this side's close. The library records `LocallyClosed` for both
+    // once the CONNECT stream is over (`Session::run_recv`, web-transport-
+    // quinn 0.13.2) and closes the connection itself, which overwrites the
+    // QUIC error with `LocallyClosed` as well (`ConnectionInner::close`,
+    // quinn 0.11.12): what the peer's close carried, and a timeout, are lost
+    // unless this is asked first, and a test that asked after the peer's
+    // close got `LocallyClosed` from the connection too (2026-10-26).
     async fn closed(&self) -> ConnectionEnd {
         connection_end(self.session.closed().await)
     }
