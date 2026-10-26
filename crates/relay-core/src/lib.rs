@@ -4553,7 +4553,6 @@ impl Relay {
         }
     }
 
-    /// Ends one subscription from the relay's side, with `PUBLISH_DONE`.
     /// A `REQUEST_UPDATE` set the `SUBGROUP_DELIVERY_TIMEOUT` of a
     /// subscription, in milliseconds; 0 is no timeout (§8).
     ///
@@ -4596,6 +4595,7 @@ impl Relay {
         );
     }
 
+    /// Ends one subscription from the relay's side, with `PUBLISH_DONE`.
     fn end_subscription(
         &mut self,
         track_name: &FullTrackName,

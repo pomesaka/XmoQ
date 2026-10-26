@@ -177,8 +177,9 @@ pub struct HubConfig {
     /// (§11.4.2: "buffer it for a brief period").
     pub early_stream_timeout: Duration,
     /// How long a peer gets to close its direction of a request stream after
-    /// the relay ended the request with `PUBLISH_DONE`. Then the relay stops
-    /// the stream.
+    /// the relay finished its own with its last word on the request: a
+    /// refusal, `PUBLISH_DONE` or the end of a FETCH
+    /// ([`Action::FinishRequest`]). Then the relay stops the stream.
     pub request_close_timeout: Duration,
     /// How long the relay goes on reading what had arrived on a connection
     /// after the connection is gone, before it treats the session as closed.
@@ -2386,9 +2387,6 @@ impl<C: Connection> Hub<C> {
         });
     }
 
-    /// Starts the writer of a subgroup stream towards a subscriber. `asked`
-    /// is the `SUBGROUP_DELIVERY_TIMEOUT` of the subscription, in
-    /// milliseconds, where its SUBSCRIBE had one.
     /// The subscriber changed its `SUBGROUP_DELIVERY_TIMEOUT`
     /// ([`OutgoingSubgroup::set_delivery_timeout`]).
     fn set_delivery_timeout(&self, out_stream: OutStreamKey, asked: Option<u64>) {
@@ -2427,8 +2425,10 @@ impl<C: Connection> Hub<C> {
         Some(Arc::clone(&subscription.budget))
     }
 
-    /// Carries out [`Action::OpenDataStream`]; another action is none of
-    /// its business.
+    /// Starts the writer of a subgroup stream towards a subscriber, which
+    /// carries out [`Action::OpenDataStream`]; another action is none of its
+    /// business. `asked` is the `SUBGROUP_DELIVERY_TIMEOUT` of the
+    /// subscription, in milliseconds, where its SUBSCRIBE had one.
     fn open_data_stream(&mut self, opening: &Action, pending: &mut VecDeque<Event>) {
         let &Action::OpenDataStream {
             session,

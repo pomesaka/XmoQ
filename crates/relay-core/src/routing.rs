@@ -153,13 +153,16 @@ pub const MAX_OWN_REQUESTS_PER_SESSION: usize = 64;
 /// publisher, however many subscribe.
 ///
 /// WHY: a publisher that answers late has the relay's requests open for the
-/// 5 seconds an answer gets, and one session that asked for 13 new track
+/// 5 seconds an answer gets, and one session that asked for 30 new track
 /// names a second kept all 64 taken; another viewer's SUBSCRIBE for a track
 /// of that publisher was refused with `EXCESSIVE_LOAD` half of the time
-/// (measured 2026-10-13). §13.1 has a publisher "enforce limits to prevent
-/// resource exhaustion from a single subscriber or session". WHY NOT a
-/// limit on how often a session asks: a viewer sends 5 requests in its
-/// first second, and 13 a second is no more than three of them.
+/// (measured 2026-10-13,
+/// `docs/experiments/2026-10-13-a-session-that-asks-for-a-new-track-again-and-again.md`).
+/// §13.1 has a publisher "enforce limits to prevent resource exhaustion
+/// from a single subscriber or session". WHY NOT a limit on how often a
+/// session asks: 13 a second keep the 64 taken for their 5 seconds (worked
+/// out, not run), and a viewer sends 5 requests in its first second by
+/// itself.
 pub const MAX_OWN_REQUESTS_FOR_ONE_SUBSCRIBER: usize = 8;
 
 /// Publishers a track remembers as having been asked for it without
