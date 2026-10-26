@@ -146,9 +146,33 @@ test.each<{
 		namespace: undefined,
 	},
 	{
+		name: "sub under the chat, to watch who is in it",
+		role: "sub",
+		asked: ["xmoq", "chat", "broadcast", "blue", "*"],
+		namespace: ["xmoq", "chat", "broadcast", "blue", "*"],
+	},
+	{
+		name: "not pub under the chat with a *",
+		role: "pub",
+		asked: ["xmoq", "chat", "broadcast", "blue", "*"],
+		namespace: undefined,
+	},
+	{
 		name: "not with a field *",
 		role: "sub",
 		asked: ["xmoq", "chat", "broadcast", "*"],
+		namespace: undefined,
+	},
+	{
+		name: "not with a * that is not the last field",
+		role: "sub",
+		asked: ["xmoq", "chat", "broadcast", "blue", "*", "x"],
+		namespace: undefined,
+	},
+	{
+		name: "not under another room's chat",
+		role: "sub",
+		asked: ["xmoq", "chat", "broadcast", "red", "*"],
 		namespace: undefined,
 	},
 	{

@@ -797,7 +797,7 @@ impl crate::Authorizer for AnyToken {
     fn own_token(&self, operation: crate::Operation) -> Option<Vec<u8>> {
         Some(match operation {
             crate::Operation::Publish => b"pub".to_vec(),
-            crate::Operation::Subscribe => b"sub".to_vec(),
+            crate::Operation::Subscribe | crate::Operation::SubscribeNamespace => b"sub".to_vec(),
         })
     }
 }

@@ -41,7 +41,10 @@ pub const ROOM_COMES_WITHIN: Duration = Duration::from_secs(30);
 pub struct ChatTokens {
     /// `pub` in `xmoq/chat/<kind>/<room>/<name>`.
     pub publish: Option<Vec<u8>>,
-    /// `sub` in `xmoq/chat/<kind>/<room>`.
+    /// `sub` in `xmoq/chat/<kind>/<room>/*`: the room's lines, the
+    /// participants' tracks, and the `SUBSCRIBE_NAMESPACE` that tells who is
+    /// in the chat, which the relay allows with a `*` token alone
+    /// (`crates/relay/src/auth.rs`).
     pub subscribe: Option<Vec<u8>>,
 }
 
@@ -219,13 +222,12 @@ impl RoomClient {
                 person.room.name.clone(),
             ])
             .collect();
-        let mine: Vec<String> = room_fields
-            .iter()
-            .cloned()
-            .chain([person.name.clone()])
-            .collect();
-        let publish = self.token(TokenRole::Pub, &mine).await?;
-        let subscribe = self.token(TokenRole::Sub, &room_fields).await?;
+        let under =
+            |field: String| -> Vec<String> { room_fields.iter().cloned().chain([field]).collect() };
+        let publish = self
+            .token(TokenRole::Pub, &under(person.name.clone()))
+            .await?;
+        let subscribe = self.token(TokenRole::Sub, &under("*".to_string())).await?;
         Ok(ChatTokens {
             publish: publish.map(|text| room::authorization_token(&text)),
             subscribe: subscribe.map(|text| room::authorization_token(&text)),
@@ -745,7 +747,7 @@ mod tests {
         // (the body of each request, in order)
         let bodies = [
             r#"{"namespace":["xmoq","chat","meeting","blue","agent"],"role":"pub"}"#,
-            r#"{"namespace":["xmoq","chat","meeting","blue"],"role":"sub"}"#,
+            r#"{"namespace":["xmoq","chat","meeting","blue","*"],"role":"sub"}"#,
         ];
         for body in bodies {
             assert_eq!(

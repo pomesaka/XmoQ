@@ -45,14 +45,17 @@ const sameFields = (a: readonly string[], b: readonly string[]): boolean =>
  *
  * | Role | Namespace |
  * |---|---|
- * | `sub` | `xmoq/chat/<kind>/<room>`; `xmoq/transcript/<prefix>` of a transcript of the room; the room's broadcast |
+ * | `sub` | `xmoq/chat/<kind>/<room>`, and `xmoq/chat/<kind>/<room>/*` to watch who is in it; `xmoq/transcript/<prefix>` of a transcript of the room; the room's broadcast |
  * | `pub` | `xmoq/chat/<kind>/<room>/<one field>`; the room's broadcast |
  *
  * WHY only these: a token for `sub` in `xmoq` allows a SUBSCRIBE_NAMESPACE
  * for that prefix (transport §10.18; the relay checks its prefix as a
  * namespace, `allowed` of `crates/relay-core/src/lib.rs`), which tells of every
- * room's meetings and the ids of their participants. Never one for a
- * field with a `*` or a `/`, or for a meeting's namespace, which the
+ * room's meetings and the ids of their participants. The relay allows a
+ * SUBSCRIBE_NAMESPACE with a token whose last field is `*` alone
+ * (`crates/relay/src/auth.rs`, decided on 2026-10-26), so the room gives
+ * one for its chat: under it are the names of who writes there. Never one
+ * for another `*`, a field with a `/`, or a meeting's namespace, which the
  * tokens of its seats are for.
  */
 export function tokenForNamespace(
@@ -61,10 +64,18 @@ export function tokenForNamespace(
 	of: RoomNamespaces,
 ): string[] | undefined {
 	const namespace = asked.map(String);
-	if (!namespace.every(fieldOfANamespace)) return undefined;
-	if (meetingNamespace(namespace)) return undefined;
 	if (!fieldOfANamespace(of.chat.name) || of.chat.name === "") return undefined;
 	const chat = roomFields(of.chat);
+	if (
+		role === "sub" &&
+		namespace.length === chat.length + 1 &&
+		namespace.at(-1) === "*" &&
+		sameFields(namespace.slice(0, chat.length), chat)
+	) {
+		return namespace;
+	}
+	if (!namespace.every(fieldOfANamespace)) return undefined;
+	if (meetingNamespace(namespace)) return undefined;
 	const ofTheRoom =
 		(of.broadcast !== undefined && sameFields(namespace, of.broadcast)) ||
 		(role === "sub"
