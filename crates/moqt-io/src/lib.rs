@@ -72,8 +72,10 @@ pub enum ConnectionEnd {
         /// The reason, with what is not UTF-8 replaced.
         reason: String,
     },
-    /// This endpoint closed the session, or the peer ended it in order
-    /// without saying why.
+    /// This endpoint closed the session, or the peer ended it without a
+    /// `WT_CLOSE_SESSION` capsule, by a FIN of the CONNECT stream or by
+    /// closing the QUIC connection with a code that is then lost (the FIXME
+    /// at `closed` in `wt.rs`).
     ClosedLocally,
     /// The connection went without a close: a timeout or a transport error.
     Lost(String),
