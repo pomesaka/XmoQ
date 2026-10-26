@@ -261,10 +261,11 @@ async function main(): Promise<void> {
 			await linesOf(f, 2, "page f"),
 			"0 a history, 1 e history",
 		);
-		const [answered] = gatherer.matches(/^FETCH_ANSWERED room="r" (.*)$/);
-		if (answered === undefined) {
-			throw new Error("the gatherer answered no FETCH for page f");
-		}
+		// Waited for: the page has its lines as soon as the gatherer's answer
+		// is written, which can be before the driver reads the gatherer's line.
+		const answered = await gatherer.waitForLine(
+			/^FETCH_ANSWERED room="r" (.*)$/,
+		);
 
 		const b = await connected(pages, "page:b", token("sub", "xmoq/chat/r"));
 		expect(

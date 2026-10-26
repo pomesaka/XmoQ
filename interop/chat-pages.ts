@@ -341,9 +341,17 @@ async function main(): Promise<void> {
 			described(history.lines),
 			"4-19 history",
 		);
+		await sayOne(gatherer, c, "c", 20);
 		// The own relay has the latest Group alone, and passes the FETCH to
 		// the gatherer; moqtail's relay 0.15.0 answered it from what it held,
 		// and the gatherer was not asked (in each of 12 runs).
+		// WHY read after line 20 is numbered, and not when c has its lines: c
+		// may have them before the driver reads the gatherer's answer. The
+		// gatherer prints the answer right after it hands it on to be written
+		// (`FETCH_ANSWERED` in crates/chat/src/bin/xmoq-chat/session.rs), and
+		// c has the lines, says 20 and has it come back to the gatherer
+		// through the relay only after that; one process prints its lines in
+		// order, so the answer stands before the numbering of 20.
 		const answered = answers(gatherer).join("; ");
 		expect(
 			"what the gatherer answered",
@@ -352,7 +360,6 @@ async function main(): Promise<void> {
 				? "start=4,0 end=19,1 lines=16 unknown_through=none"
 				: "",
 		);
-		await sayOne(gatherer, c, "c", 20);
 
 		const ways: string[] = [];
 		for (const [page, name, wanted] of [
@@ -430,6 +437,7 @@ async function main(): Promise<void> {
 			"4-19 history, 20-21 live, 22-26 history, 29-31 history, 32-32 live",
 		);
 		expect("the gaps page c was told of", withGap.gaps.join(","), "26-29");
+		// Read after line 32 is numbered, for the reason given at line 20.
 		const caughtUpAnswers = answers(gatherer).slice(answeredBefore).join("; ");
 		if (options.relay === "own") {
 			expect(
