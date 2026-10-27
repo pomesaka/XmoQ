@@ -47,7 +47,6 @@ use xmoq_moqt::params::SubscriptionFilter;
 
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use xmoq_chat::gather::{Admitted, Gatherer};
 use xmoq_chat::react::{Reacting, ReactionDropped};
@@ -59,10 +58,8 @@ use xmoq_chat_tracks::reactions::Present;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::immutable::TrackRefusal;
-use xmoq_moqt::message::{
-    ControlMessage, FetchRange, ReasonPhrase, publish_done_status, request_error_code,
-};
-use xmoq_moqt::name::{Location, TrackNamespace};
+use xmoq_moqt::message::{ControlMessage, FetchRange, publish_done_status, request_error_code};
+use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::{GroupOrder, Parameter};
 use xmoq_moqt::session::{
     ControlEvent, MalformedRequest, RequestEvent, RequestId, Role, Session, SubscribedAlias,
@@ -80,9 +77,9 @@ use xmoq_again::next_session::{Pause, new_url};
 use xmoq_publisher::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
 use xmoq_publisher::fetch::{pieces_of, plan};
 use xmoq_publisher::own::OwnRequests;
-use xmoq_publisher::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
+use xmoq_publisher::publishing::{self, Publish, Publishing, Sent};
 use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
-use xmoq_publisher::streams::{COMMAND_QUEUE, Command, GroupToSend, Heard, Sending, send_group};
+use xmoq_publisher::streams::{COMMAND_QUEUE, Command, Heard};
 use xmoq_publisher::{shown, sleep_until};
 use xmoq_subscriber::kept::{Becomes, Happened, Tries, decide};
 use xmoq_subscriber::namespaces::KeptNamespace;
@@ -248,12 +245,11 @@ struct Gathering<'a> {
     own: OwnRequests<Purpose>,
     /// The tracks of each room the gatherer numbers, with the Objects that
     /// wait for their `PUBLISH_OK` by Group ID.
-    published: HashMap<(Room, RoomTrack), Publication<Waiting>>,
+    publishing: Publishing<(Room, RoomTrack), Waiting>,
     /// The last Group ID of each room's `reactions` and `present`.
     last_group: HashMap<(Room, RoomTrack), u64>,
     /// The reactions of the while under way.
     reacting: Reacting,
-    next_track_alias: u64,
     /// Each participant that is followed.
     people: HashMap<Person, Followed>,
     /// The tracks of participants that are to be asked for again, and when.
@@ -268,17 +264,11 @@ struct Gathering<'a> {
     /// The requests of the relay: the FETCH requests being answered, and
     /// those refused.
     requests: PeerRequests,
-    /// The PUBLISH requests that wait for their streams to be closed, by
-    /// token, with their room and track, and where the loop is told that
-    /// they are.
-    ending: HashMap<u64, ((Room, RoomTrack), Ending)>,
-    drained: mpsc::Sender<u64>,
     watches: Vec<KeptNamespace>,
     /// The rooms the gatherer takes (`--room`).
     taken: &'a Taken,
     /// `--auth-key-hex`.
     key: Option<&'a RoomKey>,
-    sends: JoinSet<()>,
     began: Instant,
 }
 
@@ -355,11 +345,10 @@ pub async fn gather(
         gatherer,
         session: Session::new(Role::Client, Transport::WebTransport),
         stops,
-        own: OwnRequests::new(heard, OPEN_WAIT),
-        published: HashMap::new(),
+        own: OwnRequests::new(Arc::clone(connection), heard, OPEN_WAIT),
+        publishing: Publishing::new(drained, LINES_BEING_SENT),
         last_group: HashMap::new(),
         reacting,
-        next_track_alias: FIRST_TRACK_ALIAS,
         people: HashMap::new(),
         asking_again: HashMap::new(),
         ask_again,
@@ -369,15 +358,12 @@ pub async fn gather(
             bytes: MAX_BYTES_HELD,
             say_queue: COMMAND_QUEUE,
         }),
-        ending: HashMap::new(),
-        drained,
         watches: prefixes(rooms_taken)?
             .into_iter()
             .map(|prefix| KeptNamespace::new(prefix, Pause::SERVING))
             .collect(),
         taken: rooms_taken,
         key,
-        sends: JoinSet::new(),
         began: Instant::now(),
     };
 
@@ -442,7 +428,7 @@ pub async fn gather(
             () = sleep_until(next_watch) => gathering.watch_again()?,
             () = sleep_until(next_asked) => gathering.ask_again()?,
             _ = batch.tick() => gathering.send_reactions()?,
-            Some(_) = gathering.sends.join_next() => {}
+            () = gathering.publishing.sent() => {}
         }
     };
     Ok(ended)
@@ -516,8 +502,7 @@ impl Gathering<'_> {
         message: ControlMessage,
         parameters: &[Parameter],
     ) -> u64 {
-        self.own
-            .open(self.connection, purpose, request, message, parameters)
+        self.own.open(purpose, request, message, parameters)
     }
 
     /// Tells the task of a request stream something.
@@ -565,35 +550,25 @@ impl Gathering<'_> {
             RoomTrack::Lines => LINES_WAITING_FOR_A_ROOM,
             RoomTrack::Reactions | RoomTrack::Present => COUNTS_WAITING_FOR_A_ROOM,
         };
-        let entry = self
-            .published
-            .entry((room.clone(), track))
-            .or_insert_with(|| Publication::new(most_waiting));
-        if !entry.to_publish(Instant::now()) {
-            return Ok(());
-        }
-        let track_alias = self.next_track_alias;
-        self.next_track_alias += 1;
-        // §10.2.11: the largest line the gatherer has, which the relay gives
-        // its subscribers in SUBSCRIBE_OK, and where a Joining FETCH ends.
+        let key = (room.clone(), track);
+        self.publishing.track(key.clone(), most_waiting);
+        // The largest line the gatherer has (`publishing::parameters`).
         // WHY none for the counts: nothing of them is kept, and no FETCH
         // gets any (decided on 2026-10-26).
         let largest = match track {
             RoomTrack::Lines => self.gatherer.rooms.largest(room),
             RoomTrack::Reactions | RoomTrack::Present => None,
         };
-        let parameters: Vec<Parameter> = largest
-            .map(|group| Parameter::LargestObject(Location { group, object: 0 }))
-            .into_iter()
-            .chain(self.token_parameter(TokenRole::Pub))
-            .collect();
-        let published = self.session.publish(
+        let parameters = publishing::parameters(largest, self.token_parameter(TokenRole::Pub));
+        let published = self.publishing.publish(
+            &key,
             room_track(room, track)?,
-            track_alias,
-            parameters.clone(),
-            vec![],
+            &parameters,
+            &mut self.session,
+            &mut self.own,
+            Purpose::Room(room.clone(), track),
         );
-        let Ok((request, message)) = published else {
+        if let Publish::Refused(_) = published {
             // The PUBLISH before it still waits for its streams to be
             // closed; it is published again once that is over.
             println!(
@@ -601,12 +576,6 @@ impl Gathering<'_> {
                 room_word(track),
                 room = room.to_string()
             );
-            return Ok(());
-        };
-        let purpose = Purpose::Room(room.clone(), track);
-        let token = self.open(purpose, request, message, &parameters);
-        if let Some(entry) = self.published.get_mut(&(room.clone(), track)) {
-            entry.published(token, track_alias);
         }
         Ok(())
     }
@@ -614,7 +583,7 @@ impl Gathering<'_> {
     /// The PUBLISH of a room's track is over; the next Object publishes it
     /// again. Does nothing where `token` is no longer its PUBLISH.
     fn unpublish(&mut self, room: &Room, track: RoomTrack, token: u64, failed: bool) {
-        if let Some(entry) = self.published.get_mut(&(room.clone(), track))
+        if let Some(entry) = self.publishing.get_mut(&(room.clone(), track))
             && entry.unpublished(token, failed, Instant::now())
         {
             println!(
@@ -638,51 +607,34 @@ impl Gathering<'_> {
     /// numbered no more, and its state goes.
     fn end_publish(&mut self, room: &Room, track: RoomTrack, status: u64, forget: bool) {
         let key = (room.clone(), track);
-        let ending = self
-            .published
-            .get_mut(&key)
-            .and_then(|entry| entry.end(status));
+        self.publishing.end(&key, status);
         if forget {
-            self.published.remove(&key);
+            self.publishing.forget(&key);
             self.last_group.remove(&key);
         }
-        let Some(ending) = ending else {
-            return;
-        };
-        let drained = self.drained.clone();
-        let when_drained = ending.when_drained();
-        tokio::spawn(async move {
-            let _ = drained.send(when_drained.await).await;
-        });
-        self.ending.insert(ending.token, (key, ending));
     }
 
     /// Every stream of an ending PUBLISH is closed: its `PUBLISH_DONE`, with
     /// the number of streams it opened (§10.11), and a FIN. Where the room
     /// is numbered again meanwhile, it is published anew.
     fn publish_done(&mut self, token: u64) -> Result<()> {
-        let Some(((room, track), ending)) = self.ending.remove(&token) else {
+        let Some(done) = self.publishing.done(token, &mut self.session, &self.own)? else {
             return Ok(());
         };
-        if let Some(own) = self.own.get(token) {
-            let streams = ending.streams();
-            let done = self.session.publish_done(
-                own.request,
-                ending.status,
-                streams,
-                ReasonPhrase::default(),
-            )?;
-            self.tell(token, Command::Say(done));
+        let (room, track) = done.key;
+        if let Some(message) = done.message {
+            self.tell(token, Command::Say(message));
             self.let_go(token, Command::Finish);
             println!(
-                "{}_DONE room={room:?} status={:#x} streams={streams}",
+                "{}_DONE room={room:?} status={:#x} streams={}",
                 room_word(track),
-                ending.status,
+                done.status,
+                done.streams,
                 room = room.to_string()
             );
         }
         if self.gatherer.rooms.knows(&room) {
-            if let Some(entry) = self.published.get_mut(&(room.clone(), track)) {
+            if let Some(entry) = self.publishing.get_mut(&(room.clone(), track)) {
                 entry.may_publish_again();
             }
             self.publish(&room, track)?;
@@ -1017,46 +969,30 @@ impl Gathering<'_> {
         payload: Vec<u8>,
     ) -> Result<()> {
         let key = (room.clone(), track);
-        let is_live = self.published.get(&key).is_some_and(Publication::live);
-        if !is_live {
+        if !self.publishing.live(&key) {
             self.publish(room, track)?;
-            if let Some(entry) = self.published.get_mut(&key) {
-                entry.wait((group_id, payload));
-            }
+            self.publishing.wait(&key, (group_id, payload));
             return Ok(());
         }
-        let Some(entry) = self.published.get(&key) else {
-            return Ok(());
-        };
         // What the log calls an Object of each track; `LINE` as before.
         let what = match track {
             RoomTrack::Lines => "LINE",
             RoomTrack::Reactions => "REACTIONS",
             RoomTrack::Present => "PRESENT",
         };
-        if self.sends.len() >= LINES_BEING_SENT {
+        let shown = room.to_string();
+        let failed = move |why: String| {
+            println!("{what}_NOT_SENT room={shown:?} number={group_id} why={why:?}");
+        };
+        let sent = self
+            .publishing
+            .send(&key, self.connection, (group_id, payload), failed);
+        if sent == Sent::TooMany {
             println!(
                 "{what}_NOT_SENT room={room:?} number={group_id} why=too-many-at-once",
                 room = room.to_string()
             );
-            return Ok(());
         }
-        let sending = GroupToSend {
-            track_alias: entry.track_alias(),
-            group_id,
-            payload,
-            opened: Arc::clone(entry.opened()),
-        };
-        let counted = Sending::begin(entry.sending());
-        let connection = Arc::clone(self.connection);
-        let room = room.to_string();
-        self.sends.spawn(async move {
-            let _counted = counted;
-            let number = sending.group_id;
-            if let Err(why) = send_group(connection, sending).await {
-                println!("{what}_NOT_SENT room={room:?} number={number} why={why:?}");
-            }
-        });
         Ok(())
     }
 
@@ -1258,11 +1194,7 @@ impl Gathering<'_> {
     fn request_moved(&mut self, token: u64, purpose: &Purpose) {
         match purpose {
             Purpose::Room(room, track) => {
-                if self
-                    .published
-                    .get(&(room.clone(), *track))
-                    .is_some_and(|entry| entry.publish() == Some(token))
-                {
+                if self.publishing.is_publish(&(room.clone(), *track), token) {
                     let room = room.clone();
                     self.end_publish(&room, *track, publish_done_status::GOING_AWAY, false);
                 }
@@ -1303,7 +1235,7 @@ impl Gathering<'_> {
                     room = room.to_string()
                 );
                 self.unpublish(&room, *track, token, true);
-                self.ending.remove(&token);
+                self.publishing.over(token);
             }
         }
     }
@@ -1338,7 +1270,7 @@ impl Gathering<'_> {
         forward: bool,
     ) -> Result<()> {
         let waiting = self
-            .published
+            .publishing
             .get_mut(&(room.clone(), track))
             .map(|entry| entry.established(token, forward))
             .unwrap_or_default();
@@ -1401,11 +1333,7 @@ impl Gathering<'_> {
             (Purpose::Room(room, track), RequestEvent::UpdateRefused { response }) => {
                 let (room, track) = (room.clone(), *track);
                 self.tell(token, Command::Say(response));
-                if self
-                    .published
-                    .get(&(room.clone(), track))
-                    .is_some_and(|entry| entry.publish() == Some(token))
-                {
+                if self.publishing.is_publish(&(room.clone(), track), token) {
                     self.end_publish(&room, track, publish_done_status::UPDATE_FAILED, false);
                 }
             }

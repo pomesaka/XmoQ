@@ -22,6 +22,7 @@ pub mod answers;
 pub mod fetch;
 pub mod own;
 pub mod publication;
+pub mod publishing;
 pub mod requests;
 pub mod streams;
 

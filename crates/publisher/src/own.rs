@@ -13,6 +13,7 @@ use xmoq_moqt::message::ControlMessage;
 use xmoq_moqt::params::{ANSWER_WAIT_MS, Parameter, answer_wait_ms};
 use xmoq_moqt::session::{RequestId, Session};
 use xmoq_moqt_io::Connection;
+use xmoq_moqt_io::wt::WtConnection;
 
 use crate::streams::{Command, Heard, RequestTask, Waits, open_request};
 
@@ -25,8 +26,10 @@ pub struct Own<P> {
     task: RequestTask,
 }
 
-/// The requests of the client that are open, by token.
-pub struct OwnRequests<P> {
+/// The requests of the client that are open, by token, on the session of
+/// `connection`.
+pub struct OwnRequests<P, C: Connection = WtConnection> {
+    connection: Arc<C>,
     own: HashMap<u64, Own<P>>,
     next_token: u64,
     heard: mpsc::Sender<(u64, Heard)>,
@@ -37,12 +40,13 @@ pub struct OwnRequests<P> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueFull;
 
-impl<P> OwnRequests<P> {
-    /// None yet. Their tasks tell `heard` what happens, with the token; a
-    /// request's stream is waited for `open_wait`.
+impl<P, C: Connection> OwnRequests<P, C> {
+    /// None yet, on `connection`. Their tasks tell `heard` what happens,
+    /// with the token; a request's stream is waited for `open_wait`.
     #[must_use]
-    pub fn new(heard: mpsc::Sender<(u64, Heard)>, open_wait: Duration) -> Self {
+    pub fn new(connection: Arc<C>, heard: mpsc::Sender<(u64, Heard)>, open_wait: Duration) -> Self {
         Self {
+            connection,
             own: HashMap::new(),
             next_token: 0,
             heard,
@@ -53,9 +57,8 @@ impl<P> OwnRequests<P> {
     /// Opens the stream of `message`, which the session made as `request`,
     /// for `purpose`; its answer is waited for as long as `parameters` ask
     /// (`answer_wait_ms` of `xmoq-moqt`). Returns its token.
-    pub fn open<C: Connection>(
+    pub fn open(
         &mut self,
-        connection: &Arc<C>,
         purpose: P,
         request: RequestId,
         message: ControlMessage,
@@ -67,7 +70,7 @@ impl<P> OwnRequests<P> {
             open: self.open_wait,
             answer: Duration::from_millis(answer_wait_ms(ANSWER_WAIT_MS, parameters)),
         };
-        let task = open_request(connection, token, message, waits, self.heard.clone());
+        let task = open_request(&self.connection, token, message, waits, self.heard.clone());
         self.own.insert(
             token,
             Own {
