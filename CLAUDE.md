@@ -6,7 +6,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 
 - `docs/open-questions.md`: 触ろうとしている範囲に未決事項が無いかを確かめる
 - `docs/architecture.md`: 構成要素の責務と境界。どこまでできているかは`docs/requirements.md`、次の作業は`docs/roadmap.md`
-- 触る部品のREADME（無ければcrateの`lib.rs`の`//!`か、パッケージの`src/index.ts`の冒頭）と、`docs/moqt-implementation-notes.md`の該当の行
+- 触る部品のREADME（無ければcrateの`lib.rs`の`//!`か、パッケージの`src/index.ts`の冒頭）と、触る挙動を守る`fixtures/`の表とコードの節番号のコメント。テストで守れない裁定と既知の不足は`docs/moqt-implementation-notes.md`
 
 ## コマンド
 
@@ -29,7 +29,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 - 検証は`docs/experiments/`に記録する。走らせていない検証を「通った」と書かず、測っていない数値を書かない。記録には、依存、draft、ブラウザの版をそのまま書く。失敗と阻害要因も同じ形式で残す
 - MoQの仕様は、モデルの知識で書かずにdraft 18の本文（datatracker）を読んで実装する。本文から自明でない挙動には、コメントに節番号を書く。ライブラリの版も、その時点のリポジトリを読んで確かめる
 - 自前の部品は、先に`moqtail`の相手とつないで確かめる。自前どうしだけで通っても、両側が同じ読み違いをしている場合を見つけられない
-- draftが黙っている箇所と矛盾している箇所での動きは`docs/moqt-implementation-notes.md`の表にそろえ、片方の実装だけを変えない。表に行を足すときと裁定を出すときは、該当の節を本文で読んでから書く
+- draftが黙っている箇所と矛盾している箇所での動きは、2つの実装が読む`fixtures/`の表にそろえ、片方の実装だけを変えない。1つの実装だけの動きは、そのcrateかパッケージの表駆動のテストにする。どちらもコードの該当の所に節番号を付けたコメントを置く。テストで守れない裁定（設計の判断、両方がまだやっていないこと、外の実装や環境の観察）だけを`docs/moqt-implementation-notes.md`に書く。表に行を足すときと裁定を出すときは、該当の節を本文で読んでから書く
 - 状態を表す語は`docs/requirements.md`の定義にそろえる。図や文書で、未実装のものを実装済みに見える書き方にしない
 - `docs/`配下とREADMEは英語、このファイルは日本語で書く
 
@@ -84,14 +84,14 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | docs/architecture.md、docs/assets/ | 仕様 | 構成要素の責務と境界。図 |
 | docs/glossary.md | 仕様 | 配信と会議の語。MoQの語はdraftを指すだけ |
 | docs/protocols.md | 仕様 | プロトコルの層、版、一次仕様へのリンク |
-| docs/moqt-state-models.md | 仕様 | セッション、要求、リレーの状態の移り方。draft 18の状態に節番号を付け、draftが黙っている所は覚え書きの行を名前で指す |
-| docs/moqt-implementation-notes.md | 仕様 | draftが黙っている箇所と矛盾している箇所で2つの実装がそろえる挙動、リレーがクライアントに見せる裁定、既知の不足。関数名、定数名、値は書かない（値は定数のコメントか`fixtures/limits/limits.tsv`） |
+| docs/moqt-state-models.md | 仕様 | セッション、要求、リレーの状態の移り方。draft 18の状態に節番号を付け、draftが黙っている所は、裁定を守る`fixtures/`の表か、テストで守れない裁定なら覚え書きの項目を名前で指す |
+| docs/moqt-implementation-notes.md | 仕様 | テストで守れない裁定（設計の判断、2つの実装の違い、両方がまだやっていないこと、外の実装と環境の観察）と、既知の不足（draftの要件で満たしていないもの）の短い一覧。1項目は名前、節番号、裁定、守れない理由の1〜3文。関数名、定数名、値、テストの名前は書かない |
 | docs/open-questions.md | 仕様 | 未決事項と、仮の値の置き場所 |
 | docs/scale-and-meetings.md | 設計の案 | 配信をリレーで広げる形と会議の形のうち、決まっていない案だけ（proposed）。作ったものの状態の移り方は`docs/moqt-state-models.md`に任せる |
 | docs/roadmap.md | 計画 | 終わっていない作業とPhaseの見出し。見出しは`scripts/ci/experiments-index.sh`が読む |
 | docs/experiments/ | 記録 | 検証の観点と、走らせた記録 |
 | crates/*/README.md、packages/*/README.md、demo/README.md | 仕様 | 部品の責務の境界、旗の組み合わせ、既知の不足。exportやファイルの一覧は書かない。READMEを持つのは、走らせ方、ビルド要件とライセンス、部品をまたぐ約束のどれかを持つ部品だけで、ほかはcrateなら`lib.rs`の`//!`、パッケージなら`src/index.ts`の冒頭に書く。共有の固定値の表は`fixtures/*/README.md`に置き、部品のREADMEに写さない。上限の値と理由は定数のコメントにだけ書く。プログラムの旗と既定値は`USAGE`（無ければ`Args`のdoc）に、demoのページのURLの旗は各ページの冒頭のコメントにだけ書く |
-| fixtures/*/README.md | 仕様 | 2つ以上の実装がテストで読む固定値と表の、列の意味と出どころだけ。読むテストの羅列、規則の理由、上限の値は書かない（規則は`docs/moqt-implementation-notes.md`、値は定数か`fixtures/limits/`） |
+| fixtures/*/README.md | 仕様 | 2つ以上の実装がテストで読む固定値と表の、列の意味と出どころだけ。読むテストの羅列、規則の理由、上限の値は書かない（規則の理由はコードの節番号のコメント、値は定数か`fixtures/limits/`） |
 | interop/README.md、interop/peers/*/README.md | 手順 | 照合の相手の用意と走らせ方。組み立ての手順は`scripts/ci/interop.sh`にだけ書く |
 | .github/workflows/、scripts/ci/、mise.toml | 検査 | CIとローカルの検査。規約を検査で守る |
 | .claude/agents/、.claude/skills/ | エージェントへの指示 | レビュアーと`/review-team-xmoq`。報告は`.claude/tmp/reviews/`に書かれ、コミットされない |
@@ -111,9 +111,9 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | 部品（crate、パッケージ）や共有の固定値を足した | READMEを持つ条件に当たるならそのREADME、当たらなければ`lib.rs`の`//!`か`src/index.ts`の冒頭。共有の固定値なら`fixtures/`のそのディレクトリのREADME。README.md の一覧 |
 | 新しい文書を足した | README.md の一覧、このDocumentation Map |
 | エージェントの進め方を変えた | CLAUDE.md |
-| 既知の不足を直した（draftの要件を満たした、上限を足した） | docs/moqt-implementation-notes.md の既知の不足の項目と、それを指す`FIXME:`を消す。その挙動を表の行に書く。部品のREADMEの既知の不足とStatus |
-| draftの解釈や、本文に無い挙動を決めた・変えた | docs/moqt-implementation-notes.md。RustとTypeScriptの両方を同じPRで直す。状態の移り方が変わるならdocs/moqt-state-models.mdも |
-| 受信の上限やタイムアウトの値を決めた・変えた | 値を置くコードの定数のコメント（provisionalの印を含む）。2つの実装で共有する値は`fixtures/limits/limits.tsv`、`fixtures/followed-track/limits.tsv`、`fixtures/shared-values/values.tsv`のどれか。docs/moqt-implementation-notes.mdは規則が変わったときだけ |
+| 既知の不足を直した（draftの要件を満たした、上限を足した） | docs/moqt-implementation-notes.md の既知の不足の項目と、それを指す`FIXME:`を消す。その挙動は、2つの実装が読む`fixtures/`の表か、1つの実装ならそのテストで守る。部品のREADMEの既知の不足とStatus |
+| draftの解釈や、本文に無い挙動を決めた・変えた | 2つの実装が読む`fixtures/`の表と、両方のコードの節番号のコメント（RustとTypeScriptの両方を同じPRで直す）。テストで守れない裁定ならdocs/moqt-implementation-notes.md。状態の移り方が変わるならdocs/moqt-state-models.mdも |
+| 受信の上限やタイムアウトの値を決めた・変えた | 値を置くコードの定数のコメント（provisionalの印を含む）。2つの実装で共有する値は`fixtures/limits/limits.tsv`、`fixtures/followed-track/limits.tsv`、`fixtures/shared-values/values.tsv`のどれか |
 | 頼み直し、追いつき、次のセッションの挙動を変えた | 規則を持つコードのコメント（Rustは`xmoq-again`と`xmoq-subscriber`、TypeScriptは`@xmoq/moqt`と`@xmoq/tracks`）と、2つの実装が読む表とそのREADME（`fixtures/ask-again/`、`fixtures/kept-track/`、`fixtures/followed-track/`、`fixtures/chat-history/`）。セッションと要求の状態の移り方（GOAWAYを含む）が変わるならdocs/moqt-state-models.mdも |
 | moqtailから固定値を採った・採り直した | fixtures/moqt-18/README.md |
 | ブラウザやライブラリから固定値を採った・採り直した | その固定値のディレクトリのREADME（fixtures/webtransport-close/README.md など） |
