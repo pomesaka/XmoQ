@@ -2,7 +2,7 @@
 
 **Revision: `draft-ietf-moq-loc-04`**, on `draft-ietf-moq-transport-18`. The directory has the name of the revision; bytes of another revision go into a directory of their own.
 
-The start of a video stream of `mlmpub`, the publisher of [`Eyevinn/moqlivemock`](https://github.com/Eyevinn/moqlivemock) v0.16.1 (commit `91d903e9933a452f8baaa860f9fcd20cf195e077`), as an own client received it: the track `video_400kbps_avc` of the namespace `mlm/msf/clear`, H.264 (`avc3.4D401F` in its catalog), 1280x720, 25 frames a second. `@xmoq/loc` reads the payloads. The stream they came on is bytes of MoQ Transport and lives with the other streams, in [`fixtures/moqt-18/`](../moqt-18/README.md), where the decoders of `@xmoq/moqt` and of `crates/moqt` read it; both take its two payloads from here. `crates/loc` reads the payloads as well (`crates/loc/src/draft_04.rs`).
+The start of a video stream of `mlmpub`, the publisher of [`Eyevinn/moqlivemock`](https://github.com/Eyevinn/moqlivemock) v0.16.1 (commit `91d903e9933a452f8baaa860f9fcd20cf195e077`), as an own client received it: the track `video_400kbps_avc` of the namespace `mlm/msf/clear`, H.264 (`avc3.4D401F` in its catalog), 1280x720, 25 frames a second. The stream they came on is bytes of MoQ Transport and lives with the other streams, in [`fixtures/moqt-18/`](../moqt-18/README.md), whose readers take its two payloads from here.
 
 Taken on 2026-10-11, with `mlmpub` as `scripts/ci/interop.sh` builds it (unchanged) and the own Rust client of `main` at `36e51810`:
 
@@ -17,7 +17,7 @@ The client printed the bytes of the stream as it read them (`TRACE recv uni#1 ..
 
 | File | Bytes | What it is |
 |---|---|---|
-| `../moqt-18/subgroup-stream-two-objects-from-moqlivemock.hex` | 22,500 | The first bytes of the first subgroup stream the client got, up to the end of its second Object. The stream went on: `mlmpub` sends a Group on one stream, 25 Objects. Both implementations decode it to the values below and encode those to the same bytes (`packages/moqt/test/core/moqtail-fixtures.test.ts`, `crates/moqt/src/data.rs`) |
+| `../moqt-18/subgroup-stream-two-objects-from-moqlivemock.hex` | 22,500 | The first bytes of the first subgroup stream the client got, up to the end of its second Object. The stream went on: `mlmpub` sends a Group on one stream, 25 Objects. Both implementations decode it to the values below and encode those to the same bytes |
 | `video-key-length-prefixed-from-moqlivemock.hex` | 21,533 | The payload of the first Object, a key frame |
 | `video-delta-length-prefixed-from-moqlivemock.hex` | 931 | The payload of the second Object |
 
@@ -61,4 +61,4 @@ Taken on 2026-10-11 from a run of `interop/video.ts --video key-frames-too-large
 
 The names are by the low five bits of that byte (7, 8, 5 and 1), as for `moqlivemock`'s above; H.264's specification was not read for this. The sequence parameter set begins `27 42 00 0d`: **the encoder wrote profile and level bytes `42 00 0d`, not the `42 E0 1F` it was configured with**, and the catalog of the interop run says `avc3.42E01F`. The decoder of Chromium took the track with that codec string.
 
-`@xmoq/loc` reads both as payloads with start codes that stay as they are (`packages/loc/test/draft-04/video-payload.test.ts`), and the sender and the receiver of `@xmoq/media` pass them on unchanged (`packages/media/test/video-sender.test.ts`).
+`@xmoq/loc` reads both as payloads with start codes that stay as they are, and the sender and the receiver of `@xmoq/media` pass them on unchanged.

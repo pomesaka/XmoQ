@@ -2,7 +2,7 @@
 
 A publisher receives a FETCH on a bidirectional stream the peer opened: a relay asks it for a range of a track. The session of each implementation decides, before the application sees the request, whether it is handed on, refused, or a reason to close the session; and once the application has the request, what is sent for each thing that happens to it. Both implementations read the two tables here in their tests, so that the same bytes in the same state get the same answer from both.
 
-**Every outcome here was written after the row had been run through the Rust session** (`crates/moqt` of `main` at `59d76ab8`, in a test that is not kept), and then through `@xmoq/moqt`. An End Location that names the same Location as the Start Location is taken (§10.12.3 asks for "the same or a larger Location"), in the FETCH and in the answer.
+An End Location that names the same Location as the Start Location is taken (§10.12.3 asks for "the same or a larger Location"), in the FETCH and in the answer.
 
 ## `opened.tsv`
 
@@ -46,8 +46,7 @@ Every FETCH is `../moqt-18/fetch-standalone-moqtail-rs.hex` or `../moqt-18/fetch
 
 ## Not in the tables
 
-- How many REQUEST_UPDATEs may wait for the answer to a FETCH: 64, and one more refuses the FETCH with `EXCESSIVE_LOAD`. The Rust session counts them and leaves the limit to its caller; the relay and `@xmoq/moqt` have it, with a test each.
-- How many FETCHes of the peer may be open at once, and `EXCESSIVE_LOAD` for one more: 32 in `@xmoq/moqt` (`limits.maxPeerFetches`); the Rust session counts every request of the peer together, 256.
+- How many REQUEST_UPDATEs may wait for the answer to a FETCH, and how many FETCHes of the peer may be open at once: `held-fetch-updates`, `peer-fetches` and `peer-requests` of [`fixtures/limits/`](../limits/README.md), and the rows "REQUEST_UPDATE for a FETCH, received" and "Requests of the peer that are open at once" of [the implementation notes](../../docs/moqt-implementation-notes.md).
 - What ends a FETCH that was accepted: the streams are not the session's in the Rust implementation.
 
 ## `served-end.tsv`
@@ -69,4 +68,4 @@ One row a line, six fields separated by tabs, no header. Every row ends with one
 
 **What a test can see differs too.** A subscriber that stopped the publisher's direction cannot read what the publisher did with it: the relay's test, which is a peer of the relay over an in-memory connection, checks that row by the `peer` field and by what the relay still holds, and not by `own`. The Rust client's test has the stream itself, and sees the reset.
 
-**Not in the table:** a FETCH that was refused, and one whose fetch stream was reset or never came. There the three do not do the same, each for a reason of its own: the relay passes a publisher's reset on and finishes the request stream at once, and the Rust client resets a request stream whose fetch stream it could not write.
+**Not in the table:** a FETCH that was refused, and one whose fetch stream was reset or never came. There the three do not do the same.

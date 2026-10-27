@@ -1,6 +1,6 @@
 # The payload of a transcript's track
 
-The names of a transcript's track, and the JSON the transcriber writes on `speech` (decided on 2026-10-25), and what a reader makes of it. `xmoq-transcript-tracks` (`crates/transcript-tracks/src/payloads.rs`) and `@xmoq/transcript` (`packages/transcript/test/payloads.test.ts`) read the table in their tests, so that the same bytes give the same piece, or the same reason why there is none. The rows were written by hand from the decision; no other implementation writes these payloads. Bytes a text table cannot hold (not UTF-8) are a case of the Rust test itself.
+The names of a transcript's track, and the JSON the transcriber writes on `speech`, and what a reader makes of it. `xmoq-transcript-tracks` and `@xmoq/transcript` read the table in their tests, so that the same bytes give the same piece, or the same reason why there is none. The rows were written by hand from the decision; no other implementation writes these payloads. Bytes a text table cannot hold (not UTF-8) are a case of the Rust test itself.
 
 Columns are separated by a tab. A text column holds a JSON literal (`from` an array of strings, `text` a string), so that quotes, backslashes and line breaks are written as JSON writes them; `-` is "none".
 
@@ -25,7 +25,7 @@ Every number is an integer from 0 to 2^53 - 1, which a JavaScript number holds e
 
 ## `names.tsv`
 
-Which track is the transcript of which prefix: `xmoq-transcript-tracks` (`names.rs`) reads each track and makes the track of each prefix, and `@xmoq/transcript` (`test/names.test.ts`) makes the track of each prefix and reads none.
+Which track is the transcript of which prefix: `xmoq-transcript-tracks` reads each track and makes the track of each prefix, and `@xmoq/transcript` makes the track of each prefix and reads none.
 
 | Column | What it is |
 |---|---|

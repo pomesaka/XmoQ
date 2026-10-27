@@ -1,6 +1,6 @@
 # When a stream of the peer has said what it is
 
-Both implementations stop a stream the peer opens when it has not said what it is in time (10 seconds, `first_bytes_timeout` and `firstBytesTimeoutMs`), and leave one that has. The draft has no such time, so where "has said what it is" lies is a contract of XmoQ's own, and these rows pin it: the bytes a stream has sent when its time runs out, and whether it is stopped.
+Both implementations stop a stream the peer opens when it has not said what it is in time (`first-bytes-wait-ms` of [`fixtures/limits/`](../limits/README.md)), and leave one that has. The draft has no such time, so where "has said what it is" lies is a contract of XmoQ's own, and these rows pin it: the bytes a stream has sent when its time runs out, and whether it is stopped.
 
 ## Format
 
@@ -22,7 +22,7 @@ What the rows hold a reader to:
 | Fetch stream | its whole FETCH_HEADER |
 | Request | its first message, whole |
 
-A stream that is stopped gets STOP_SENDING `INTERNAL_ERROR` (`0x0`) where it is unidirectional. A request is given up with `CANCELLED` (`0x1`): STOP_SENDING for the peer's direction, and a reset of the other one where nothing was written on it. The codes are not in the table.
+The codes a stopped stream gets are not in the table; they are in the row named under Source.
 
 ## What a test has to set up
 

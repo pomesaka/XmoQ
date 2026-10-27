@@ -1,6 +1,6 @@
 # What a client refuses a request of the peer with
 
-A client that publishes receives requests on bidirectional streams the relay opened. Of those it does not serve, it answers each with REQUEST_ERROR `NOT_SUPPORTED` (`0x3`), whether it serves SUBSCRIBE or not: §4 has "Limited endpoints SHOULD respond to any unsupported messages with the appropriate NOT_SUPPORTED error code". WHY NOT `UNINTERESTED` for a PUBLISH or a PUBLISH_NAMESPACE once it serves SUBSCRIBE: neither client takes a PUBLISH at all, and "not interested in the track or namespace" (§10.6.2) would say that another one could be taken. Two implementations decide it, and read `refusals.tsv` in their tests: `refusal_code` of the Rust client (`crates/moqt-client/src/main.rs`), and `@xmoq/moqt` (`test/webtransport/refused-requests.test.ts`).
+A client that publishes receives requests on bidirectional streams the relay opened. Of those it does not serve, it answers each with REQUEST_ERROR `NOT_SUPPORTED` (`0x3`), whether it serves SUBSCRIBE or not (§4). Why, and why not `UNINTERESTED`, is at `refusal_code` of the Rust client (`crates/moqt-client/src/main.rs`). The Rust client and `@xmoq/moqt` read `refusals.tsv` in their tests.
 
 ## `refusals.tsv`
 

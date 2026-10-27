@@ -17,4 +17,4 @@ The REQUEST_ERRORs of the rows, written by hand from §10.6.2: Error Code `DOES_
 
 What the rows hold a reader to: §10.6.1, "Track Name is not meaningful for namespace-scoped requests (SUBSCRIBE_NAMESPACE, PUBLISH_NAMESPACE) and MUST be empty; an endpoint that receives a non-empty Track Name in a Redirect for a namespace-scoped request MUST close the session with a PROTOCOL_VIOLATION". The Connect URI is the client's to follow or not.
 
-**Not in the table**: a Redirect with a Connect URI to a server, which closes the session (§10.6.1: "If a server receives a Redirect with a non-zero Connect URI Length it MUST close the session with a PROTOCOL_VIOLATION"). `@xmoq/moqt` has no server role; the Rust session has a test of its own (`a_server_is_not_redirected_to_another_uri`).
+**Not in the table**: a Redirect with a Connect URI to a server, which closes the session (§10.6.1: "If a server receives a Redirect with a non-zero Connect URI Length it MUST close the session with a PROTOCOL_VIOLATION"). `@xmoq/moqt` has no server role; the Rust session has a test of its own.
