@@ -153,21 +153,11 @@ impl Video {
 /// the session.
 fn tell(said: KeptTrackChange) -> Option<String> {
     match said {
-        KeptTrackChange::Subscribed { track_alias } => {
-            eprintln!("XMOQ_AGENT_VIDEO_AGAIN track_alias={track_alias}");
-        }
-        KeptTrackChange::Ended { how, pause_ms } => {
-            eprintln!("XMOQ_AGENT_VIDEO_ENDED {how}; asking again in {pause_ms} ms");
-        }
-        KeptTrackChange::Refused {
-            error_code,
-            pause_ms,
-        } => eprintln!(
-            "XMOQ_AGENT_VIDEO_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"
-        ),
         // Not asked again on this session, as `again_after_failure` says.
-        KeptTrackChange::GivenUp(why) | KeptTrackChange::Failed { why, .. } => return Some(why),
-        KeptTrackChange::Other(other) => eprintln!("XMOQ_AGENT_VIDEO_SAID {other:?}"),
+        KeptTrackChange::GivenUp(why) | KeptTrackChange::Failed { why, .. } => Some(why),
+        said => {
+            eprintln!("XMOQ_AGENT_VIDEO_{said}");
+            None
+        }
     }
-    None
 }
