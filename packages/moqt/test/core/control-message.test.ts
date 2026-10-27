@@ -6,7 +6,7 @@ import {
 	encodeControlMessage,
 } from "../../src/core/control-message.ts";
 import type { MessageParameters } from "../../src/core/parameters.ts";
-import { byHand, hex, toHex, utf8 } from "../helpers.ts";
+import { byHand, fixtureTable, hex, toHex, utf8 } from "../helpers.ts";
 
 // Bytes in this file are derived by hand from the message formats of draft 18.
 // Bytes captured from another implementation are in moqtail-fixtures.test.ts.
@@ -329,6 +329,38 @@ describe("control messages encoded by hand from the draft", () => {
 			expect(toHex(encodeControlMessage(message))).toBe(bytes);
 		},
 	);
+});
+
+// fixtures/moqt-18-verdicts/control.tsv, which the Rust implementation reads
+// as well: a control message, and whether it is taken or closes the session
+// with which code. §10: an unknown type, and one Table 5 marks RESERVED,
+// closes it with PROTOCOL_VIOLATION (§3.4 for streams); a type the draft
+// defines and this implementation does not, the PUBLISH_OK (0x1E) of Table 5
+// among them, with INTERNAL_ERROR: the peer followed the draft. Unknown Setup
+// Options, error codes, status codes and Track Properties close nothing
+// (§10.3, §14). A Fetch End Of Track other than 0 and 1 (§10.13), a
+// GROUP_ORDER of 0 (§10.2.8), a prefix of more than 32 fields (§10.18) and a
+// parameter §10.2 does not list for the message (§10.2.1) are violations;
+// more than MAX_KEY_VALUE_PAIRS pairs are this implementation's limit, also
+// where the count is larger than the bytes left.
+describe("fixtures/moqt-18-verdicts/control.tsv", () => {
+	const rows = fixtureTable("moqt-18-verdicts", "control.tsv");
+	test("the table has its 20 rows of 3 columns", () => {
+		expect(rows.map((row) => row.length)).toEqual(Array(20).fill(3));
+	});
+	test.each(rows)("%s: %s is %s", (_name, bytes, verdict) => {
+		const input = hex((bytes ?? "").match(/../g)?.join(" ") ?? "");
+		const result = decodeControlMessage(input);
+		const got =
+			result.status === "ok"
+				? result.bytesRead === input.length
+					? "ok"
+					: `read ${result.bytesRead}`
+				: result.status === "error"
+					? `closed:0x${result.error.code.toString(16)}`
+					: result.status;
+		expect(got).toBe(verdict ?? "");
+	});
 });
 
 describe("decodeControlMessage", () => {

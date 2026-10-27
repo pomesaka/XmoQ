@@ -1910,6 +1910,43 @@ pub(crate) mod tests {
         }
     }
 
+    /// The rows of `fixtures/moqt-18-verdicts/control.tsv`, which
+    /// `@xmoq/moqt` reads as well: a control message, and whether it is taken
+    /// or closes the session with which code. §10: "If the length does not
+    /// match the length of the Message Payload, the receiver MUST close the
+    /// session"; an unknown type closes it with `PROTOCOL_VIOLATION`, as do the
+    /// types Table 5 marks RESERVED (§10, §3.4). A type the draft defines and
+    /// this crate does not implement, the `PUBLISH_OK` (0x1E) of Table 5
+    /// among them, closes it with `INTERNAL_ERROR`: the peer followed the
+    /// draft. Unknown Setup Options, error codes, status codes and Track
+    /// Properties close nothing (§10.3, §14). A Fetch `End Of Track` other
+    /// than 0 and 1 (§10.13), a `GROUP_ORDER` of 0 (§10.2.8), a prefix of more
+    /// than 32 fields (§10.18) and a parameter §10.2 does not list for the
+    /// message (§10.2.1) are violations; more than `kvp::MAX_PAIRS` pairs
+    /// are this crate's limit, also where the count is larger than the bytes
+    /// left.
+    #[test]
+    fn control_messages_are_taken_or_refused_as_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<3>("moqt-18-verdicts/control.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 20);
+        for [name, hex, verdict] in rows {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect();
+            let got = match ControlMessage::decode(&bytes) {
+                Ok(Some((_, read))) if read == bytes.len() => "ok".to_string(),
+                Ok(other) => panic!("{name}: {other:?}"),
+                Err(error) => match error.termination_code() {
+                    Some(code) => format!("closed:{:#x}", code.code()),
+                    None => panic!("{name}: {error:?} closes nothing"),
+                },
+            };
+            assert_eq!(got, verdict, "{name}");
+        }
+    }
+
     #[test]
     fn rejects_malformed_input() {
         let cases: &[(&[u8], Error)] = &[

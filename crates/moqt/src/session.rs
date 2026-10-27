@@ -2131,6 +2131,61 @@ mod tests {
         }
     }
 
+    /// The rows of `fixtures/moqt-18-verdicts/goaway.tsv`, which `@xmoq/moqt`
+    /// reads where its role is the client's: GOAWAYs fed in turn to a session
+    /// that has exchanged SETUP, on its control stream or on the stream of a
+    /// SUBSCRIBE of its own, and whether they are taken or close the session
+    /// with which code. §10.4: "MUST close the session with a
+    /// `PROTOCOL_VIOLATION` ... if it receives more than one GOAWAY on the
+    /// control stream or on a single request stream"; "If a server receives a
+    /// GOAWAY with a non-zero New Session URI Length it MUST close the session
+    /// with a `PROTOCOL_VIOLATION`"; the Request ID is "Present only when sent
+    /// on the control stream", and one of the wrong parity closes it "with
+    /// `INVALID_REQUEST_ID`".
+    #[test]
+    fn goaways_are_taken_or_refused_as_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<5>("moqt-18-verdicts/goaway.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 11);
+        for [name, role, stream, hex, verdict] in rows {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect();
+            let mut messages = Vec::new();
+            let mut at = 0;
+            while at < bytes.len() {
+                let (message, read) = ControlMessage::decode(&bytes[at..]).unwrap().unwrap();
+                messages.push(message);
+                at += read;
+            }
+            let mut session = set_up(match role.as_str() {
+                "client" => Role::Client,
+                "server" => Role::Server,
+                other => panic!("{name}: {other}"),
+            });
+            let own = (stream == "own-request").then(|| {
+                let (open, _) = session.subscribe(track(b"a"), vec![]).unwrap();
+                open
+            });
+            let fed = messages.into_iter().try_for_each(|message| match own {
+                Some(open) => session.feed(open, message).map(|_| ()),
+                None => session.on_control_message(message).map(|_| ()),
+            });
+            let got = match fed {
+                Ok(()) => "taken".to_string(),
+                Err(error) => format!(
+                    "closed:{:#x}",
+                    error
+                        .termination_code()
+                        .expect("it closes the session")
+                        .code()
+                ),
+            };
+            assert_eq!(got, verdict, "{name}, {role}, {stream}");
+        }
+    }
+
     /// The same on the stream of a request of the peer, at a server, which may
     /// be sent no New Session URI (§10.4).
     #[test]

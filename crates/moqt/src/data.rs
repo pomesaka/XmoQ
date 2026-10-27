@@ -786,6 +786,7 @@ impl SubgroupStreamEncoder {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::error::ErrorScope;
     use crate::test_util::{fixture, fixture_of_loc};
 
     /// More than the largest payload of a fixture: a key frame of 21,533
@@ -1243,27 +1244,41 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn classifies_unidirectional_streams() {
-        type Classified = Result<Option<UniStreamType>, Error>;
-        let cases: &[(&[u8], Classified)] = &[
-            (&[0xaf, 0x00], Ok(Some(UniStreamType::Control))),
-            (&[0x10], Ok(Some(UniStreamType::Subgroup))),
-            (&[0x58, 0x00], Ok(Some(UniStreamType::Subgroup))),
-            (&[0x7d], Ok(Some(UniStreamType::Subgroup))),
-            (&[], Ok(None)),
-            (&[0xaf], Ok(None)),
-            (&[0x05], Ok(Some(UniStreamType::Fetch))),
-            (
-                &[0xf0, 0x13, 0x2b, 0x3e, 0x28],
-                Ok(Some(UniStreamType::Padding)),
-            ),
-            (&[0x00], Err(Error::UnknownStreamType(0x00))),
-            (&[0x20], Err(Error::UnknownStreamType(0x20))),
-            // 0x90 has bit 4 set and is outside 0b0XX1XXXX.
-            (&[0x80, 0x90], Err(Error::UnknownStreamType(0x90))),
-        ];
-        for (bytes, expected) in cases {
-            assert_eq!(uni_stream_type(bytes), *expected, "{bytes:02x?}");
+    fn a_unidirectional_stream_is_what_the_shared_table_says() {
+        // fixtures/moqt-18-verdicts/streams.tsv, which `@xmoq/moqt` reads as
+        // well: the stream types of Table 3 (§3.4); "An endpoint that
+        // receives an unknown stream type MUST close the session" (§3.4), and
+        // a padding stream is read and discarded (§11.5.1).
+        let rows = crate::test_util::table_rows::<3>("moqt-18-verdicts/streams.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 11);
+        for [name, hex, verdict] in rows {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect();
+            let got = match uni_stream_type(&bytes) {
+                Ok(Some(UniStreamType::Control)) => "control".to_string(),
+                Ok(Some(UniStreamType::Subgroup)) => "subgroup".to_string(),
+                Ok(Some(UniStreamType::Fetch)) => "fetch".to_string(),
+                Ok(Some(UniStreamType::Padding)) => "padding".to_string(),
+                Ok(None) => panic!("{name}: no type yet"),
+                Err(error) => format!(
+                    "closed:{:#x}",
+                    error
+                        .termination_code()
+                        .expect("it closes the session")
+                        .code()
+                ),
+            };
+            assert_eq!(got, verdict, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_unidirectional_stream_has_no_type_until_its_type_has_arrived() {
+        for bytes in [&[][..], &[0xaf], &[0xf0, 0x13]] {
+            assert_eq!(uni_stream_type(bytes), Ok(None), "{bytes:02x?}");
         }
     }
 
@@ -1322,102 +1337,70 @@ pub(crate) mod tests {
         }
     }
 
+    /// The rows of `fixtures/moqt-18-verdicts/subgroup-stream.tsv`, which
+    /// `@xmoq/moqt` reads as well: a subgroup stream, whole and a byte at a
+    /// time, ended with a FIN, and whether it is read, closes the session,
+    /// makes the track malformed, or ends that stream alone (a limit of this
+    /// end). §11.4: a FIN inside a serialized Object, or inside the header, is
+    /// a `PROTOCOL_VIOLATION`. §2.4.2 and §11.4.3: an Object after End of
+    /// Group or End of Track makes the track malformed as soon as its first
+    /// byte is there. §2.5.1, §12.8 and §12.9: a Mandatory Track Property on
+    /// an Object, and a Prior Group ID Gap or Prior Object ID Gap that is
+    /// larger than its ID or comes twice, make it malformed, decided when the
+    /// properties are read, before the status that would close the session
+    /// (an Object is judged field by field as it arrives). More than
+    /// `kvp::MAX_PAIRS` properties are this end's limit.
     #[test]
-    fn reports_a_malformed_track() {
-        let cases: &[(&[u8], &str)] = &[
-            // After End of Group, the first byte of another Object is enough;
-            // after End of Track, a whole Object.
-            (
-                &[0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00],
-                "object after end of group or end of track",
-            ),
-            (
-                &[0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x03],
-                "object after end of group or end of track",
-            ),
-            // Property type 0x4000 is a Mandatory Track Property.
-            (
-                &[
-                    0x11, 0x00, 0x00, 0x00, 0x00, 0x04, 0xc0, 0x40, 0x00, 0x01, 0x01, 0x61,
-                ],
-                "mandatory track property on an object",
-            ),
-            // Prior Object ID Gap (0x3E) twice on one Object.
-            (
-                &[
-                    0x11, 0x00, 0x00, 0x00, 0x05, 0x04, 0x3e, 0x01, 0x00, 0x01, 0x01, 0x61,
-                ],
-                "more than one prior object id gap",
-            ),
-            // Prior Object ID Gap 3 on Object 2.
-            (
-                &[0x11, 0x00, 0x00, 0x00, 0x02, 0x02, 0x3e, 0x03, 0x01, 0x61],
-                "prior object id gap larger than the object id",
-            ),
-            // The same Object cut off after its Properties, and one whose
-            // Payload Length (5) has arrived without the payload: the Properties
-            // alone decide.
-            (
-                &[0x11, 0x00, 0x00, 0x00, 0x02, 0x02, 0x3e, 0x03],
-                "prior object id gap larger than the object id",
-            ),
-            (
-                &[0x11, 0x00, 0x00, 0x00, 0x02, 0x02, 0x3e, 0x03, 0x05],
-                "prior object id gap larger than the object id",
-            ),
-            // Prior Group ID Gap (0x3C) twice on one Object.
-            (
-                &[
-                    0x11, 0x00, 0x07, 0x00, 0x00, 0x04, 0x3c, 0x01, 0x00, 0x01, 0x01, 0x61,
-                ],
-                "more than one prior group id gap",
-            ),
-            // Prior Group ID Gap 8 in Group 7.
-            (
-                &[0x11, 0x00, 0x07, 0x00, 0x00, 0x02, 0x3c, 0x08, 0x01, 0x61],
-                "prior group id gap larger than the group id",
-            ),
-        ];
-        for (bytes, fault) in cases {
-            assert_eq!(
-                decode_stream(bytes, 3),
-                Err(Error::MalformedTrack(fault)),
-                "{bytes:02x?}"
-            );
+    fn subgroup_streams_are_read_or_refused_as_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<3>("moqt-18-verdicts/subgroup-stream.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 23);
+        for [name, hex, verdict] in rows {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect();
+            for chunk in [bytes.len().max(1), 1] {
+                let got = match decode_stream(&bytes, chunk) {
+                    Ok(_) => "ok".to_string(),
+                    Err(error) => match error.scope() {
+                        ErrorScope::Session(code) => format!("closed:{:#x}", code.code()),
+                        ErrorScope::Subscription { .. } => "malformed".to_string(),
+                        ErrorScope::Stream { .. } => "stopped".to_string(),
+                    },
+                };
+                assert_eq!(got, verdict, "{name}, in pieces of {chunk}");
+            }
         }
     }
 
     /// §11, §11.3.1: the types of a datagram.
     #[test]
-    fn a_datagram_of_an_unknown_type_closes_the_session() {
-        let unknown = || Some(Error::ProtocolViolation("an unknown datagram type"));
-        // (the datagram's first bytes; what is wrong with it)
-        let cases: [(&[u8], Option<Error>); 14] = [
-            (&[0x00, 0x01], None),
-            (&[0x0f], None),
-            (&[0x20], None),
-            (&[0x21], None),
-            (&[0x2d], None),
-            // STATUS and END_OF_GROUP together.
-            (&[0x22], unknown()),
-            (&[0x2f], unknown()),
-            // Not of the form 0b00X0XXXX.
-            (&[0x10], unknown()),
-            (&[0x30], unknown()),
-            (&[0x40, 0x05], unknown()),
-            // Of the form in its value, written in two bytes.
-            (&[0x80, 0x05], None),
-            (
-                &[],
-                Some(Error::ProtocolViolation("a datagram without a type")),
-            ),
-            // A padding datagram (0x132B3E29, in five bytes), also with bytes
-            // that are not zero after it.
-            (&[0xf0, 0x13, 0x2b, 0x3e, 0x29, 0x00, 0x00], None),
-            (&[0xf0, 0x13, 0x2b, 0x3e, 0x29, 0x01], None),
-        ];
-        for (datagram, fault) in cases {
-            assert_eq!(datagram_fault(datagram), fault, "{datagram:02x?}");
+    fn a_datagram_closes_the_session_or_not_as_the_shared_table_says() {
+        // fixtures/moqt-18-verdicts/datagrams.tsv, which `@xmoq/moqt` reads as
+        // well. §11: "An endpoint that receives an unknown datagram type MUST
+        // close the session"; §11.3.1 for the types of the form 0b00X0XXXX and
+        // STATUS with END_OF_GROUP; §11.5.2: "The receiver MUST discard all
+        // data received in a padding datagram".
+        let rows = crate::test_util::table_rows::<3>("moqt-18-verdicts/datagrams.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 33);
+        for [name, hex, verdict] in rows {
+            let datagram: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect();
+            let got = match datagram_fault(&datagram) {
+                None => "dropped".to_string(),
+                Some(error) => format!(
+                    "closed:{:#x}",
+                    error
+                        .termination_code()
+                        .expect("it closes the session")
+                        .code()
+                ),
+            };
+            assert_eq!(got, verdict, "{name}");
         }
     }
 

@@ -10,6 +10,7 @@ import {
 	BY_HAND_CONTROL_MESSAGES,
 	byHand,
 	byHandNames,
+	fixtureTable,
 	hex,
 	toHex,
 } from "../helpers.ts";
@@ -203,121 +204,39 @@ describe("fetch streams written by hand from the draft", () => {
 // The same bytes as `rejects_malformed_input` in crates/moqt/src/fetch.rs.
 // `scope` is how far the damage reaches; `code` is the Session termination
 // error code of §3.5 where the session ends.
-describe("a fetch stream that cannot be decoded", () => {
-	const VIOLATIONS = [
-		{ name: "a subgroup stream", bytes: "10 00" },
-		{
-			name: "a stream that ends after its type, without the Request ID",
-			bytes: "05",
-		},
-		// 128 and above are only the two End of Range values (§11.4.4).
-		{ name: "Serialization Flags 0x80", bytes: "05 00 80 80" },
-		{ name: "Serialization Flags 0x8D", bytes: "05 00 80 8d" },
-		{ name: "the first Object without a Group ID", bytes: "05 00 14 00 07 00" },
-		{
-			name: "the first Object without an Object ID",
-			bytes: "05 00 18 00 07 00",
-		},
-		{ name: "the first Object without a priority", bytes: "05 00 0c 00 00 00" },
-		{
-			name: "the first Object with the Subgroup of a prior Object",
-			bytes: "05 00 1d 00 00 07 00",
-		},
-		{
-			name: "after an indicator, the Subgroup of an Object that never came",
-			bytes: "05 00 81 0c 03 01 11 07 00",
-		},
-		{
-			name: "after an indicator, the priority of an Object that never came",
-			bytes: "05 00 81 0c 03 01 00 00",
-		},
-		{
-			name: "the Subgroup of a prior Object that was a datagram",
-			bytes: "05 00 5c 01 00 07 00 01 00",
-		},
-		// 2^64 - 1 is `ff` and eight bytes `ff` (§1.4.1); one more does not fit.
-		{
-			name: "the prior Subgroup ID plus one past 2^64 - 1",
-			bytes: "05 00 1f 00 ff ff ff ff ff ff ff ff ff 00 07 00 02 00",
-		},
-		{
-			name: "the prior Object ID plus one past 2^64 - 1",
-			bytes: "05 00 1c 00 ff ff ff ff ff ff ff ff ff 07 00 00 00",
-		},
-		{
-			name: "an Object ID Delta that takes the Object ID past 2^64 - 1",
-			bytes: "05 00 1c 00 ff ff ff ff ff ff ff ff ff 07 00 04 01 00",
-		},
-		{
-			name: "a stream that ends inside an Object",
-			bytes: "05 00 1c 00 00 07 02 aa",
-		},
-	];
-
-	test.each(VIOLATIONS)(
-		"closes the session with PROTOCOL_VIOLATION: $name",
-		({ bytes }) => {
-			expect(
-				decodeIn(hex(bytes), bytes.length, "Ascending").failure,
-			).toMatchObject({
-				scope: "session",
-				error: { code: 3 },
-			});
-		},
-	);
-
-	// The same result where the bytes come one at a time: what is wrong is
-	// not reported earlier or as something else.
-	test.each(VIOLATIONS)(
-		"closes the session with PROTOCOL_VIOLATION, byte by byte: $name",
-		({ bytes }) => {
-			expect(decodeIn(hex(bytes), 1, "Ascending").failure).toMatchObject({
-				scope: "session",
-				error: { code: 3 },
-			});
-		},
-	);
-
-	test.each([
-		{
-			name: "Mandatory Track Property 0x4000 on an Object (§2.5.1)",
-			bytes: "05 00 3c 00 00 07 04 c0 40 00 01 00",
-			scope: "track",
-		},
-		{
-			name: "a payload of 1025 bytes announced, over the limit of 1024",
-			bytes: "05 00 1c 00 00 07 84 01",
-			scope: "stream",
-		},
-		{
-			name: "Object Properties of 1025 bytes announced, over the limit of 1024",
-			bytes: "05 00 3c 00 00 07 84 01",
-			scope: "stream",
-		},
-	])("ends the stream and not the session: $name", ({ bytes, scope }) => {
-		expect(
-			decodeIn(hex(bytes), bytes.length, "Ascending").failure,
-		).toMatchObject({ scope });
+describe("fixtures/moqt-18-verdicts/fetch-stream.tsv", () => {
+	// Read by the Rust implementation as well, with Objects of 1,024 bytes of
+	// payload and of properties at the most (LIMITS): a fetch stream, whole
+	// and a byte at a time, and whether it is read, closes the session, makes
+	// the track malformed, or ends that stream alone (a limit of this end).
+	// §11.4.4.1 and §11.4.4.2: a flag that refers to a prior Object, where
+	// there is none, is a PROTOCOL_VIOLATION, and so is an ID that leaves the
+	// 64 bits; the draft has no case for the Subgroup of a prior datagram, nor
+	// for a Subgroup ID past 2^64 - 1, and both are read as such. §2.5.1: a
+	// Mandatory Track Property on an Object makes the track malformed, which
+	// on a fetch stream is decided once the payload is there. The order of
+	// the Objects is the sender's (§10.12.3), and is not checked.
+	const rows = fixtureTable("moqt-18-verdicts", "fetch-stream.tsv");
+	test("the table has its 26 rows of 4 columns", () => {
+		expect(rows.map((row) => row.length)).toEqual(Array(26).fill(4));
 	});
-
-	// (the Group Order; the first Group; the Group ID Delta of the next).
-	// Descending below 0, and ascending past 2^64 - 1 (§11.4.4.1).
-	test.each([
-		{ groupOrder: "Descending", firstGroup: "01", delta: "01" },
-		{
-			groupOrder: "Ascending",
-			firstGroup: "ff ff ff ff ff ff ff ff ff",
-			delta: "00",
-		},
-	] satisfies { groupOrder: GroupOrder; firstGroup: string; delta: string }[])(
-		"refuses a Group ID past the end of a $groupOrder fetch",
-		({ groupOrder, firstGroup, delta }) => {
-			const bytes = `05 00 1c ${firstGroup} 00 07 00 08 ${delta} 00`;
-			expect(
-				decodeIn(hex(bytes), bytes.length, groupOrder).failure,
-			).toMatchObject({ scope: "session", error: { code: 3 } });
-		},
-	);
+	test.each(rows)("%s, %s: %s is %s", (_name, order, bytes, verdict) => {
+		const input = hex((bytes ?? "").match(/../g)?.join(" ") ?? "");
+		const groupOrder: GroupOrder =
+			order === "descending" ? "Descending" : "Ascending";
+		for (const chunk of [input.length, 1]) {
+			const { failure } = decodeIn(input, chunk, groupOrder);
+			const got =
+				failure === undefined
+					? "ok"
+					: failure.scope === "session"
+						? `closed:0x${failure.error.code.toString(16)}`
+						: failure.scope === "track"
+							? "malformed"
+							: "stopped";
+			expect(got).toBe(verdict ?? "");
+		}
+	});
 });
 
 test("an Object ID that is left out is the prior one plus one, also in a new Group", () => {

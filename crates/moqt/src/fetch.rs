@@ -527,6 +527,7 @@ impl FetchStreamEncoder {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::error::ErrorScope;
     use crate::test_util::{fixture, fixture_by_hand};
 
     const LIMIT: usize = 1_024;
@@ -791,112 +792,44 @@ pub(crate) mod tests {
         }
     }
 
+    /// The rows of `fixtures/moqt-18-verdicts/fetch-stream.tsv`, which
+    /// `@xmoq/moqt` reads as well, with Objects of 1,024 bytes of payload and
+    /// of properties at the most: a fetch stream, whole and a byte at a time,
+    /// and whether it is read, closes the session, makes the track malformed,
+    /// or ends that stream alone (a limit of this end). §11.4.4.1 and
+    /// §11.4.4.2: a flag that refers to a prior Object, where there is none,
+    /// is a `PROTOCOL_VIOLATION`, and so is an ID that leaves the 64 bits;
+    /// the draft has no case for the Subgroup of a prior datagram, nor for a
+    /// Subgroup ID past 2^64 - 1, and both are read as such. §2.5.1: a
+    /// Mandatory Track Property on an Object makes the track malformed, which
+    /// on a fetch stream is decided once the payload is there. The order of
+    /// the Objects is the sender's (§10.12.3), and is not checked.
     #[test]
-    fn rejects_malformed_input() {
-        let violation = Error::ProtocolViolation;
-        let cases: &[(&[u8], Error)] = &[
-            // A subgroup stream.
-            (&[0x10, 0x00], violation("not a fetch stream")),
-            // A stream that ends after its type, without the Request ID.
-            (&[0x05], violation("stream ended before its FETCH_HEADER")),
-            // Serialization Flags 0x80, and 0x8D: 128 and above are only the
-            // two End of Range values (§11.4.4).
-            (
-                &[0x05, 0x00, 0x80, 0x80],
-                violation("unknown serialization flags"),
-            ),
-            (
-                &[0x05, 0x00, 0x80, 0x8d],
-                violation("unknown serialization flags"),
-            ),
-            // The first Object without a Group ID, without an Object ID,
-            // without a priority, and with the Subgroup of a prior Object.
-            (
-                &[0x05, 0x00, 0x14, 0x00, 0x07, 0x00],
-                violation("no prior group id"),
-            ),
-            (
-                &[0x05, 0x00, 0x18, 0x00, 0x07, 0x00],
-                violation("no prior object id"),
-            ),
-            (
-                &[0x05, 0x00, 0x0c, 0x00, 0x00, 0x00],
-                violation("no prior publisher priority"),
-            ),
-            (
-                &[0x05, 0x00, 0x1d, 0x00, 0x00, 0x07, 0x00],
-                violation("no prior subgroup id"),
-            ),
-            // After an indicator, the Subgroup and the priority of an Object
-            // that never came.
-            (
-                &[0x05, 0x00, 0x81, 0x0c, 0x03, 0x01, 0x11, 0x07, 0x00],
-                violation("no prior subgroup id"),
-            ),
-            (
-                &[0x05, 0x00, 0x81, 0x0c, 0x03, 0x01, 0x00, 0x00],
-                violation("no prior publisher priority"),
-            ),
-            // The Subgroup of a prior Object that was a datagram.
-            (
-                &[0x05, 0x00, 0x5c, 0x01, 0x00, 0x07, 0x00, 0x01, 0x00],
-                violation("no prior subgroup id"),
-            ),
-            // Subgroup ID 2^64 - 1 present (flags 0x1F), then the prior
-            // Subgroup plus one.
-            (
-                &[
-                    0x05, 0x00, 0x1f, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                    0x00, 0x07, 0x00, 0x02, 0x00,
-                ],
-                violation("id exceeds 64 bits"),
-            ),
-            // Object ID 2^64 - 1 (flags 0x1C), then the prior Object ID plus
-            // one (flags 0x00), and the prior one plus the Object ID Delta 1
-            // (flags 0x04).
-            (
-                &[
-                    0x05, 0x00, 0x1c, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                    0x07, 0x00, 0x00, 0x00,
-                ],
-                violation("id exceeds 64 bits"),
-            ),
-            (
-                &[
-                    0x05, 0x00, 0x1c, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                    0x07, 0x00, 0x04, 0x01, 0x00,
-                ],
-                violation("id exceeds 64 bits"),
-            ),
-            // Object Properties of 1025 bytes announced, over the limit.
-            (
-                &[0x05, 0x00, 0x3c, 0x00, 0x00, 0x07, 0x84, 0x01],
-                Error::ObjectTooLarge { limit: LIMIT },
-            ),
-            // Mandatory Track Property 0x4000 on an Object (§2.5.1).
-            (
-                &[
-                    0x05, 0x00, 0x3c, 0x00, 0x00, 0x07, 0x04, 0xc0, 0x40, 0x00, 0x01, 0x00,
-                ],
-                Error::MalformedTrack("mandatory track property on an object"),
-            ),
-            // A payload of 1025 bytes announced, over the limit of 1024.
-            (
-                &[0x05, 0x00, 0x1c, 0x00, 0x00, 0x07, 0x84, 0x01],
-                Error::ObjectTooLarge { limit: LIMIT },
-            ),
-            // The stream ends inside an Object.
-            (
-                &[0x05, 0x00, 0x1c, 0x00, 0x00, 0x07, 0x02, 0xaa],
-                violation("stream ended inside a serialized object"),
-            ),
-        ];
-        for (bytes, error) in cases {
-            assert_eq!(
-                decode_stream(bytes, bytes.len(), GroupOrder::Ascending),
-                Err(error.clone()),
-                "{bytes:02x?}"
-            );
+    fn fetch_streams_are_read_or_refused_as_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<4>("moqt-18-verdicts/fetch-stream.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 26);
+        for [name, order, hex, verdict] in rows {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect();
+            let order = match order.as_str() {
+                "ascending" => GroupOrder::Ascending,
+                "descending" => GroupOrder::Descending,
+                other => panic!("{name}: {other}"),
+            };
+            for chunk in [bytes.len(), 1] {
+                let got = match decode_stream(&bytes, chunk, order) {
+                    Ok(_) => "ok".to_string(),
+                    Err(error) => match error.scope() {
+                        ErrorScope::Session(code) => format!("closed:{:#x}", code.code()),
+                        ErrorScope::Subscription { .. } => "malformed".to_string(),
+                        ErrorScope::Stream { .. } => "stopped".to_string(),
+                    },
+                };
+                assert_eq!(got, verdict, "{name}, in pieces of {chunk}");
+            }
         }
     }
 

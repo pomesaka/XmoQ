@@ -2,93 +2,44 @@ import { describe, expect, test } from "bun:test";
 import { classifyDatagram } from "../../src/core/datagram.ts";
 import { createSession } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
-import { hex } from "../helpers.ts";
+import { fixtureTable, hex } from "../helpers.ts";
 
 describe("classifyDatagram (§11, §11.3.1, §11.5.2)", () => {
-	// The varint is that of §1.4.1: one byte below 0x80, and `80 xx` the
-	// two-byte form, which may also carry a small value (non-minimal).
-	test.each([
-		{ name: "the lowest Type", bytes: "00", type: 0n },
-		{ name: "the last Type of 0x00..0x0F", bytes: "0f", type: 15n },
-		{ name: "STATUS alone", bytes: "20", type: 32n },
-		{ name: "STATUS and PROPERTIES", bytes: "21", type: 33n },
-		{ name: "STATUS and ZERO_OBJECT_ID", bytes: "24", type: 36n },
-		{ name: "STATUS and DEFAULT_PRIORITY", bytes: "28", type: 40n },
-		{ name: "the last Type of the form with STATUS", bytes: "2d", type: 45n },
-		{
-			name: "END_OF_GROUP without STATUS, in the two-byte form",
-			bytes: "80 02",
-			type: 2n,
-		},
-		{
-			name: "a Type followed by its fields and payload",
-			bytes: "00 09 00 61",
-			type: 0n,
-		},
-	])("an OBJECT_DATAGRAM: $name ($bytes)", ({ bytes, type }) => {
-		expect(classifyDatagram(hex(bytes))).toEqual({ kind: "object", type });
+	// fixtures/moqt-18-verdicts/datagrams.tsv, which the Rust implementation
+	// reads as well. §11: "An endpoint that receives an unknown datagram type
+	// MUST close the session"; §11.3.1 for the types of the form 0b00X0XXXX
+	// and STATUS with END_OF_GROUP; §11.5.2: "The receiver MUST discard all
+	// data received in a padding datagram". An OBJECT_DATAGRAM is dropped
+	// unread as well (known gap on datagrams).
+	const rows = fixtureTable("moqt-18-verdicts", "datagrams.tsv");
+	test("the table has its 33 rows of 3 columns", () => {
+		expect(rows.map((row) => row.length)).toEqual(Array(33).fill(3));
+	});
+	test.each(rows)("%s: '%s' is %s", (_name, bytes, verdict) => {
+		const kind = classifyDatagram(
+			hex((bytes ?? "").match(/../g)?.join(" ") ?? ""),
+		).kind;
+		expect(kind === "fault" ? "closed:0x3" : "dropped").toBe(verdict ?? "");
 	});
 
+	// What each is taken for, beyond the table.
 	test.each([
-		{ name: "with no Padding Data", bytes: "f0 13 2b 3e 29" },
-		{ name: "with zeros", bytes: "f0 13 2b 3e 29 00 00" },
-		// The sender MUST send zeros; the receiver MUST discard all of it.
-		{ name: "with bytes that are not zero", bytes: "f0 13 2b 3e 29 01" },
-	])("a PADDING DATAGRAM $name", ({ bytes }) => {
-		expect(classifyDatagram(hex(bytes))).toEqual({ kind: "padding" });
-	});
-
-	test.each([
-		{ bytes: "10", reason: "unknown datagram type 0x10" },
-		{ bytes: "1f", reason: "unknown datagram type 0x1f" },
-		{ bytes: "30", reason: "unknown datagram type 0x30" },
-		{ bytes: "40", reason: "unknown datagram type 0x40" },
-		{ bytes: "7f", reason: "unknown datagram type 0x7f" },
-		{ bytes: "80 80", reason: "unknown datagram type 0x80" },
-		{ bytes: "80 a0", reason: "unknown datagram type 0xa0" },
-		// The type of a padding stream (§11.5.1) is none of a datagram.
-		{ bytes: "f0 13 2b 3e 28", reason: "unknown datagram type 0x132b3e28" },
-		{
-			bytes: "22",
-			reason: "datagram type 0x22 has both STATUS and END_OF_GROUP",
-		},
-		{
-			bytes: "23",
-			reason: "datagram type 0x23 has both STATUS and END_OF_GROUP",
-		},
-		{
-			bytes: "26",
-			reason: "datagram type 0x26 has both STATUS and END_OF_GROUP",
-		},
-		{
-			bytes: "27",
-			reason: "datagram type 0x27 has both STATUS and END_OF_GROUP",
-		},
-		{
-			bytes: "2a",
-			reason: "datagram type 0x2a has both STATUS and END_OF_GROUP",
-		},
-		{
-			bytes: "2b",
-			reason: "datagram type 0x2b has both STATUS and END_OF_GROUP",
-		},
-		{
-			bytes: "2e",
-			reason: "datagram type 0x2e has both STATUS and END_OF_GROUP",
-		},
-		{
-			bytes: "2f",
-			reason: "datagram type 0x2f has both STATUS and END_OF_GROUP",
-		},
+		{ bytes: "00 09 00 61", kind: { kind: "object", type: 0n } },
+		{ bytes: "80 02", kind: { kind: "object", type: 2n } },
+		{ bytes: "f0 13 2b 3e 29 01", kind: { kind: "padding" } },
 		{
 			bytes: "80 22",
-			reason: "datagram type 0x22 has both STATUS and END_OF_GROUP",
+			kind: {
+				kind: "fault",
+				reason: "datagram type 0x22 has both STATUS and END_OF_GROUP",
+			},
 		},
-		{ bytes: "", reason: "empty datagram" },
-		{ bytes: "80", reason: "datagram ended inside its type" },
-		{ bytes: "f0 13 2b 3e", reason: "datagram ended inside its type" },
-	])("a fault: '$bytes'", ({ bytes, reason }) => {
-		expect(classifyDatagram(hex(bytes))).toEqual({ kind: "fault", reason });
+		{
+			bytes: "80",
+			kind: { kind: "fault", reason: "datagram ended inside its type" },
+		},
+	])("'$bytes'", ({ bytes, kind }) => {
+		expect(classifyDatagram(hex(bytes))).toEqual(kind);
 	});
 });
 

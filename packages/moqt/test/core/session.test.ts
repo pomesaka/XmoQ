@@ -10,6 +10,7 @@ import type { SubgroupOptions } from "../../src/core/outgoing-subgroups.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
 import type { SessionOutput } from "../../src/core/session-output.ts";
 import {
+	fixtureTable,
 	fromALibrary,
 	hex,
 	isStreamTiming,
@@ -149,6 +150,42 @@ describe("Session", () => {
 			),
 		).toEqual([OBJECT_ON_ALIAS_9]);
 	});
+
+	// fixtures/moqt-18-verdicts/goaway.tsv, which the Rust session reads as
+	// well; this session is a client, so the rows of a server are not read.
+	// GOAWAYs fed in turn after SETUP, on the control stream or on the stream
+	// of a SUBSCRIBE of this session, and whether they are taken or close the
+	// session with which code. §10.4: "MUST close the session with a
+	// PROTOCOL_VIOLATION ... if it receives more than one GOAWAY on the
+	// control stream or on a single request stream"; the Request ID is
+	// "Present only when sent on the control stream", and one of the wrong
+	// parity closes it "with INVALID_REQUEST_ID".
+	test.each(
+		fixtureTable("moqt-18-verdicts", "goaway.tsv").filter(
+			([, role]) => role === "client",
+		),
+	)(
+		"goaway.tsv %s, at a %s, on the %s stream: %s is %s",
+		(_name, _role, stream, bytes, verdict) => {
+			const session = subscribed();
+			const input = hex((bytes ?? "").match(/../g)?.join(" ") ?? "");
+			const outputs =
+				stream === "control"
+					? session.receivePeerUniStreamData(
+							0,
+							new Uint8Array([...hex("af 00 00 00"), ...input]),
+							false,
+						)
+					: session.receiveRequestStreamData(1, input, false);
+			const closed = outputs.find((output) => output.type === "close-session");
+			expect(
+				closed?.type === "close-session"
+					? `closed:0x${closed.code.toString(16)}`
+					: "taken",
+			).toBe(verdict ?? "");
+			expect(session.closed).toBe(verdict !== "taken");
+		},
+	);
 
 	// §10.4: a GOAWAY on a request stream asks for that request to be sent
 	// again; the session tells it and leaves the request, and the session, as
@@ -427,6 +464,43 @@ describe("Session", () => {
 			},
 		]);
 	});
+
+	// fixtures/moqt-18-verdicts/reset-codes.tsv, which the Rust
+	// implementation reads as well: the Stream Reset Error Code (§3.3.3) a
+	// stream is stopped or reset with, by why. A malformed track
+	// (MALFORMED_TRACK, §2.4.2), a limit of this end on one Object (more than
+	// MAX_KEY_VALUE_PAIRS properties), and a subscription that was cancelled.
+	test.each(fixtureTable("moqt-18-verdicts", "reset-codes.tsv"))(
+		"reset-codes.tsv: %s is %s",
+		(why, code) => {
+			const session = subscribed();
+			const cases: Record<string, () => SessionOutput[]> = {
+				"malformed-track": () =>
+					session.receivePeerUniStreamData(
+						0,
+						hex("15 09 00 00 00 00 04 c0 40 00 01 01 61"),
+						false,
+					),
+				"local-limit": () =>
+					session.receivePeerUniStreamData(
+						0,
+						hex(`15 09 00 00 00 00 80 82 ${"02 00 ".repeat(65).trim()}`),
+						false,
+					),
+				cancelled: () => {
+					session.receivePeerUniStreamData(0, hex("14 09 00 00 00"), false);
+					return session.cancelRequest(0n);
+				},
+			};
+			const outputs = cases[why ?? ""]?.();
+			const stopped = outputs?.find((output) => output.type === "stop-sending");
+			expect(
+				stopped?.type === "stop-sending"
+					? `0x${stopped.code.toString(16)}`
+					: undefined,
+			).toBe(code);
+		},
+	);
 
 	test("a cancelled SUBSCRIBE stops its open subgroup streams, resets its request stream and drops later Objects (§10.11, §11.1)", () => {
 		const session = subscribed();
