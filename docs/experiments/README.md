@@ -268,6 +268,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-26 [The pages join their room again](2026-10-26-the-pages-join-their-room-again.md)
 - 2026-10-27 [A muted page sends silence](2026-10-27-a-muted-page-sends-silence.md)
 - 2026-10-27 [A page that is closed writes no last line](2026-10-27-a-page-that-is-closed-writes-no-last-line.md)
+- 2026-10-27 [Claude Code takes part in a meeting, in Chrome](2026-10-27-claude-code-takes-part-in-a-meeting-in-chrome.md)
 - 2026-10-27 [tail -F of a file written anew, and the loop of AGENT.md](2026-10-27-tail-of-a-file-written-anew-and-the-loop-of-agent-md.md)
 - 2026-10-27 [What whisper writes for noise](2026-10-27-what-whisper-writes-for-noise.md)
 
