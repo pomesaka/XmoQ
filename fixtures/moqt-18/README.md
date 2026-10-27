@@ -12,7 +12,7 @@ The tests of both implementations read every file, decode it into the value they
 
 All bytes were captured on 2026-10-10 on macOS 14.4 arm64 over loopback, against the moqtail relay 0.15.0 (`moqtail/0.15.0+dd8623d`, tag `relay@0.15.0`). Namespace `xmoq/phase0`, track `object`.
 
-Two ways of capturing were used.
+Three ways of capturing were used.
 
 - **Relay log.** The relay prints a hex dump for each control message, such as `Subscribe (34 bytes): 03 00 1f ...`. These are the bytes on the wire, not a re-encoding: for a received message the relay prints the slice of its receive buffer that the message occupied, and for a sent message it prints the buffer it writes to the stream next. Read in `libs/moqtail-rs/src/transport/control_stream_handler.rs` of `moqtail/moqtail` at tag `relay@0.15.0` (`send` and `next_message`).
 - **Client trace.** `xmoq-moqt-client --trace` prints the bytes of every chunk as it comes off a stream.

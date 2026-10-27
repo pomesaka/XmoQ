@@ -1,8 +1,10 @@
 //! A `MoQ` Transport draft-18 client over WebTransport, built on `xmoq-moqt`.
 //!
-//! It subscribes to one track and prints the Objects it receives, or publishes
-//! one Object. What it prints to stdout is a contract with the scripts that
-//! drive it; see `report`.
+//! By its mode it subscribes to a track, sends Standalone FETCH requests for
+//! one, publishes one (PUBLISH), announces a namespace and answers the
+//! SUBSCRIBE for its track, subscribes to the namespaces under a prefix, or
+//! asks for a `TRACK_STATUS`, and prints what happens. What it prints to stdout
+//! is a contract with the scripts that drive it; see `report`.
 
 mod auth;
 mod catalog;

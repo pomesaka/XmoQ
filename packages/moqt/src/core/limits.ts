@@ -71,7 +71,15 @@ export interface SessionLimits extends SubgroupStreamLimits {
 	maxPeerFetches: number;
 }
 
-/** Provisional values: the draft sets no maximum and the project has not chosen any. */
+/**
+ * Provisional values: the draft sets no maximum and the project has not chosen any.
+ *
+ * FIXME: one measure and one value for both: the Rust session bounds an
+ * Object by the bytes one subgroup stream holds undecoded
+ * (`subgroup_buffer_limit` of `StreamConfig`), not its payload and its
+ * properties apart, so an Object one session takes the other can stop
+ * (`fixtures/limits/README.md`).
+ */
 const DEFAULT_SESSION_LIMITS: SessionLimits = {
 	maxObjectPayloadLength: 16 * 1024 * 1024,
 	maxObjectPropertiesLength: 64 * 1024,

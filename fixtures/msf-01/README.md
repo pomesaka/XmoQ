@@ -19,14 +19,6 @@ The own Rust client of `main` at `6ad5240c` printed `OBJECT group=0 object=0 sta
 
 It decodes to: `"version": "draft-01"`, `"generatedAt": 1791685571315`, and 13 tracks, all `"packaging": "loc"` and `"isLive": true`.
 
-| Tracks | `role` | `codec` | Other fields |
-|---|---|---|---|
-| `video_400kbps_avc`, `video_600kbps_avc`, `video_900kbps_avc` | `video` | `avc3.4D401F` | `bitrate` (379454, 564523, 848032), `width` 1280, `height` 720, `framerate` 25, `renderGroup` 1, `altGroup` 1, `lang` `und` |
-| `video_400kbps_hevc`, `video_600kbps_hevc`, `video_900kbps_hevc` | `video` | `hev1.1.6.L93.90` | the same fields |
-| `video_400kbps_av1`, `video_600kbps_av1`, `video_900kbps_av1` | `video` | `av01.0.05M.08.0.110.02.02.02.0` | the same fields |
-| `audio_monotonic_128kbps_aac`, `audio_scale_128kbps_aac` | `audio` | `mp4a.40.2` | `bitrate` 134376, `samplerate` 48000, `channelConfig` `"2"`, `renderGroup` 1, `altGroup` 2, `lang` `mon` and `sca` |
-| `audio_monotonic_128kbps_opus`, `audio_scale_128kbps_opus` | `audio` | `opus` | the same, `bitrate` 135200 |
-
 No track has `namespace`, `initRef` or `timescale`, and the catalog has no `initDataList`.
 
 ## `catalogs.tsv`: documents written by hand

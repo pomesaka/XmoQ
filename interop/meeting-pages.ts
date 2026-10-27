@@ -1,7 +1,7 @@
 // A meeting of three pages: each publishes a broadcast of its own
 // (`publishBroadcast`, 640x360 and a tone) under `xmoq/meet/r/<id>`, and
 // takes part with `createMeeting` of `@xmoq/meeting` (`attendMeeting`), as
-// the participants of a meeting do (`docs/scale-and-meetings.md`, Part 2).
+// the participants of a meeting do (the meetings of `docs/architecture.md`).
 // p1 receives the video of the first one who came alone (`mostWatched` 1),
 // so that one who leaves gives the place to the next.
 //

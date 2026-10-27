@@ -1,5 +1,5 @@
 //! A relay with another relay above it: an edge of a tree of relays
-//! (`docs/scale-and-meetings.md`). It is given a namespace prefix, and asks
+//! (the relay of `docs/architecture.md`). It is given a namespace prefix, and asks
 //! the parent relay for a track of it that no session of its own
 //! announced, as it asks a publisher that announced the namespace. §6:
 //! "Given sufficient out of band information, it is valid for a subscriber
