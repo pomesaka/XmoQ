@@ -202,7 +202,12 @@ pub struct HubConfig {
     /// are refused and ends none of their streams fills it with them, after
     /// which every request of that session gets `EXCESSIVE_LOAD`. WHY 2
     /// seconds: it is the time a subscriber has after `PUBLISH_DONE`
-    /// ([`Self::drain_timeout`]).
+    /// ([`Self::drain_timeout`]). The stop is `STOP_SENDING` with
+    /// `CANCELLED`, and the request is forgotten. Held by
+    /// `a_subscriber_that_keeps_its_stream_open_after_publish_done_is_stopped`
+    /// in the tests of this crate and
+    /// `a_request_the_peer_does_not_close_after_publish_done_is_let_go` of
+    /// `xmoq-relay-core`.
     ///
     /// The wait is one of the [`Self::max_timers_per_session`] timers; a
     /// session that has that many gets the direction stopped at once. A
@@ -315,6 +320,15 @@ impl HubConfig {
     /// has 134 seconds, four times that. WHY a least rate, and not only a
     /// time: the time a slow reader may keep a Group alive is then in
     /// proportion to what it is given.
+    ///
+    /// WHY a limit at all: the draft does not say how long a publisher has
+    /// to keep serving a FETCH, and has no parameter for how long a FETCH
+    /// may be read (the delivery timeouts are of subscriptions, §8). §5.2
+    /// has a subscriber keep FETCH state until "the FETCH data stream
+    /// receives a FIN or is reset", so a reset ends it there too. Held by
+    /// `the_whole_of_a_fetch_stream_has_the_least_time_or_its_bytes_at_the_least_rate`
+    /// and `a_subscriber_that_takes_each_piece_in_time_and_the_whole_too_slowly_is_cut`
+    /// below.
     ///
     /// What it does not reach: what fits into the windows of the connection
     /// is written at once and waits there, so a small Group is never slow; a
@@ -971,8 +985,11 @@ impl WriteEnd {
             Self::Finished | Self::Stopped => stream_reset_code::CANCELLED,
             // WHY the same code for both: either way the subscriber is
             // behind what the relay keeps for it. §3.3.3 words the code for
-            // a subscription; the notes have why it is used for a FETCH
-            // (row on a fetch stream that is not taken).
+            // a subscription ("The corresponding subscription has exceeded
+            // the publisher's resource limits and is being terminated"),
+            // and has no code for a FETCH; it is used here for the same
+            // reason. §3.3.3: "The application SHOULD use a relevant error
+            // code when resetting or sending STOP_SENDING on any stream".
             Self::NotTaken | Self::TooSlow => stream_reset_code::TOO_FAR_BEHIND,
             Self::Aborted(code) => code,
             Self::Failed => stream_reset_code::INTERNAL_ERROR,
@@ -1726,7 +1743,11 @@ impl<C: Connection> Hub<C> {
     ///
     /// WHY `NO_ERROR`: §3.5 has no code for it ("`NO_ERROR` (0x0): The
     /// session is being terminated without an error"), and the peer did
-    /// nothing wrong.
+    /// nothing wrong. The draft requires no such limit; why the relay has
+    /// one is at [`HubConfig::idle_session_timeout`]. Held by
+    /// `a_session_that_holds_nothing_is_closed_after_thirty_seconds_and_one_that_holds_something_stays`
+    /// and `the_time_a_session_may_hold_nothing_begins_when_its_last_request_has_gone`
+    /// in the tests of this crate.
     fn idle_due(&mut self) {
         let now = Instant::now();
         let mut pending = VecDeque::new();
@@ -2522,7 +2543,19 @@ impl<C: Connection> Hub<C> {
     }
 
     /// The subscriber changed its `SUBGROUP_DELIVERY_TIMEOUT`
-    /// ([`OutgoingSubgroup::set_delivery_timeout`]).
+    /// ([`OutgoingSubgroup::set_delivery_timeout`]). The new time holds for
+    /// every stream of the subscription whose end the relay learns after
+    /// the update, the ones open when it came included; a stream whose
+    /// timer runs keeps the time it was finished with. **Provisional.**
+    ///
+    /// WHY a running timer is left as it is: §8 starts the timer "once it
+    /// becomes aware that all of the objects on the subgroup have been
+    /// published", and says nothing of a timeout that changes while a timer
+    /// runs. §10.9.1 leans the same way for a filter: "it might still
+    /// receive Objects outside the new range if the publisher sent them
+    /// before the update was processed". Held by
+    /// `an_update_of_the_delivery_timeout_holds_for_the_streams_that_end_after_it`
+    /// in the tests of this crate.
     fn set_delivery_timeout(&self, out_stream: OutStreamKey, asked: Option<u64>) {
         if let Some((_, writer)) = self.out_streams.get(&out_stream) {
             writer.set_delivery_timeout(asked.map(Duration::from_millis));
@@ -3034,7 +3067,10 @@ impl<C: Connection> Hub<C> {
         // a capsule on another stream. A peer would then learn of a control
         // stream that was reset before it learns why, or instead of it, in
         // whichever order the frames came. The draft has nothing on the
-        // streams of a session that is terminated (§3.5).
+        // streams of a session that is terminated (§3.5). The code of the
+        // close is held by `a_protocol_violation_closes_that_session_with_its_code`;
+        // that the streams are kept is held by no test: on the in-memory
+        // connection of the tests the close comes first either way.
         let of_the_session: Vec<OutStreamKey> = self
             .out_streams
             .iter()
@@ -3282,6 +3318,13 @@ fn connection_ended_line(session: SessionKey, end: &ConnectionEnd) -> String {
 /// says `PUBLISH_DONE` and waits for the relay's FIN. Seen once in CI and in
 /// 2 of 400 runs on a loaded machine
 /// (`docs/experiments/2026-10-10-disconnects-through-own-relay.md`).
+///
+/// Held by `a_publisher_that_waits_for_the_relays_fin_before_closing_loses_nothing`
+/// and `a_publisher_that_closes_without_waiting_can_lose_its_last_object` in
+/// the tests of this crate; that a subgroup stream cut short with the
+/// connection is reset with `CANCELLED` downstream, by
+/// `a_stream_that_is_cut_short_is_reset_downstream` of `xmoq-relay-core`.
+/// The limit on the wait is held by no test.
 async fn watch_session<C: Connection>(
     session: SessionKey,
     connection: Arc<C>,
@@ -3307,7 +3350,11 @@ async fn watch_session<C: Connection>(
 
 /// How long after a `STOP_SENDING` on the relay's control stream the peer's
 /// connection may end for the stop to count as part of its leaving.
-/// Provisional.
+/// Provisional. Past it the session is closed with `PROTOCOL_VIOLATION`
+/// (`control_stopped`). Held by
+/// `a_stop_of_the_control_stream_is_a_peer_leaving_when_its_connection_ends_right_after`
+/// and `stopping_the_relays_control_stream_closes_the_session` in the tests
+/// of this crate.
 const LEAVING_GRACE: Duration = Duration::from_millis(200);
 
 /// Writes the relay's control stream of one session.
@@ -3372,8 +3419,10 @@ async fn control_stopped<C: Connection>(
     if leaving.await.is_ok() {
         return;
     }
-    // §3.3: closing a control stream is a PROTOCOL_VIOLATION, and a
-    // STOP_SENDING closes this one.
+    // §3.3: "A control stream MUST NOT be closed at the underlying
+    // transport layer during the session's lifetime. Doing so results in
+    // the session being closed as a PROTOCOL_VIOLATION", and a STOP_SENDING
+    // closes this one.
     let broken = Envelope::Broken {
         session,
         code: TerminationCode::ProtocolViolation,
@@ -3418,7 +3467,11 @@ async fn write_request<C: Connection>(
                         log.print(stop_sending_received_line(session, stream, code));
                     }
                     // §3.3.2, §5.1: STOP_SENDING on a request stream cancels
-                    // the request. The relay's half is reset in turn.
+                    // the request. The relay's half is reset in turn (§5.1.1:
+                    // "The Publisher can destroy subscription state as soon
+                    // as it has received STOP_SENDING. It MUST reset any open
+                    // streams associated with the SUBSCRIBE"). Held by
+                    // `stop_sending_on_a_subscribe_stream_cancels_the_subscription`.
                     send.reset(stream_reset_code::CANCELLED);
                     let closed = Event::RequestClosed {
                         session,

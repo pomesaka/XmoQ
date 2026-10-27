@@ -601,6 +601,32 @@ fn the_properties_and_the_largest_object_of_a_track_with_two_publishers() {
 }
 
 #[test]
+fn an_object_on_a_stream_the_relay_stopped_does_not_count_for_the_largest_object() {
+    let mut relay = relay_with_two_publishers();
+    stream_from(&mut relay, PUBLISHER, 7, 1);
+    object_from(&mut relay, PUBLISHER, 7, 0);
+    // Bob's stream for the same Subgroup is stopped; Object 5 on it is not
+    // counted.
+    assert_eq!(stream_from(&mut relay, BOB, 8, 1), [stopped(BOB, 8)]);
+    assert_eq!(object_from(&mut relay, BOB, 8, 5), []);
+    assert_eq!(
+        subscribe_to_track(&mut relay, ALICE),
+        [Action::SendRequest {
+            session: ALICE,
+            stream: StreamKey(0),
+            message: ControlMessage::SubscribeOk(SubscribeOk {
+                track_alias: 0,
+                parameters: vec![Parameter::LargestObject(Location {
+                    group: 1,
+                    object: 0,
+                })],
+                track_properties: vec![],
+            }),
+        }]
+    );
+}
+
+#[test]
 fn a_session_that_goes_takes_its_tracks_and_leaves_the_ones_it_shared() {
     let mut relay = relay_with_two_publishers();
     // The publisher has a second track, "b", of its own, and Alice subscribes
@@ -2088,6 +2114,23 @@ fn a_subscribe_ok_the_track_cannot_take_still_ends_the_source_that_had_its_alias
     );
     let counts = relay.counts();
     assert_eq!((counts.tracks, counts.sources), (1, 4));
+}
+
+#[test]
+fn a_stream_that_opens_while_its_source_drains_is_taken() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    // PUBLISH_DONE counts a stream that has not come yet.
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 1),
+    });
+    assert_eq!(
+        data_stream_opened(&mut relay, 7),
+        [open_data_stream(ALICE, 0, header(0))]
+    );
+    assert_eq!(object_arrived(&mut relay, 7, 0), [send_object(0, 0)]);
 }
 
 #[test]

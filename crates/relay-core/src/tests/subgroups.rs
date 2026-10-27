@@ -151,6 +151,23 @@ fn a_stream_that_ends_without_an_object() {
     }
 }
 
+#[test]
+fn a_subgroup_whose_stream_ended_with_a_fin_and_no_object_counts_as_delivered_whole() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    stream_opened(&mut relay, 7, header(UPSTREAM_ALIAS));
+    assert_eq!(
+        data_stream_closed(&mut relay, 7, StreamEnd::Fin),
+        [finished(0)]
+    );
+    // A second stream for Subgroup 0 is one after a Subgroup delivered
+    // whole: read for the check alone.
+    assert_eq!(
+        stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS)),
+        [checked(8)]
+    );
+}
+
 /// What happens to the first stream of Subgroup 0 of Group 3, stream 7,
 /// before the same publisher opens a second one for the Subgroup, stream 8.
 #[derive(Debug, Clone, Copy)]

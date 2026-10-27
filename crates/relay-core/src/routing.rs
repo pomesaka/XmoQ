@@ -111,6 +111,17 @@ pub const MAX_WAITING_SUBSCRIBERS: usize = 64;
 /// example, a relay might limit the maximum rendezvous timeout to protect
 /// its resources"). **Provisional**: the longest it waits for a publisher
 /// to open a fetch stream, and the time a session may hold nothing.
+///
+/// A SUBSCRIBE without the parameter gets `DOES_NOT_EXIST` at once (§10.2.6:
+/// "If `RENDEZVOUS_TIMEOUT` is absent, the default is 0", and then "The relay
+/// MUST immediately return `REQUEST_ERROR` with error code `DOES_NOT_EXIST` if
+/// no publisher is available"). Held by
+/// `a_subscribe_goes_to_every_publisher_of_a_matching_namespace` and
+/// `a_session_has_sixteen_subscribes_held_and_the_next_is_not` here, and by
+/// `a_subscribe_is_held_for_as_long_as_it_asks_and_the_relay_allows`,
+/// `a_session_has_sixteen_subscribes_held_and_the_next_is_not` and
+/// `the_relay_holds_subscribes_for_a_thousand_and_twenty_four_tracks_whichever_way_they_come`
+/// of `xmoq-relay`.
 pub const MAX_RENDEZVOUS_MS: u64 = 30_000;
 
 /// SUBSCRIBEs of one session the relay holds for a publisher to appear.
@@ -697,8 +708,12 @@ impl Relay {
         true
     }
 
-    /// §9.5: withdrawing stops new subscriptions for the namespace. What is
-    /// already subscribed or asked for stays.
+    /// §9.5: withdrawing stops new subscriptions for the namespace ("When a
+    /// publisher wants to stop new subscriptions for a published namespace,
+    /// it cancels the request"). What is already subscribed or asked for
+    /// stays. Held by `the_relays_subscription_goes_on_when_the_namespace_it_was_routed_by_is_withdrawn`
+    /// and the withdrawing cases of
+    /// `a_subscribe_goes_to_every_publisher_of_a_matching_namespace`.
     pub(crate) fn withdraw_namespace(&mut self, session: SessionKey, stream: StreamKey) {
         self.namespaces
             .retain(|entry| !(entry.session == session && entry.stream == stream));
@@ -780,7 +795,16 @@ impl Relay {
     ///
     /// Left out are the sessions that are a source of the track, that are
     /// asked for it, and that were asked and did not become a source
-    /// ([`MAX_DECLINED_PUBLISHERS`]).
+    /// ([`MAX_DECLINED_PUBLISHERS`]): they refused, did not answer in time or
+    /// went another way, and are asked again once they announce anew. A
+    /// track that has a source has the others asked as well (§9.5: "This
+    /// includes matching both Established subscriptions on the Full Track
+    /// Name and Namespace Prefix Matching against published Namespaces").
+    /// Held by `a_subscribe_goes_to_every_publisher_of_a_matching_namespace`,
+    /// `no_more_publishers_are_asked_than_the_track_has_room_for`,
+    /// `a_publisher_that_did_not_become_a_source_is_not_asked_again` and
+    /// `a_track_remembers_a_bounded_number_of_publishers_that_declined`, with
+    /// the other tests of `tests/routing.rs` on who is asked.
     ///
     /// WHY no more than the track has room for, against that MUST: a
     /// publisher that accepts would be cancelled at once when the track is
@@ -987,11 +1011,15 @@ impl Relay {
         // where FORWARD may not appear (§10.2.12, §10.2.1): a SUBSCRIBE that
         // carries it cannot be answered by such a publisher.
         //
-        // Nothing else of the downstream SUBSCRIBE is copied: §7 keeps its
-        // priorities out, and what a token of the subscriber means to the
-        // publisher is undecided. The NEW_GROUP_REQUEST is, and the hold of
-        // those that wait is, for the parent relay
-        // (`Self::ask_the_publishers`), which gets the relay's own token.
+        // Nothing else of the downstream SUBSCRIBE is copied: no Subscription
+        // Filter, so the subscription is unfiltered and serves every
+        // subscriber (§10.2.9: "If omitted from SUBSCRIBE or PUBLISH_OK, the
+        // subscription is unfiltered"), §7 keeps its priorities out, and what a token of the
+        // subscriber means to the publisher is undecided. The
+        // NEW_GROUP_REQUEST is, and the hold of those that wait is, for the
+        // parent relay (`Self::ask_the_publishers`), which gets the relay's
+        // own token. Held by `a_subscribe_goes_to_every_publisher_of_a_matching_namespace`
+        // and `the_relays_subscribe_carries_the_new_group_request_of_the_subscriber_it_is_sent_for`.
         let parameters = new_group
             .map(Parameter::NewGroupRequest)
             .into_iter()

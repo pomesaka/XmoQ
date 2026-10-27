@@ -135,6 +135,69 @@ fn asked_of_bob() -> (Relay, OwnRequestKey) {
     (relay, own)
 }
 
+#[test]
+fn a_track_status_is_asked_without_the_requesters_parameters_and_past_a_source_on_its_way_out() {
+    // (case; the track; whether its source has said PUBLISH_DONE, with a
+    //  stream still to come; the parameters of Alice's TRACK_STATUS)
+    let cases: [(&str, &[u8], bool, Vec<Parameter>); 2] = [
+        (
+            "a track without a source, asked with a token",
+            b"b",
+            false,
+            vec![Parameter::AuthorizationToken(vec![1])],
+        ),
+        ("a track whose source is on its way out", b"a", true, vec![]),
+    ];
+    for (name, track_name, on_its_way_out, parameters) in cases {
+        let mut relay = relay_with_track();
+        if on_its_way_out {
+            relay.step(Event::RequestMessage {
+                session: PUBLISHER,
+                stream: StreamKey(0),
+                message: publish_done(0x2, 1),
+            });
+        }
+        relay.step(Event::RequestOpened {
+            session: BOB,
+            stream: StreamKey(0),
+            first: ControlMessage::PublishNamespace(PublishNamespace {
+                request_id: 0,
+                track_namespace: namespace(),
+                parameters: vec![],
+            }),
+        });
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: ASKING,
+            first: ControlMessage::TrackStatus(Subscribe {
+                request_id: 0,
+                full_track_name: track(track_name),
+                parameters,
+            }),
+        });
+        let sent: Vec<&ControlMessage> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::OpenRequest {
+                    session: BOB,
+                    message,
+                    ..
+                } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            [&ControlMessage::TrackStatus(Subscribe {
+                request_id: 1,
+                full_track_name: track(track_name),
+                parameters: vec![],
+            })],
+            "{name}: {actions:?}"
+        );
+    }
+}
+
 /// What becomes of Alice's `TRACK_STATUS` that the relay asked Bob for.
 #[derive(Debug, Clone, Copy)]
 enum Then {

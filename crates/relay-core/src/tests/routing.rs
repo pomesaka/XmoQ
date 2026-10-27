@@ -788,13 +788,22 @@ fn the_relays_subscribe_carries_the_new_group_request_of_the_subscriber_it_is_se
             vec![Parameter::NewGroupRequest(9)],
             vec![Parameter::NewGroupRequest(9)],
         ),
-        // Nothing else of it is copied.
+        // Nothing else of it is copied: no priority, no FORWARD and no
+        // filter, so the relay's subscription has Forward State 1 and is
+        // unfiltered.
         (
             vec![
                 Parameter::SubscriberPriority(3),
                 Parameter::NewGroupRequest(9),
             ],
             vec![Parameter::NewGroupRequest(9)],
+        ),
+        (vec![Parameter::Forward(false)], vec![]),
+        (
+            vec![Parameter::SubscriptionFilter(
+                xmoq_moqt::params::SubscriptionFilter::LargestObject,
+            )],
+            vec![],
         ),
     ];
     for (parameters, expected) in cases {
@@ -905,6 +914,24 @@ fn a_new_group_request_reaches_a_publisher_the_relay_subscribed_to() {
             );
         }
     }
+}
+
+#[test]
+fn the_relays_subscription_goes_on_when_the_namespace_it_was_routed_by_is_withdrawn() {
+    let mut relay = relay_with_routed_track();
+    relay.step(Event::RequestClosed {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        how: RequestEnd::Aborted,
+    });
+    // No namespace; the relay's request, the track and Alice's
+    // subscription are there.
+    assert_eq!(routed(&relay), (0, 0, 1, 1, 1));
+    assert_eq!(
+        data_stream_opened(&mut relay, 7),
+        [open_data_stream(ALICE, 0, header(0))]
+    );
+    assert_eq!(object_arrived(&mut relay, 7, 0), [send_object(0, 0)]);
 }
 
 #[test]
@@ -1033,6 +1060,11 @@ fn a_track_that_came_with_publish_stays_without_subscribers() {
         how: RequestEnd::Aborted,
     });
     assert_eq!(held(&relay), (3, 1, 0, 0, 0));
+    // The publisher was answered with Forward State 1 (`relay_with_track`)
+    // and goes on sending: what it sends goes to nobody, and nothing is
+    // asked of it.
+    assert_eq!(data_stream_opened(&mut relay, 7), []);
+    assert_eq!(object_arrived(&mut relay, 7, 0), []);
 }
 
 #[test]
