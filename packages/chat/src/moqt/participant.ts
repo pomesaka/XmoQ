@@ -201,7 +201,7 @@ export interface ChatParticipant {
  * `HISTORY_LINES` on coming, and the lines after the last one had each time
  * its subscription is made again, for as long as the session lasts. WHY a
  * RENDEZVOUS_TIMEOUT on the SUBSCRIBE: the gatherer publishes a room only
- * once it follows somebody in it (`crates/chat/README.md`), so the first
+ * once it follows somebody in it (`crates/chat/src/bin/xmoq-chat/session.rs`), so the first
  * participant's SUBSCRIBE would otherwise come before the room's PUBLISH
  * and be refused.
  *

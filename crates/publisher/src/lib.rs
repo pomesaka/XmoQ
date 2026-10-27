@@ -9,8 +9,11 @@
 //! requests the relay opens ([`requests`]), those the client opens itself
 //! ([`own`]), the FETCH requests being
 //! answered and the tasks that answer them ([`answers`], by which the Rust
-//! client answers too), and the tasks that write the other streams
-//! ([`streams`]).
+//! client answers too), the tracks a client publishes by a key of its own
+//! ([`publishing`]), and the tasks that write the other streams
+//! ([`streams`]), whose bounds belong to every client that uses it. The
+//! receiving side of a viewer (its SUBSCRIBE, the catalog, the Timestamps of
+//! LOC) is not here.
 //!
 //! WHY a crate of its own, apart from the gatherer: a transcriber of the
 //! broadcasts, and an agent in a meeting, serve tracks the same way, and

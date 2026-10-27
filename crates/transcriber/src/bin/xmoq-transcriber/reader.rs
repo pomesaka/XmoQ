@@ -4,7 +4,7 @@
 //!
 //! WHY a thread and not a task: a reader holds the thread it reads on for
 //! as long as it reads (whisper.cpp a twentieth of the piece's length and
-//! more, `crates/speech/README.md`), and the session's loop must go on
+//! more, `crates/speech/src/lib.rs`), and the session's loop must go on
 //! meanwhile. WHY readers for every track and not one for each: whisper.cpp
 //! loads its model once, and each reader is a state of its own over it
 //! (`--readers`, 1 by default).

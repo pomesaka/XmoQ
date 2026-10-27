@@ -4,9 +4,9 @@ The pauses a client waits before it asks again: for a track on the same session 
 
 | File | Read by |
 |---|---|
-| `same-session.tsv` | [`xmoq-again`](../../crates/again/README.md) (`AskAgain`) and `@xmoq/moqt` (`createAskAgain`, `packages/moqt/src/core/again.ts`) |
+| `same-session.tsv` | [`xmoq-again`](../../crates/again/src/lib.rs) (`AskAgain`) and `@xmoq/moqt` (`createAskAgain`, `packages/moqt/src/core/again.ts`) |
 | `go-away-behind.tsv` | [`xmoq-moqt-io`](../../crates/moqt-io/src/client.rs) (`client::go_away_behind`, which the terminal viewer, the agent and the Rust client wait by) and `@xmoq/moqt` (`goAwayBehind`, `packages/moqt/src/webtransport/keep-moving.ts`) |
-| `next-session.tsv` | `@xmoq/moqt` (`createNextSession`, the same file) and [`xmoq-again`](../../crates/again/README.md) (`NextSession`, which `xmoq-watch`, `xmoq-agent`, `xmoq-chat` and `xmoq-transcriber` go by) |
+| `next-session.tsv` | `@xmoq/moqt` (`createNextSession`, the same file) and [`xmoq-again`](../../crates/again/src/lib.rs) (`NextSession`, which `xmoq-watch`, `xmoq-agent`, `xmoq-chat` and `xmoq-transcriber` go by) |
 
 What a Retry Interval on the wire means in milliseconds is in [`fixtures/retry-interval/`](../retry-interval/README.md); these rows begin from the milliseconds.
 

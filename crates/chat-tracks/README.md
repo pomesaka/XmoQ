@@ -1,12 +1,15 @@
 # xmoq-chat-tracks
 
-The tracks of the chat (decided on 2026-10-24), as every side of it uses them. No input or output, and nothing to build in C: the terminal viewer depends on it without the store of the gatherer ([`xmoq-chat`](../chat/README.md), whose `rusqlite` needs a C compiler).
+The tracks of the chat, as every side of it uses them: the gatherer ([`xmoq-chat`](../chat/README.md)), the terminal viewer ([`xmoq-watch`](../watch/README.md)), the reader for agents ([`xmoq-agent`](../agent/README.md)) and the pages ([`@xmoq/chat`](../../packages/chat/README.md)). No input or output, and nothing to build in C: the terminal viewer depends on it without the store of the gatherer, whose `rusqlite` needs a C compiler.
 
-| Module | What it has |
-|---|---|
-| `names` | `Room`, a kind (`broadcast` or `meeting`) and a name, read from and written as `<kind>/<room>`; `person_namespace` (`xmoq/chat/<kind>/<room>/<name>`), `room_namespace` (`xmoq/chat/<kind>/<room>`), the tracks of a participant (`PersonTrack`: `said`, `reacted`) and of a room (`RoomTrack`: `lines`, `reactions`, `present`) with `person_track` and `room_track`, the participant a namespace is of, and which of them a track is (`track_of`) |
-| `payloads` | `Said` with `read_said` and `Said::payload` (`{"text","sentAt"}`); `Line` with `read_line` and `Line::payload` (`{"name","text","sentAt","at"}`); `Malformed`, why a payload is no line |
-| `reactions` | `Reacted` with `read_reacted` and `Reacted::payload` (`{"emoji","sentAt"}`); `Reactions` with `read_reactions` and `Reactions::payload` (`{"counts","at"}`, the counts in their order); `Present` with `read_present` and `Present::payload` (`{"count","at"}`); an emoji is 1 to 8 UTF-16 units (`is_emoji`) |
-| `limits` | `Limits` and its defaults: 512 bytes of text a line, 5 lines a second a person, 1,000 lines a FETCH; the reactions counted over 100 ms, 5 a second a person, 16 emoji a while (provisional); how far a setting may take them |
+| Who | Announces | Track | One Group | Payload of its Object 0 |
+|---|---|---|---|---|
+| A participant | `PUBLISH_NAMESPACE` `xmoq/chat/<kind>/<room>/<name>` | `said` | one line | `{"text": string, "sentAt": number}` |
+| A participant | the same | `reacted` | one reaction | `{"emoji": string, "sentAt": number}` |
+| The gatherer | PUBLISH (why, at the top of `crates/chat/src/bin/xmoq-chat/session.rs`) | `lines` of `xmoq/chat/<kind>/<room>` | one line; the Group ID is its number in the room | `{"name": string, "text": string, "sentAt": number, "at": number}`, in that order |
+| The gatherer | PUBLISH | `reactions` of `xmoq/chat/<kind>/<room>` | what one while (`--reaction-batch-ms`) that had reactions counted; the Group ID is the gatherer's clock | `{"counts": {emoji: number, ...}, "at": number}`, the emoji in the order each came first |
+| The gatherer | PUBLISH | `present` of `xmoq/chat/<kind>/<room>` | how many are in the room, at each change; the Group ID is the gatherer's clock | `{"count": number, "at": number}`, no names |
 
-What the names and the payloads read as are the shared tables of [`fixtures/chat-tracks/`](../../fixtures/chat-tracks/README.md); the TypeScript reader of [`@xmoq/chat`](../../packages/chat/README.md) reads those of the payloads as well.
+`<kind>` is `broadcast` or `meeting`. `sentAt` is the sender's clock and `at` the gatherer's when it took the line, ended the while or counted the room, all milliseconds since the Unix epoch. `name` is the last field of the sender's namespace. An emoji is 1 to 8 UTF-16 units. The limits of a line and of the reactions, with their defaults, are `src/limits.rs`.
+
+What the names and the payloads read as are the shared tables of [`fixtures/chat-tracks/`](../../fixtures/chat-tracks/README.md), whose tables of the payloads `@xmoq/chat` reads as well.

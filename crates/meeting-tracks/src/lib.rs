@@ -1,6 +1,5 @@
-//! The namespaces of a meeting (decided on 2026-10-25,
-//! `docs/scale-and-meetings.md`), as every side uses them: every
-//! participant publishes a broadcast of its own under
+//! The namespaces of a meeting (`docs/scale-and-meetings.md`), as every
+//! side uses them: every participant publishes a broadcast of its own under
 //! `xmoq/meet/<room>/<id>` ([`participant`]), and is found with one
 //! `SUBSCRIBE_NAMESPACE` for `xmoq/meet/<room>` ([`prefix`]); the room's
 //! seat gives a token to subscribe to `xmoq/meet/<room>/*`

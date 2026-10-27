@@ -1,5 +1,11 @@
 //! The model of voice activity of whisper.cpp (Silero), through `whisper-rs`:
-//! with [`crate::whisper`], the files that use it.
+//! with [`crate::whisper`], the files that use it. So every reader of
+//! [`crate::engine`] needs whisper.cpp to be built, the `command` one too.
+//!
+//! WHY it is not moved to another runtime: the cutting is outside the
+//! reader and works as it is; moving it would be a change of the cutting,
+//! measured again, for a build that only a transcriber without whisper.cpp
+//! would gain.
 
 use std::path::Path;
 

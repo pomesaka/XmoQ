@@ -4,6 +4,27 @@
 // `?source=camera` takes the camera; without it the page paints a clock.
 // The sound is a tone that goes up and down, made by the page;
 // `?audio=mic` takes the microphone, `?audio=none` sends no audio track.
+//
+// Its other flags, each a query of its address and each described where it
+// is read; "a trial" is something tried behind the flag and not the demo's
+// way. Those every page of the broadcast takes (`room`, `token`, `via`,
+// `uni`, `diag`, `timer`, `chatCatchUpLines`) are at the top of `room.ts`,
+// `../lib/relay.ts`, `../lib/page.ts` and `../lib/chat.ts`.
+//
+//   ?size=360|720|1080      the picture's size (360 when left out)
+//   ?bitrate=N              bits a second of the video (the size's own)
+//   ?keyint=MS              a key frame every so many milliseconds (1000)
+//   ?picture=busy           a picture that fills the bitrate it asks for
+//   ?audioGroup=N           pieces of sound in a Group, and so on a stream
+//   ?audioPriority=N        the Publisher Priority of the sound's streams
+//   ?mapping=stream-per-object
+//                           every Object of the video on a stream of its own
+//   ?ladder=1               a trial: a second, small version of the video
+//   ?dynamic=MS             a trial: dynamic Groups, the shortest MS long
+//   ?stamp=least            both encoders lay their source's times onto the
+//                           wall clock by the least of the last minute
+//   ?clockSkewPpm=N, ?toneSkewPpm=N, ?canvasClock=performance
+//                           for measuring two clocks that move apart
 
 import {
 	type AudioTrackEncoder,

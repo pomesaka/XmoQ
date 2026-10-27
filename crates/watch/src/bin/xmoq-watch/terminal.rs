@@ -1,4 +1,9 @@
 //! The terminal itself: its line mode, its keys, and the size of its window.
+//!
+//! WHY `rustix`: the workspace forbids `unsafe`, and `termios` and the
+//! window's size are system calls, which `rustix` has as safe functions.
+//! WHY NOT `crossterm`: it would do as well, and brings its own event loop
+//! and screen handling for the two calls that are needed; it was not tried.
 
 use std::io::Read;
 use std::sync::{Mutex, PoisonError};

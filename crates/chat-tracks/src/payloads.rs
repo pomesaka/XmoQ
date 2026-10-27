@@ -1,5 +1,5 @@
 //! What a line says, as a participant sends it on `said` and as the gatherer
-//! sends it on `lines` (the payloads decided on 2026-10-24). The shared rows
+//! sends it on `lines`. The shared rows
 //! that the TypeScript side reads too are in `fixtures/chat-tracks/`.
 //!
 //! `said`, one Object a Group: `{"text": string, "sentAt": number}`.

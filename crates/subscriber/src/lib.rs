@@ -8,6 +8,12 @@
 //! ([`namespaces`]), and the requests and the events of the session they go
 //! by ([`session`]).
 //!
+//! The name of the catalog track and the most a catalog may be are
+//! `xmoq-msf`'s. What a client of each role values (how many of the latest
+//! items of a followed track it fetches, how many it catches up) is the
+//! caller's: the chat's are `RECENT_LINES` and `CATCH_UP_LINES` of
+//! `xmoq-viewer`.
+//!
 //! WHY a crate of its own, apart from the viewers: the gatherer of the chat
 //! and the transcriber subscribe to tracks of others too, and a part that
 //! needed this later could not depend on the viewers' and would write its

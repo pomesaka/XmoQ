@@ -1,5 +1,5 @@
-//! The payloads of a room's reactions and of how many are in it (decided on
-//! 2026-10-26). The shared rows that the TypeScript side reads too are in
+//! The payloads of a room's reactions and of how many are in it. The shared
+//! rows that the TypeScript side reads too are in
 //! `fixtures/chat-tracks/`.
 //!
 //! `reacted`, a participant's, one Object a press:

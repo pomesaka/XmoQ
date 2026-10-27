@@ -971,6 +971,11 @@ pub fn read_peer_streams(
         queue,
         |event| event,
     ));
+    // WHY no more than 16 requests of the peer wait, after which the
+    // readers stop and flow control holds the peer: the terminal viewer
+    // refuses them only once its broadcast plays, nothing plays before its
+    // SUBSCRIBEs are answered, and a relay opens no request towards a
+    // viewer. Provisional.
     let (asks, asked) = mpsc::channel(16);
     kept.readers.push(read_request_streams(
         Arc::clone(connection),

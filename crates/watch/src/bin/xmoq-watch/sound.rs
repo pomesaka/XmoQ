@@ -11,6 +11,11 @@
 //! times libopus's time. WHY NOT libopus (the crate `opus`): a C compiler
 //! and cmake in every build. WHY NOT `opus-pure`, a fork of `opus-rs` as
 //! close and as fast: two contributors, where `opus-rs` has six.
+//!
+//! What it costs: much `unsafe` of its own (181 blocks and 71 functions in
+//! the `src/` of 0.1.39, counted and not read), and a 0.x crate with 37
+//! releases in eight months, whose API can change from one to the next; the
+//! version is pinned (`=0.1.39` in `Cargo.toml`).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
