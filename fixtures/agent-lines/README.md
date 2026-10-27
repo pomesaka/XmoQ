@@ -1,11 +1,12 @@
 # The lines an agent reads and writes
 
-The files of `events/` that a reader writes for an agent, the lines in them, and how a line the agent writes back is read: [`xmoq-agent`](../../crates/agent/README.md) (its `--out`, its stdin), and the meeting's page through a folder (`@xmoq/meeting`). An agent reads the two in the same way, so the two write the same files and lines for the same events; both read `lines.tsv`, `event-files.tsv`, `inbox.tsv` and `inbox-reads.tsv` in their tests.
+The files of `events/` that a reader writes for an agent, the lines in them, and how a line the agent writes back is read: [`xmoq-agent`](../../crates/agent/README.md) (its `--out`, its stdin), and the meeting's page through a folder (`@xmoq/meeting`). An agent reads the two in the same way, so the two write the same files and lines for the same events, and give it the same guide; both read `lines.tsv`, `event-files.tsv`, `inbox.tsv`, `inbox-reads.tsv`, `AGENT.md` and `call.tsv` in their tests.
 
 ## The folder
 
 | Name | What it is |
 |---|---|
+| `AGENT.md` | The guide for an agent, the text of `AGENT.md` here, put there anew each time the writing begins |
 | `events/<number>.jsonl` | The lines of one write, about a second of them, in the order they were written. Never changed after it is whole. `<number>` is the writer's clock in milliseconds since the Unix epoch when it wrote the file, in 13 digits at the least (padded with `0`), or one more than the newest number there where the clock is not after it (`event-files.tsv`); so the names sort as the files were written. A file that is there and empty is being written: the page makes the file before it moves its lines into it. The lines of the folder are the files' lines, in the order of their names |
 | `inbox.txt` | What the agent adds lines to (`>>`); read again every second. What is in it when the reader begins is passed over |
 | `frames/<when the writing began, ms>/` | The pictures `frame` lines name |
@@ -94,3 +95,17 @@ What a reader reads of `inbox.txt` as it is now, after the read before. Six colu
 | 4 | The first bytes of the file at the read before, as a string of JSON |
 | 5 | The lines read, as a list of JSON; `null` for one over the limit, which is not read |
 | 6 | The byte where the next read begins |
+
+## `AGENT.md`
+
+The text each reader puts in its folder as `AGENT.md`, as it is. The loop in it was run in dash, bash and zsh of macOS on 2026-10-27, with an empty file being written among the files, a name `.<number>.jsonl.tmp`, one `<number>.jsonl.crswap` and one `notes.jsonl`.
+
+## `call.tsv`
+
+The line a person gives an agent to have it take part, with the folder it names. Three columns separated by tabs, no header; every row ends with one line feed.
+
+| Column | Content |
+|---|---|
+| 1 | The name of the row, unique |
+| 2 | The folder, as the reader names it: the page with `~/Documents/xmoq/<room>/<id>`, `xmoq-agent` with `--out` in full |
+| 3 | The line |

@@ -3,8 +3,10 @@
 // System Access API of Chromium: one root the person chooses once, which is
 // remembered (IndexedDB), and under it a folder for each meeting the page
 // attends, `<root>/<room>/<id>/`, laid out as `xmoq-agent --out` lays its
-// own: `events/`, `inbox.txt` and `frames/<when the writing began>/`.
+// own: `AGENT.md`, `events/`, `inbox.txt` and `frames/<when the writing
+// began>/`.
 
+import { AGENT_GUIDE, GUIDE_FILE } from "../core/agent-guide.ts";
 import {
 	type AgentEvent,
 	agentLine,
@@ -169,7 +171,9 @@ export interface AgentFolder {
 
 /**
  * Opens, and makes where it is not, `<root>/<room>/<id>/` with its
- * `events/`, `inbox.txt` and `frames/<began>/`.
+ * `events/`, `inbox.txt` and `frames/<began>/`, and puts `AGENT.md` there
+ * anew. WHY anew: the guide is of this version of the page, and one left
+ * by a call before may tell of another.
  */
 export async function openAgentFolder(
 	root: FileSystemDirectoryHandle,
@@ -183,6 +187,14 @@ export async function openAgentFolder(
 	).getDirectoryHandle(id, { create: true });
 	const events = await folder.getDirectoryHandle(EVENTS_DIR, { create: true });
 	const inbox = await folder.getFileHandle("inbox.txt", { create: true });
+	const guide = await (
+		await folder.getFileHandle(GUIDE_FILE, { create: true })
+	).createWritable();
+	try {
+		await guide.write(AGENT_GUIDE);
+	} finally {
+		await guide.close();
+	}
 	/** The number of the newest file of `events/`, which the next is named after (`nextEventFile`). */
 	let newest: number | undefined;
 	for await (const name of events.keys()) {

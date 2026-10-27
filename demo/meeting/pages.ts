@@ -12,7 +12,8 @@ const body = (served: Served): string =>
 			served.roomsUrl === null
 				? "<p>no rooms: bun install, and start again; a meeting takes its seat from the room</p>"
 				: `${served.noChat === undefined ? chatHtml("6em") : `<p>${served.noChat}</p>`}
-		<p><button id="agent-link">link a folder for Claude Code</button> <button id="agent-call">call Claude Code</button> <span id="agent-note"></span></p>`
+		<p><button id="agent-link">link a folder for Claude Code</button> <button id="agent-call">call Claude Code</button> <span id="agent-note"></span></p>
+		<p id="agent-paste" hidden><code id="agent-paste-line"></code> <button id="agent-copy">copy</button></p>`
 		}`;
 
 export const MEETING_PAGES: Record<string, Page> = {

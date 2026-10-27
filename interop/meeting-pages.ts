@@ -39,8 +39,11 @@
 //
 // Changed when a page came to write a file of `events/` a second in place
 // of `events.jsonl` (2026-10-27): the lines above are those of the files of
-// p1's `events/`, in the order of their names.
+// p1's `events/`, in the order of their names. The folder has `AGENT.md`,
+// the text of `fixtures/agent-lines/AGENT.md`.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { Page } from "playwright-core";
 import {
@@ -185,6 +188,13 @@ async function main(): Promise<void> {
 				? now
 				: undefined;
 		}, "p1 to write what its inbox asked for");
+		const guide = readFileSync(
+			join(import.meta.dir, "..", "fixtures", "agent-lines", "AGENT.md"),
+			"utf8",
+		);
+		if (folder.guide !== guide) {
+			throw new Error("p1's AGENT.md is not fixtures/agent-lines/AGENT.md");
+		}
 		const joined = folder.lines
 			.filter((line) => line.includes('"type":"participant"'))
 			.map((line) =>
@@ -248,7 +258,7 @@ async function main(): Promise<void> {
 			}
 		}
 		const last = after[0];
-		summary = `through the ${options.relay} relay, three pages met in xmoq/meet/r: p1 (one video) received the video of p2 and the sound of p2 and p3, p2 and p3 the video and sound of both others; when p2 closed its session p1 and p3 stopped its video and sound, and p1 received the video of p3 in its place (its folder for an agent: ${folder.lines.length} lines, the picture of p2 at ${path} of ${folder.pictures[path] ?? ""}) (p1 had ${JSON.stringify(last?.frames)} frames and ${JSON.stringify(last?.audio)} pieces of sound)`;
+		summary = `through the ${options.relay} relay, three pages met in xmoq/meet/r: p1 (one video) received the video of p2 and the sound of p2 and p3, p2 and p3 the video and sound of both others; when p2 closed its session p1 and p3 stopped its video and sound, and p1 received the video of p3 in its place (its folder for an agent: AGENT.md as fixtures/agent-lines has it, ${folder.lines.length} lines, the picture of p2 at ${path} of ${folder.pictures[path] ?? ""}) (p1 had ${JSON.stringify(last?.frames)} frames and ${JSON.stringify(last?.audio)} pieces of sound)`;
 	} finally {
 		await runCleanups();
 	}

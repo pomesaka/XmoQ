@@ -1,0 +1,3 @@
+the folder of a page	~/Documents/xmoq/demo/0123456789abcdef	Read ~/Documents/xmoq/demo/0123456789abcdef/AGENT.md and take part in the room as it says.
+the --out of xmoq-agent	/tmp/room	Read /tmp/room/AGENT.md and take part in the room as it says.
+a folder with a space, as it is	/Users/a b/room	Read /Users/a b/room/AGENT.md and take part in the room as it says.

@@ -33,8 +33,16 @@
 // the inbox`, reaches the page as a line of `claude` (3); the lines of
 // `claude` have `"by":"agent"` and that of p has none; the files of
 // `events/`, in the order of their names, have the same lines as stdout.
+// The reader puts `AGENT.md`, the text of `fixtures/agent-lines/AGENT.md`,
+// in `--out`, and says on stderr the line to paste, with the folder in full.
 
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import {
+	appendFileSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -141,6 +149,18 @@ async function main(): Promise<void> {
 			"--seconds",
 			"60",
 		]);
+		const call = `Read ${join(realpathSync(directory), "out")}/AGENT.md and take part in the room as it says.`;
+		await agent.waitForLine(
+			new RegExp(`^${call.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
+		);
+		expect(
+			"AGENT.md of --out",
+			readFileSync(join(out, "AGENT.md"), "utf8"),
+			readFileSync(
+				join(import.meta.dir, "..", "fixtures", "agent-lines", "AGENT.md"),
+				"utf8",
+			),
+		);
 		await waitForEvent(agent, '"type":"joined"');
 		await gatherer.waitForLine(
 			/^SUBSCRIBED room="broadcast\/r" name="claude"$/,
@@ -230,7 +250,7 @@ async function main(): Promise<void> {
 			JSON.stringify(inFiles),
 			JSON.stringify(written),
 		);
-		summary = `through the own relay and the gatherer, xmoq-agent wrote ${written.length} lines of JSON (${kinds}): p, who had joined before it came, as joined; p's line as chat 0; its own stdin lines as chat 1 and 2 (//slash said as /slash) and a line of its inbox.txt as chat 3, which the page had, its own marked as the agent's; /frame and an unknown command as errors; p's leaving as left; the files of events/ had the same lines`;
+		summary = `through the own relay and the gatherer, xmoq-agent wrote ${written.length} lines of JSON (${kinds}): p, who had joined before it came, as joined; p's line as chat 0; its own stdin lines as chat 1 and 2 (//slash said as /slash) and a line of its inbox.txt as chat 3, which the page had, its own marked as the agent's; /frame and an unknown command as errors; p's leaving as left; the files of events/ had the same lines; AGENT.md was in --out, and the line to paste on stderr`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

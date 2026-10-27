@@ -19,6 +19,7 @@ import {
 import {
 	type AgentBridge,
 	allowRoot,
+	callLine,
 	chooseRoot,
 	createAgentBridge,
 	createAgentCall,
@@ -442,10 +443,27 @@ async function main(): Promise<void> {
 	const agentNote = document.getElementById("agent-note");
 	const linkButton = document.getElementById("agent-link");
 	const callButton = document.getElementById("agent-call");
+	const paste = document.getElementById("agent-paste");
+	const pasteLine = document.getElementById("agent-paste-line");
+	const copyButton = document.getElementById("agent-copy");
 	const tellAgent = (text: string): void => {
 		if (agentNote !== null) agentNote.textContent = text;
 		document.body.dataset.agent = text;
 	};
+	/** The line to give Claude Code, while it is called; hidden otherwise. */
+	const showPaste = (line: string | undefined): void => {
+		if (pasteLine !== null) pasteLine.textContent = line ?? "";
+		if (copyButton !== null) copyButton.textContent = "copy";
+		paste?.toggleAttribute("hidden", line === undefined);
+	};
+	copyButton?.addEventListener("click", () => {
+		navigator.clipboard.writeText(pasteLine?.textContent ?? "").then(
+			() => {
+				copyButton.textContent = "copied";
+			},
+			(error: unknown) => tellAgent(`not copied: ${why(error)}`),
+		);
+	});
 	/** What the page says of the root before Claude Code is called. */
 	const showRoot = async (): Promise<void> => {
 		const root = await rememberedRoot();
@@ -539,14 +557,14 @@ async function main(): Promise<void> {
 			},
 			signal: stop.signal,
 		});
-		tellAgent(
-			`Claude Code reads ${AGENT_ROOT}/${folder.path}/ and writes lines into inbox.txt there`,
-		);
+		tellAgent("");
+		showPaste(callLine(`${AGENT_ROOT}/${folder.path}`));
 		// What was written stays.
 		return () => {
 			bridge.stop();
 			stop.abort();
 			agent.bridge = undefined;
+			showPaste(undefined);
 		};
 	};
 	// One call at a time: a press while one is made does nothing

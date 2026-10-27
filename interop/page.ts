@@ -1105,7 +1105,10 @@ window.xmoqOwn = {
 				pictures[path] =
 					`${bytes.length} ${new TextDecoder().decode(bytes.subarray(1, 4))}`;
 			}
-			return { lines, pictures };
+			const guide = new TextDecoder().decode(
+				await readWhole(await folder.getFileHandle("AGENT.md")),
+			);
+			return { lines, pictures, guide };
 		},
 	),
 
