@@ -136,12 +136,15 @@ const REQUESTS: Record<string, Uint8Array> = {
 	// Request ID 1 already.
 	"subscribe-namespace": hex(fromALibrary("subscribe-namespace-moqtail-ts")),
 	"track-status": hex(fixture("track-status-moqtail-relay")),
+	// SUBSCRIBE_TRACKS (§10.19), written by hand: Request ID 1, an empty
+	// prefix, no parameters. Of it only the Request ID is read.
+	"subscribe-tracks": hex("51 00 03 01 00 00"),
 };
 
 const CLIENT_REFUSALS = fixtureTable("client-refusals", "refusals.tsv");
 
 test("the table of client refusals has its rows", () => {
-	expect(CLIENT_REFUSALS.length).toBe(11);
+	expect(CLIENT_REFUSALS.length).toBe(13);
 });
 
 // The rows of `fixtures/client-refusals/refusals.tsv`, which the Rust client

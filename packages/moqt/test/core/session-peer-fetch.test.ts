@@ -33,9 +33,11 @@ const TRACK = {
 };
 
 /** The captured SUBSCRIBE with Request ID 1, one of the server. */
-function subscribeBytes(): Uint8Array {
+function subscribeBytes(forward = "01"): Uint8Array {
 	const pairs = fixture("subscribe-moqtail-rs").split(" ");
 	pairs[3] = "01";
+	// The value of its FORWARD, the parameter of Type 0x10 at index 25.
+	pairs[26] = forward;
 	return hex(pairs.join(" "));
 }
 
@@ -762,6 +764,10 @@ describe("fixtures/peer-fetch: what becomes of a FETCH of the peer", () => {
 			session.receivePeerBidiStreamData(0, subscribeBytes(), false);
 			session.rejectPeerRequest(1n, 0x10n, "");
 		},
+		"subscribe-accepted-forward-0": (session) => {
+			session.receivePeerBidiStreamData(0, subscribeBytes("00"), false);
+			session.acceptSubscribe(1n, {});
+		},
 	};
 
 	const outcomeOf = (outputs: SessionOutput[]): string => {
@@ -796,8 +802,8 @@ describe("fixtures/peer-fetch: what becomes of a FETCH of the peer", () => {
 				kind === "joining" && outcome === "handed" ? "refused 0x3" : outcome,
 		}),
 	);
-	test("opened.tsv has the 22 rows of its README", () => {
-		expect(opened.length).toBe(22);
+	test("opened.tsv has the 23 rows of its README", () => {
+		expect(opened.length).toBe(23);
 	});
 	test.each(opened)(
 		"$name ($kind), after $before: $outcome",
@@ -839,8 +845,8 @@ describe("fixtures/peer-fetch: what becomes of a FETCH of the peer", () => {
 		steps: steps ?? "",
 		sent: sent ?? "",
 	}));
-	test("updates.tsv has the 13 rows of its README", () => {
-		expect(updates.length).toBe(13);
+	test("updates.tsv has the 16 rows of its README", () => {
+		expect(updates.length).toBe(16);
 	});
 	test.each(updates)("$name ($steps): $sent", ({ steps, sent }) => {
 		const session = asked();
@@ -856,8 +862,11 @@ describe("fixtures/peer-fetch: what becomes of a FETCH of the peer", () => {
 			update: () => update("00"),
 			"update-priority": () => update("01 20 c8"),
 			"update-forward": () => update("01 10 01"),
+			"update-filter": () => update("01 21 01 01"),
+			"update-new-group-request": () => update("01 32 07"),
 			accept: accept(5n, 1n),
 			"accept-before-start": accept(3n, 3n),
+			"accept-at-start": accept(3n, 4n),
 			"accept-beyond-end": accept(9n, 0n),
 			reject: () => session.rejectPeerRequest(1n, 0x10n, ""),
 		};

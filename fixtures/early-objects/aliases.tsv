@@ -1,0 +1,8 @@
+an-alias-for-each-accepted-subscribe-past-the-own-publish	publish:1 peer-subscribe:a peer-subscribe:b peer-subscribe:c	given:0,2,3
+a-subscription-that-is-established	subscribe:a ok:a:9	object:a
+a-subscription-that-drains-after-publish-done	subscribe:a ok:a:9 done:a:1	object:a
+a-subscription-whose-counted-streams-ended	subscribe:a ok:a:9 done:a:1 end:9	stopped
+more-streams-than-the-stream-count	subscribe:a ok:a:9 done:a:1 end:9 end:9	stopped
+a-subscribe-ok-that-reuses-the-alias-of-a-draining-subscription	subscribe:a ok:a:9 done:a:1 subscribe:b ok:b:9	object:b
+one-that-is-itself-refused-leaves-the-draining-subscription-its-alias	subscribe:a ok:a:9 done:a:1 subscribe:b ok-mandatory:b:9	object:a
+a-mandatory-track-property-and-an-alias-in-use	subscribe:a ok:a:9 subscribe:b ok-mandatory:b:9	closed:0x5

@@ -8,7 +8,7 @@ One row a line, three fields separated by tabs, no header. Every row ends with o
 
 | Field | Meaning |
 |---|---|
-| request | `subscribe`, `publish`, `publish-namespace`, `fetch` (Standalone), `subscribe-namespace` or `track-status` |
+| request | `subscribe`, `publish`, `publish-namespace`, `fetch` (Standalone), `subscribe-namespace`, `track-status`, or `subscribe-tracks` (refused by the session, before the client sees it) |
 | serves | `yes`: the client serves SUBSCRIBE (the Rust client in the mode that answers one for its track; `MoqtConnection.serve` with `subscribe` in `@xmoq/moqt`). `no`: it serves nothing. The rows of both pin that serving SUBSCRIBE changes none of them |
 | code | The Error Code of the REQUEST_ERROR, in hex |
 

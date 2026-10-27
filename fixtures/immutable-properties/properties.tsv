@@ -12,6 +12,8 @@ pair-runs-past-the-value	object	5/3	0b03110561	malformed-track	-
 inner-type-over-2-64	object	5/3	0b0cfffffffffffffffffe000200	protocol-violation	-
 dynamic-groups-inside	track	-	0b023001	ok	30=1
 dynamic-groups-inside-above-1	track	-	0b023002	protocol-violation	-
+dynamic-groups-outside	track	-	3001	ok	30=1
+dynamic-groups-outside-above-1	track	-	3002	protocol-violation	-
 mandatory-track-property-inside	track	-	0b04c0400001	unsupported-track	-
 mandatory-track-property-outside	track	-	c0400001	unsupported-track	-
 immutable-inside-immutable	track	-	0b020b00	malformed-track	-

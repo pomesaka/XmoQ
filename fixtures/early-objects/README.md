@@ -46,3 +46,10 @@ Tab-separated, no header, one line feed after every row. Column 1 is the name of
 
 - A stream reset while it holds Objects lets go of them; one that ended with its FIN keeps them for its alias, by the rule of `settle.tsv` as a stream still open (`reused-alias.tsv` has such rows).
 - Held Objects stay on a stream once one of its Objects is held, so that its Objects stay in their order.
+
+`aliases.tsv`: steps in a client's session, and then whom a Track Alias names. The Rust and the TypeScript session read it.
+
+| Column | Content |
+|---|---|
+| 2 | The steps, in order, separated by spaces: `subscribe:<t>`, a SUBSCRIBE of this end for the track `t` of the namespace (`xmoq`); `ok:<t>:<alias>`, its SUBSCRIBE_OK with that Track Alias; `ok-mandatory:<t>:<alias>`, the same with the Mandatory Track Property 0x4000 (§2.5.1); `done:<t>:<count>`, PUBLISH_DONE on its stream with that Stream Count; `end:<alias>`, a subgroup stream under that alias that ends after its header; `publish:<alias>`, a PUBLISH of this end with that alias; `peer-subscribe:<t>`, a SUBSCRIBE of the peer, a server, that this end accepts |
+| 3 | `object:<t>`: an Object under alias 9 goes to the subscription of track `t`. `stopped`: its stream is stopped. `closed:<code>`: a step closed the session with that Session Termination Error Code (§3.5). `given:<aliases>`: the aliases this end gave the SUBSCRIBEs of the peer it accepted, in order |

@@ -9,3 +9,5 @@ subscribe-namespace	no	0x3
 subscribe-namespace	yes	0x3
 track-status	no	0x3
 track-status	yes	0x3
+subscribe-tracks	no	0x3
+subscribe-tracks	yes	0x3

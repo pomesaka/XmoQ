@@ -11,3 +11,6 @@ accepted-twice	accept accept	FETCH_OK | usage-error
 rejected-then-accepted	reject accept	REQUEST_ERROR | usage-error
 end-before-the-start-then-accepted	accept-before-start accept	usage-error | FETCH_OK
 end-beyond-what-was-asked	accept-beyond-end	FETCH_OK
+end-at-the-start	accept-at-start	FETCH_OK
+update-with-a-filter	update-filter	closed 0x3
+update-with-a-new-group-request	update-new-group-request	closed 0x3

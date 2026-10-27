@@ -26,6 +26,16 @@ const subscribe = (requestId: number, track: "object" | "objecu" = "object"): st
 	return bytes.join("");
 };
 
+/**
+ * The SUBSCRIBE with Request ID 1 whose Message Length is one byte short of
+ * its fields: the last byte of its parameters is gone.
+ */
+const cutShort = (): string => {
+	const bytes = subscribe(1).match(/../g) ?? [];
+	bytes[2] = (Number.parseInt(bytes[2] ?? "", 16) - 1).toString(16).padStart(2, "0");
+	return bytes.slice(0, -1).join("");
+};
+
 /** What this endpoint did, or saw, before the row's SUBSCRIBE: see README.md. */
 type Before =
 	| "nothing"
@@ -36,7 +46,7 @@ type Before =
 	| "subscribe-rejected"
 	| "subscribe-rejected-then-update"
 	| "subscribe-refused-then-update";
-type Outcome = "handed" | "refused 0x19" | "closed 0x4";
+type Outcome = "handed" | "refused 0x19" | "closed 0x3" | "closed 0x4";
 
 const rows: [name: string, before: Before, sent: string, outcome: Outcome][] = [
 	["first-request", "nothing", subscribe(1), "handed"],
@@ -48,6 +58,9 @@ const rows: [name: string, before: Before, sent: string, outcome: Outcome][] = [
 	["track-after-publish-done", "subscribe-done", subscribe(3), "handed"],
 	["track-after-a-rejection", "subscribe-rejected", subscribe(3), "handed"],
 	["request-id-of-the-wrong-parity", "nothing", subscribe(2), "closed 0x4"],
+	// §10: "If the length does not match the length of the Message Payload,
+	// the receiver MUST close the session with a PROTOCOL_VIOLATION".
+	["a-subscribe-that-does-not-decode", "nothing", cutShort(), "closed 0x3"],
 	["request-id-used-before", "subscribe", subscribe(1, "objecu"), "closed 0x4"],
 	// A REQUEST_UPDATE that came on the stream of a request that was refused
 	// used up its Request ID (§10.1), whoever refused the request.

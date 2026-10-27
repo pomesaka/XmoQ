@@ -3670,6 +3670,26 @@ mod tests {
             let [name, serves, code] = line.split('\t').collect::<Vec<_>>()[..] else {
                 panic!("a row of three fields: {line}");
             };
+            // A SUBSCRIBE_TRACKS (§10.19) is refused by the session before the
+            // client sees it: of it only the Request ID is read.
+            if name == "subscribe-tracks" {
+                let mut session = Session::new(Role::Client, Transport::WebTransport);
+                let refused = session.on_peer_request_opened(ControlMessage::UnsupportedRequest {
+                    message_type: 0x51,
+                    request_id: 1,
+                });
+                let Ok(PeerRequestOpened::Refused {
+                    response: ControlMessage::RequestError(error),
+                    ..
+                }) = refused
+                else {
+                    panic!("{line}: {refused:?}");
+                };
+                let code = u64::from_str_radix(code.trim_start_matches("0x"), 16).unwrap();
+                assert_eq!(error.error_code, code, "{line}");
+                read += 1;
+                continue;
+            }
             let request = match name {
                 "subscribe" => &subscribe,
                 "publish" => &publish,
@@ -3688,7 +3708,7 @@ mod tests {
             assert_eq!(refusal_code(serves, request), code, "{line}");
             read += 1;
         }
-        assert_eq!(read, 11);
+        assert_eq!(read, 13);
         // Not in the table: a SUBSCRIBE in the mode that serves one is the
         // application's to answer in `@xmoq/moqt`; this client refuses one
         // for another track with DOES_NOT_EXIST.
