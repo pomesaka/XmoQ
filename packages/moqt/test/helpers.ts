@@ -88,7 +88,52 @@ export const BY_HAND_CONTROL_MESSAGES = [
 	"request-update-request-id-3",
 	"request-update-request-id-5",
 	"request-update-new-group-request",
+	"request-update-track-namespace-prefix",
+	"subscribe-rendezvous-timeout",
+	"fetch-fill-timeout",
 ] as const;
+
+/** One row of `fixtures/moqt-18-by-hand/varints.tsv`. */
+export interface VarintFixture {
+	/** The bytes, in the form `hex` reads. */
+	bytes: string;
+	value: bigint;
+	/** Whether an encoder writes these bytes for the value: the fewest. */
+	fewest: boolean;
+}
+
+/**
+ * The rows of `fixtures/moqt-18-by-hand/varints.tsv`, which the Rust
+ * implementation reads as well: Table 2 of §1.4.1 and the edges of each
+ * length of Table 1.
+ */
+export function varintFixtures(): VarintFixture[] {
+	const path = join(BY_HAND_DIR, "varints.tsv");
+	const table = readFileSync(path, "utf8");
+	if (!table.endsWith("\n")) {
+		throw new Error(`${path}: the last row does not end with a line feed`);
+	}
+	return table
+		.slice(0, -1)
+		.split("\n")
+		.map((line): VarintFixture => {
+			const [bytes, value, fewest, ...rest] = line.split("\t");
+			if (
+				bytes === undefined ||
+				!HEX_BYTES.test(bytes) ||
+				value === undefined ||
+				(fewest !== "yes" && fewest !== "no") ||
+				rest.length > 0
+			) {
+				throw new Error(`a row of the varints fixture: ${line}`);
+			}
+			return {
+				bytes: spaced(bytes),
+				value: BigInt(value),
+				fewest: fewest === "yes",
+			};
+		});
+}
 
 /** The names `byHand` accepts: every `.hex` file of `fixtures/moqt-18-by-hand/`. */
 export function byHandNames(): string[] {
@@ -241,6 +286,20 @@ export interface FirstBytesFixture {
 	sentHex: string;
 	/** Whether the stream has said what it is with those bytes. */
 	said: boolean;
+	/** The code it is stopped with where it has not. */
+	stopped: number | undefined;
+	/**
+	 * What a FIN after those bytes does: the code the session is closed
+	 * with, or `"nothing"`. Not given for a row that has said what it is.
+	 */
+	fin: number | "nothing" | undefined;
+}
+
+/** A code of a table: `0x` and hexadecimal digits. */
+function tableCode(text: string): number | undefined {
+	return /^0x[0-9a-f]+$/.test(text)
+		? Number.parseInt(text.slice(2), 16)
+		: undefined;
 }
 
 /**
@@ -263,9 +322,15 @@ export function firstBytesFixtures(): FirstBytesFixture[] {
 				throw new Error(`a row of the first bytes fixture ${what}: ${line}`);
 			};
 			const columns = line.split("\t");
-			const [name, kind, sent, said] = columns;
-			if (columns.length !== 4 || name === undefined || sent === undefined) {
-				return refuse("does not have four columns");
+			const [name, kind, sent, said, stopped, fin] = columns;
+			if (
+				columns.length !== 6 ||
+				name === undefined ||
+				sent === undefined ||
+				stopped === undefined ||
+				fin === undefined
+			) {
+				return refuse("does not have six columns");
 			}
 			if (name === "") return refuse("has no name");
 			if (kind !== "uni" && kind !== "bidi") {
@@ -277,7 +342,34 @@ export function firstBytesFixtures(): FirstBytesFixture[] {
 			if (said !== "said" && said !== "not-yet") {
 				return refuse("says neither said nor not-yet");
 			}
-			return { name, kind, sentHex: spaced(sent), said: said === "said" };
+			const stoppedCode = stopped === "-" ? undefined : tableCode(stopped);
+			if (stopped !== "-" && stoppedCode === undefined) {
+				return refuse("has a stop code that is no code");
+			}
+			const closed = fin.startsWith("closed:")
+				? tableCode(fin.slice("closed:".length))
+				: undefined;
+			const end =
+				fin === "-" ? undefined : fin === "nothing" ? "nothing" : closed;
+			if (fin !== "-" && end === undefined) {
+				return refuse("has an end that is neither nothing nor closed");
+			}
+			if (
+				(said === "said") !==
+				(stoppedCode === undefined && end === undefined)
+			) {
+				return refuse(
+					"has a code and an end where it has said what it is, or none where it has not",
+				);
+			}
+			return {
+				name,
+				kind,
+				sentHex: spaced(sent),
+				said: said === "said",
+				stopped: stoppedCode,
+				fin: end,
+			};
 		});
 	// WHY: `test.each` passes with no rows, so an emptied file would look
 	// like a fixture that holds.

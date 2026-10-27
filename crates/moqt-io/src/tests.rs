@@ -1843,6 +1843,18 @@ struct FirstBytesRow {
     bytes: Vec<u8>,
     /// Whether the stream has said what it is with those, and is left alone.
     said: bool,
+    /// The code it is stopped with where it has not.
+    stopped: Option<u32>,
+    /// The code a FIN after those bytes closes the session with; `None`
+    /// where it does nothing, or where the row has said what it is.
+    fin: Option<u32>,
+}
+
+/// A code of the table: `0x` and hexadecimal digits.
+fn table_code(text: &str) -> Result<u32, String> {
+    text.strip_prefix("0x")
+        .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+        .ok_or_else(|| format!("no code: {text:?}"))
 }
 
 fn first_bytes_rows(table: &str) -> Result<Vec<FirstBytesRow>, String> {
@@ -1852,8 +1864,8 @@ fn first_bytes_rows(table: &str) -> Result<Vec<FirstBytesRow>, String> {
     let mut rows = Vec::new();
     for line in body.split('\n') {
         let columns: Vec<&str> = line.split('\t').collect();
-        let [name, kind, hex, said] = columns.as_slice() else {
-            return Err(format!("not four columns: {line:?}"));
+        let [name, kind, hex, said, stop_text, fin_text] = columns.as_slice() else {
+            return Err(format!("not six columns: {line:?}"));
         };
         let bidirectional = match *kind {
             "uni" => false,
@@ -1877,11 +1889,30 @@ fn first_bytes_rows(table: &str) -> Result<Vec<FirstBytesRow>, String> {
             .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
             .collect::<Result<Vec<u8>, _>>()
             .map_err(|error| format!("{hex:?}: {error}"))?;
+        let stopped = match *stop_text {
+            "-" => None,
+            code => Some(table_code(code)?),
+        };
+        let fin = match *fin_text {
+            "-" | "nothing" => None,
+            closed => {
+                Some(table_code(closed.strip_prefix("closed:").ok_or_else(
+                    || format!("neither nothing nor closed: {closed:?}"),
+                )?)?)
+            }
+        };
+        if said != (*stop_text == "-") || said != (*fin_text == "-") {
+            return Err(format!(
+                "a code and an end for a stream that has said what it is, or none for one that has not: {line:?}"
+            ));
+        }
         let row = FirstBytesRow {
             name: (*name).to_string(),
             bidirectional,
             bytes,
             said,
+            stopped,
+            fin,
         };
         if rows.iter().any(|other: &FirstBytesRow| {
             (&other.name, other.bidirectional) == (&row.name, row.bidirectional)
@@ -1943,8 +1974,7 @@ async fn a_stream_has_said_what_it_is_where_the_shared_table_says() {
                         "{row:?}: the session failed"
                     );
                 }
-                // A request is given up with CANCELLED (0x1).
-                stopped.map(|code| (code, Some(0x1)))
+                stopped.map(|code| (code, row.stopped))
             } else {
                 let mut reading = reading(StreamConfig::default(), 8);
                 let mut send = reading.peer.open_uni().await.unwrap();
@@ -1953,12 +1983,61 @@ async fn a_stream_has_said_what_it_is_where_the_shared_table_says() {
                 while let Ok(event) = reading.events.try_recv() {
                     assert!(!matches!(event, UniEvent::Failed(_)), "{row:?}: {event:?}");
                 }
-                // INTERNAL_ERROR (0x0).
-                stopped.map(|code| (code, Some(0x0)))
+                stopped.map(|code| (code, row.stopped))
             };
             assert_eq!(stopped.is_none(), row.said, "{row:?}, in pieces of {piece}");
             if let Some((code, expected)) = stopped {
                 assert_eq!(code, expected, "{row:?}, in pieces of {piece}");
+            }
+        }
+    }
+}
+
+/// What a FIN does to a stream of the peer that has not said what it is
+/// (`fixtures/first-bytes/`): one that sent nothing carried nothing, and one
+/// that ends inside its type, its header or its first message closes the
+/// session. §10: "If the length does not match the length of the Message
+/// Payload, the receiver MUST close the session with a `PROTOCOL_VIOLATION`";
+/// §10.12.3 has the `FETCH_HEADER` on every fetch stream; the draft has no
+/// rule for a stream that ends inside its Stream Type, which is read as one
+/// that ends inside an Object (§11.4).
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_ends_before_it_has_said_what_it_is_does_what_the_shared_table_says() {
+    let path = format!(
+        "{}/../../fixtures/first-bytes/said.tsv",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let table = std::fs::read_to_string(&path).expect("the fixture is there");
+    let rows = first_bytes_rows(&table).unwrap_or_else(|error| panic!("{path}: {error}"));
+    for row in rows.iter().filter(|row| !row.said) {
+        let expected = row.fin;
+        if row.bidirectional {
+            let mut requests = requests();
+            let (mut send, _recv) = requests.peer.open_bi().await.unwrap();
+            send.write_all(&row.bytes).await.unwrap();
+            send.finish();
+            match expected {
+                Some(code) => match requests.next().await {
+                    Seen::Failed(error) => {
+                        assert_eq!(crate::client::termination_code(&error), code, "{row:?}");
+                    }
+                    other => panic!("{row:?}: {other:?}"),
+                },
+                None => requests.assert_quiet().await,
+            }
+        } else {
+            let mut reading = reading(StreamConfig::default(), 8);
+            let mut send = reading.peer.open_uni().await.unwrap();
+            send.write_all(&row.bytes).await.unwrap();
+            send.finish();
+            match expected {
+                Some(code) => match reading.next().await {
+                    UniEvent::Failed(error) => {
+                        assert_eq!(crate::client::termination_code(&error), code, "{row:?}");
+                    }
+                    other => panic!("{row:?}: {other:?}"),
+                },
+                None => reading.assert_quiet().await,
             }
         }
     }

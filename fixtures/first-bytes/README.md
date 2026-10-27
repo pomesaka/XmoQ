@@ -4,7 +4,7 @@ Both implementations stop a stream the peer opens when it has not said what it i
 
 ## Format
 
-`said.tsv`, one row per stream, four columns separated by tabs, no header. Every row ends with one line feed, the last one too; there are no empty rows. Hexadecimal digits are lower case.
+`said.tsv`, one row per stream, six columns separated by tabs, no header. Every row ends with one line feed, the last one too; there are no empty rows. Hexadecimal digits are lower case.
 
 | Column | Content |
 |---|---|
@@ -12,6 +12,8 @@ Both implementations stop a stream the peer opens when it has not said what it i
 | 2 | `uni` or `bidi`: a unidirectional stream of the peer, or a bidirectional one |
 | 3 | Every byte the stream has sent when its time runs out, in hexadecimal digits. Empty for a stream that sent nothing |
 | 4 | `said`: the stream is left alone. `not-yet`: it is stopped, and the session stays open |
+| 5 | The code it is stopped with, where column 4 is `not-yet`: a unidirectional stream gets STOP_SENDING with it, a request STOP_SENDING and a reset. `-` where it is `said` |
+| 6 | What a FIN right after those bytes does, where column 4 is `not-yet`: `nothing`, or `closed:<code>`, the session closed with that Session Termination Error Code (§3.5). `-` where it is `said` |
 
 What the rows hold a reader to:
 
@@ -22,8 +24,6 @@ What the rows hold a reader to:
 | Fetch stream | its whole FETCH_HEADER |
 | Request | its first message, whole |
 
-The codes a stopped stream gets are not in the table; they are in the row named under Source.
-
 ## What a test has to set up
 
 - The receiver is the client of the session, so the request of the `bidi` rows has Request ID 1, one of the server's.
@@ -32,7 +32,7 @@ The codes a stopped stream gets are not in the table; they are in the row named 
 
 ## Source
 
-**The second and third column were written for this table, and the fourth is a decision, not an observation.** No other implementation was asked: the time is XmoQ's own. The decision is the row "A stream of the peer that does not say what it is" in [the implementation notes](../../docs/moqt-implementation-notes.md) (`crates/moqt-io/src/streams.rs`).
+**The second and third column were written for this table, and the fourth, fifth and sixth are decisions, not observations.** No other implementation was asked: the time is XmoQ's own, and the draft has no rule for a stream that ends inside its type. Why each is decided so is at the code: `crates/moqt-io/src/streams.rs` and `MessageDecoder::finish` of `crates/moqt/src/message.rs`; `packages/moqt/src/core/session.ts` and `peer-requests.ts`.
 
 Where the bytes come from:
 

@@ -1781,18 +1781,41 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn decodes_and_encodes_what_no_capture_has() {
-        // Bytes written by hand from §10.12, §10.13 and §10.2: the reader of
-        // the draft and the writer of the expectation are the same.
-        let cases = [
+    /// The control messages of `fixtures/moqt-18-by-hand/`, written by hand
+    /// from the draft, with what each is; `@xmoq/moqt` reads the same files.
+    /// The `REQUEST_UPDATE`s that `fixtures/peer-subscribe/` sends are read
+    /// where those rows are (`REQUEST_UPDATES_BY_HAND`).
+    pub(crate) fn messages_written_by_hand() -> Vec<(&'static str, ControlMessage)> {
+        vec![
             (
-                // A Relative Joining FETCH, Request ID 4, with two
-                // parameters: FILL_TIMEOUT (0x0A) = 5, and GROUP_ORDER
-                // (0x22, written as the delta 0x18 from 0x0A) = 2.
-                vec![
-                    0x16, 0x00, 0x09, 0x04, 0x02, 0x00, 0x00, 0x02, 0x0a, 0x05, 0x18, 0x02,
-                ],
+                // §10.2.14: the value of TRACK_NAMESPACE_PREFIX is "a Track
+                // Namespace", with no length before it.
+                "request-update-track-namespace-prefix",
+                ControlMessage::RequestUpdate(RequestUpdate {
+                    request_id: 3,
+                    parameters: vec![Parameter::TrackNamespacePrefix(
+                        TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+                    )],
+                }),
+            ),
+            (
+                // §10.2.6 gives RENDEZVOUS_TIMEOUT no encoding: a varint of
+                // milliseconds, as `moqtail` 0.15.0 writes it.
+                "subscribe-rendezvous-timeout",
+                ControlMessage::Subscribe(Subscribe {
+                    request_id: 0,
+                    full_track_name: FullTrackName::new(
+                        TrackNamespace::new(vec![]).unwrap(),
+                        b"t".to_vec(),
+                    )
+                    .unwrap(),
+                    parameters: vec![Parameter::RendezvousTimeout(5)],
+                }),
+            ),
+            (
+                // §10.2.5 gives FILL_TIMEOUT no encoding either. GROUP_ORDER
+                // (0x22) is written as the delta 0x18 from 0x0A (§10.2).
+                "fetch-fill-timeout",
                 ControlMessage::Fetch(Fetch {
                     request_id: 4,
                     range: FetchRange::RelativeJoining {
@@ -1805,6 +1828,29 @@ pub(crate) mod tests {
                     ],
                 }),
             ),
+        ]
+    }
+
+    #[test]
+    fn the_control_messages_written_by_hand_are_read_and_written_as_their_files() {
+        for (name, message) in messages_written_by_hand() {
+            let bytes = crate::test_util::fixture_by_hand(name);
+            assert_eq!(
+                ControlMessage::decode(&bytes),
+                Ok(Some((message.clone(), bytes.len()))),
+                "{name}"
+            );
+            let mut encoded = Vec::new();
+            message.encode(&mut encoded).unwrap();
+            assert_eq!(encoded, bytes, "{name}");
+        }
+    }
+
+    #[test]
+    fn decodes_and_encodes_what_no_capture_has() {
+        // Bytes written by hand from §10.12, §10.13 and §10.2: the reader of
+        // the draft and the writer of the expectation are the same.
+        let cases = [
             (
                 // A Relative Joining FETCH with AUTHORIZATION_TOKEN (0x03),
                 // one byte `aa`, and FILL_TIMEOUT (0x0A, the delta 0x07) = 5.

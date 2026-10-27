@@ -6,279 +6,312 @@ import {
 	encodeControlMessage,
 } from "../../src/core/control-message.ts";
 import type { MessageParameters } from "../../src/core/parameters.ts";
-import { hex, toHex, utf8 } from "../helpers.ts";
+import { byHand, hex, toHex, utf8 } from "../helpers.ts";
 
 // Bytes in this file are derived by hand from the message formats of draft 18.
 // Bytes captured from another implementation are in moqtail-fixtures.test.ts.
 
-const HAND_ENCODED: { name: string; bytes: string; message: ControlMessage }[] =
-	[
-		{
-			name: "REQUEST_ERROR DOES_NOT_EXIST (§10.6.2)",
-			bytes: "05 00 05 10 00 02 6e 6f",
-			message: {
-				type: "REQUEST_ERROR",
-				errorCode: 16n,
-				retryInterval: 0n,
-				errorReason: "no",
+const HAND_ENCODED: {
+	name: string;
+	bytes: string;
+	message: ControlMessage;
+	/**
+	 * Where this session writes no such message: decoded, and not encoded.
+	 * WHY: `encodeControlMessage` checks the parameters of a REQUEST_UPDATE
+	 * against those of any REQUEST_UPDATE, and this session sends no update
+	 * of a SUBSCRIBE_NAMESPACE, which alone may carry TRACK_NAMESPACE_PREFIX
+	 * (§10.2.14).
+	 */
+	readOnly?: true;
+}[] = [
+	{
+		name: "REQUEST_ERROR DOES_NOT_EXIST (§10.6.2)",
+		bytes: "05 00 05 10 00 02 6e 6f",
+		message: {
+			type: "REQUEST_ERROR",
+			errorCode: 16n,
+			retryInterval: 0n,
+			errorReason: "no",
+		},
+	},
+	{
+		name: "REQUEST_ERROR REDIRECT with a Redirect structure (§10.6.1)",
+		bytes: "05 00 0e 34 01 00 05 68 3a 2f 2f 61 01 01 62 01 63",
+		message: {
+			type: "REQUEST_ERROR",
+			errorCode: 52n,
+			retryInterval: 1n,
+			errorReason: "",
+			redirect: {
+				connectUri: "h://a",
+				trackNamespace: [utf8("b")],
+				trackName: utf8("c"),
 			},
 		},
-		{
-			name: "REQUEST_ERROR REDIRECT with a Redirect structure (§10.6.1)",
-			bytes: "05 00 0e 34 01 00 05 68 3a 2f 2f 61 01 01 62 01 63",
-			message: {
-				type: "REQUEST_ERROR",
-				errorCode: 52n,
-				retryInterval: 1n,
-				errorReason: "",
-				redirect: {
-					connectUri: "h://a",
-					trackNamespace: [utf8("b")],
-					trackName: utf8("c"),
+	},
+	{
+		name: "PUBLISH_DONE TRACK_ENDED (§10.11)",
+		bytes: "0b 00 06 02 01 03 65 6e 64",
+		message: {
+			type: "PUBLISH_DONE",
+			statusCode: 2n,
+			streamCount: 1n,
+			errorReason: "end",
+		},
+	},
+	{
+		name: "SUBSCRIBE_OK with EXPIRES, LARGEST_OBJECT and a Track Property (§10.8)",
+		bytes: "04 00 0a 07 02 08 0a 01 03 05 02 80 80",
+		message: {
+			type: "SUBSCRIBE_OK",
+			trackAlias: 7n,
+			parameters: { expires: 10n, largestObject: { group: 3n, object: 5n } },
+			trackProperties: [{ type: 2n, value: 128n }],
+		},
+	},
+	{
+		name: "SUBSCRIBE with timeouts, an AbsoluteRange filter and NEW_GROUP_REQUEST (§10.2)",
+		bytes: "03 00 13 04 00 01 74 05 02 05 04 06 1b 04 04 02 03 01 01 02 10 00",
+		message: {
+			type: "SUBSCRIBE",
+			requestId: 4n,
+			trackNamespace: [],
+			trackName: utf8("t"),
+			parameters: {
+				objectDeliveryTimeout: 5n,
+				subgroupDeliveryTimeout: 6n,
+				subscriptionFilter: {
+					filterType: "AbsoluteRange",
+					startLocation: { group: 2n, object: 3n },
+					endGroupDelta: 1n,
 				},
+				groupOrder: "Descending",
+				newGroupRequest: 0n,
 			},
 		},
-		{
-			name: "PUBLISH_DONE TRACK_ENDED (§10.11)",
-			bytes: "0b 00 06 02 01 03 65 6e 64",
-			message: {
-				type: "PUBLISH_DONE",
-				statusCode: 2n,
-				streamCount: 1n,
-				errorReason: "end",
+	},
+	{
+		name: "SUBSCRIBE with two AUTHORIZATION_TOKENs and RENDEZVOUS_TIMEOUT (§10.2.2, §10.2.6)",
+		bytes: "03 00 0e 00 00 01 74 03 03 02 aa bb 00 01 cc 01 05",
+		message: {
+			type: "SUBSCRIBE",
+			requestId: 0n,
+			trackNamespace: [],
+			trackName: utf8("t"),
+			parameters: {
+				authorizationToken: [hex("aa bb"), hex("cc")],
+				rendezvousTimeout: 5n,
 			},
 		},
-		{
-			name: "SUBSCRIBE_OK with EXPIRES, LARGEST_OBJECT and a Track Property (§10.8)",
-			bytes: "04 00 0a 07 02 08 0a 01 03 05 02 80 80",
-			message: {
-				type: "SUBSCRIBE_OK",
-				trackAlias: 7n,
-				parameters: { expires: 10n, largestObject: { group: 3n, object: 5n } },
-				trackProperties: [{ type: 2n, value: 128n }],
-			},
+	},
+	{
+		name: "REQUEST_UPDATE with FORWARD (§10.9)",
+		bytes: "02 00 04 01 01 10 01",
+		message: {
+			type: "REQUEST_UPDATE",
+			requestId: 1n,
+			parameters: { forward: true },
 		},
-		{
-			name: "SUBSCRIBE with timeouts, an AbsoluteRange filter and NEW_GROUP_REQUEST (§10.2)",
-			bytes:
-				"03 00 13 04 00 01 74 05 02 05 04 06 1b 04 04 02 03 01 01 02 10 00",
-			message: {
-				type: "SUBSCRIBE",
-				requestId: 4n,
-				trackNamespace: [],
-				trackName: utf8("t"),
-				parameters: {
-					objectDeliveryTimeout: 5n,
-					subgroupDeliveryTimeout: 6n,
-					subscriptionFilter: {
-						filterType: "AbsoluteRange",
-						startLocation: { group: 2n, object: 3n },
-						endGroupDelta: 1n,
-					},
-					groupOrder: "Descending",
-					newGroupRequest: 0n,
-				},
+	},
+	// The FETCH messages below are the same bytes as
+	// `the_fetches_sent_to_take_the_fixtures_say_what_they_were_meant_to`
+	// in crates/moqt/src/message.rs: written by hand there, and sent to
+	// the moqtail relay to take its answers.
+	{
+		name: "FETCH, Relative Joining, Joining Start 1 (§10.12.2)",
+		bytes: "16 00 07 02 02 00 01 01 20 c8",
+		message: {
+			type: "FETCH",
+			requestId: 2n,
+			range: {
+				fetchType: "RelativeJoining",
+				joiningRequestId: 0n,
+				joiningStart: 1n,
 			},
+			parameters: { subscriberPriority: 200 },
 		},
-		{
-			name: "SUBSCRIBE with two AUTHORIZATION_TOKENs and RENDEZVOUS_TIMEOUT (§10.2.2, §10.2.6)",
-			bytes: "03 00 0e 00 00 01 74 03 03 02 aa bb 00 01 cc 01 05",
-			message: {
-				type: "SUBSCRIBE",
-				requestId: 0n,
-				trackNamespace: [],
-				trackName: utf8("t"),
-				parameters: {
-					authorizationToken: [hex("aa bb"), hex("cc")],
-					rendezvousTimeout: 5n,
-				},
+	},
+	{
+		name: "FETCH, Absolute Joining, Joining Start 2 (§10.12.2)",
+		bytes: "16 00 07 02 03 00 02 01 20 c8",
+		message: {
+			type: "FETCH",
+			requestId: 2n,
+			range: {
+				fetchType: "AbsoluteJoining",
+				joiningRequestId: 0n,
+				joiningStart: 2n,
 			},
+			parameters: { subscriberPriority: 200 },
 		},
-		{
-			name: "REQUEST_UPDATE with FORWARD (§10.9)",
-			bytes: "02 00 04 01 01 10 01",
-			message: {
-				type: "REQUEST_UPDATE",
-				requestId: 1n,
-				parameters: { forward: true },
+	},
+	{
+		name: "FETCH, Relative Joining, without parameters",
+		bytes: "16 00 05 00 02 08 00 00",
+		message: {
+			type: "FETCH",
+			requestId: 0n,
+			range: {
+				fetchType: "RelativeJoining",
+				joiningRequestId: 8n,
+				joiningStart: 0n,
 			},
+			parameters: {},
 		},
-		// The FETCH messages below are the same bytes as
-		// `the_fetches_sent_to_take_the_fixtures_say_what_they_were_meant_to`
-		// in crates/moqt/src/message.rs: written by hand there, and sent to
-		// the moqtail relay to take its answers.
-		{
-			name: "FETCH, Relative Joining, Joining Start 1 (§10.12.2)",
-			bytes: "16 00 07 02 02 00 01 01 20 c8",
-			message: {
-				type: "FETCH",
-				requestId: 2n,
-				range: {
-					fetchType: "RelativeJoining",
-					joiningRequestId: 0n,
-					joiningStart: 1n,
-				},
-				parameters: { subscriberPriority: 200 },
+	},
+	{
+		name: "FETCH, Standalone, with GROUP_ORDER Descending (§10.2.8)",
+		bytes:
+			"16 00 1d 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 00 00 02 00 01 22 02",
+		message: {
+			type: "FETCH",
+			requestId: 0n,
+			range: {
+				fetchType: "Standalone",
+				trackNamespace: [utf8("xmoq"), utf8("phase0")],
+				trackName: utf8("object"),
+				startLocation: { group: 0n, object: 0n },
+				endLocation: { group: 2n, object: 0n },
 			},
+			parameters: { groupOrder: "Descending" },
 		},
-		{
-			name: "FETCH, Absolute Joining, Joining Start 2 (§10.12.2)",
-			bytes: "16 00 07 02 03 00 02 01 20 c8",
-			message: {
-				type: "FETCH",
-				requestId: 2n,
-				range: {
-					fetchType: "AbsoluteJoining",
-					joiningRequestId: 0n,
-					joiningStart: 2n,
-				},
-				parameters: { subscriberPriority: 200 },
+	},
+	{
+		name: "FETCH, Standalone, Groups 0 to 3",
+		bytes:
+			"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 00 00 04 00 00",
+		message: {
+			type: "FETCH",
+			requestId: 0n,
+			range: {
+				fetchType: "Standalone",
+				trackNamespace: [utf8("xmoq"), utf8("phase0")],
+				trackName: utf8("object"),
+				startLocation: { group: 0n, object: 0n },
+				endLocation: { group: 4n, object: 0n },
 			},
+			parameters: {},
 		},
-		{
-			name: "FETCH, Relative Joining, without parameters",
-			bytes: "16 00 05 00 02 08 00 00",
-			message: {
-				type: "FETCH",
-				requestId: 0n,
-				range: {
-					fetchType: "RelativeJoining",
-					joiningRequestId: 8n,
-					joiningStart: 0n,
-				},
-				parameters: {},
+	},
+	{
+		name: "FETCH, Standalone, Group 1 alone",
+		bytes:
+			"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 01 00 01 00 00",
+		message: {
+			type: "FETCH",
+			requestId: 0n,
+			range: {
+				fetchType: "Standalone",
+				trackNamespace: [utf8("xmoq"), utf8("phase0")],
+				trackName: utf8("object"),
+				startLocation: { group: 1n, object: 0n },
+				endLocation: { group: 1n, object: 0n },
 			},
+			parameters: {},
 		},
-		{
-			name: "FETCH, Standalone, with GROUP_ORDER Descending (§10.2.8)",
-			bytes:
-				"16 00 1d 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 00 00 02 00 01 22 02",
-			message: {
-				type: "FETCH",
-				requestId: 0n,
-				range: {
-					fetchType: "Standalone",
-					trackNamespace: [utf8("xmoq"), utf8("phase0")],
-					trackName: utf8("object"),
-					startLocation: { group: 0n, object: 0n },
-					endLocation: { group: 2n, object: 0n },
-				},
-				parameters: { groupOrder: "Descending" },
+	},
+	{
+		name: "FETCH, Standalone, Group 100 (0x64 is one byte by §1.4.1)",
+		bytes:
+			"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 64 00 65 00 00",
+		message: {
+			type: "FETCH",
+			requestId: 0n,
+			range: {
+				fetchType: "Standalone",
+				trackNamespace: [utf8("xmoq"), utf8("phase0")],
+				trackName: utf8("object"),
+				startLocation: { group: 100n, object: 0n },
+				endLocation: { group: 101n, object: 0n },
 			},
+			parameters: {},
 		},
-		{
-			name: "FETCH, Standalone, Groups 0 to 3",
-			bytes:
-				"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 00 00 04 00 00",
-			message: {
-				type: "FETCH",
-				requestId: 0n,
-				range: {
-					fetchType: "Standalone",
-					trackNamespace: [utf8("xmoq"), utf8("phase0")],
-					trackName: utf8("object"),
-					startLocation: { group: 0n, object: 0n },
-					endLocation: { group: 4n, object: 0n },
-				},
-				parameters: {},
+	},
+	// fixtures/moqt-18-by-hand, which the Rust tests read as well.
+	// §10.2.5 and §10.2.6 give FILL_TIMEOUT and RENDEZVOUS_TIMEOUT no
+	// encoding: a varint of milliseconds, as `moqtail` 0.15.0 writes them.
+	{
+		name: "SUBSCRIBE with RENDEZVOUS_TIMEOUT (fixtures/moqt-18-by-hand)",
+		bytes: byHand("subscribe-rendezvous-timeout"),
+		message: {
+			type: "SUBSCRIBE",
+			requestId: 0n,
+			trackNamespace: [],
+			trackName: utf8("t"),
+			parameters: { rendezvousTimeout: 5n },
+		},
+	},
+	{
+		name: "REQUEST_UPDATE with TRACK_NAMESPACE_PREFIX, a Track Namespace with no length before it (§10.2.14, fixtures/moqt-18-by-hand)",
+		bytes: byHand("request-update-track-namespace-prefix"),
+		readOnly: true,
+		message: {
+			type: "REQUEST_UPDATE",
+			requestId: 3n,
+			parameters: { trackNamespacePrefix: [utf8("xmoq")] },
+		},
+	},
+	{
+		name: "FETCH with FILL_TIMEOUT and GROUP_ORDER Descending (fixtures/moqt-18-by-hand)",
+		bytes: byHand("fetch-fill-timeout"),
+		message: {
+			type: "FETCH",
+			requestId: 4n,
+			range: {
+				fetchType: "RelativeJoining",
+				joiningRequestId: 0n,
+				joiningStart: 0n,
 			},
+			parameters: { fillTimeout: 5n, groupOrder: "Descending" },
 		},
-		{
-			name: "FETCH, Standalone, Group 1 alone",
-			bytes:
-				"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 01 00 01 00 00",
-			message: {
-				type: "FETCH",
-				requestId: 0n,
-				range: {
-					fetchType: "Standalone",
-					trackNamespace: [utf8("xmoq"), utf8("phase0")],
-					trackName: utf8("object"),
-					startLocation: { group: 1n, object: 0n },
-					endLocation: { group: 1n, object: 0n },
-				},
-				parameters: {},
+	},
+	{
+		name: "SUBSCRIBE_OK with DYNAMIC_GROUPS 1, the largest value (§12.6)",
+		bytes: "04 00 04 00 00 30 01",
+		message: {
+			type: "SUBSCRIBE_OK",
+			trackAlias: 0n,
+			parameters: {},
+			trackProperties: [{ type: 0x30n, value: 1n }],
+		},
+	},
+	{
+		name: "FETCH_OK with End Of Track and a Track Property, as in the Rust tests",
+		bytes: "18 00 06 01 02 03 00 0e 05",
+		message: {
+			type: "FETCH_OK",
+			endOfTrack: true,
+			endLocation: { group: 2n, object: 3n },
+			parameters: {},
+			trackProperties: [{ type: 0x0en, value: 5n }],
+		},
+	},
+	{
+		name: "FETCH with FILL_TIMEOUT and an AUTHORIZATION_TOKEN (§10.2.5, §10.2.2)",
+		bytes: "16 00 0a 00 02 00 00 02 03 01 aa 07 05",
+		message: {
+			type: "FETCH",
+			requestId: 0n,
+			range: {
+				fetchType: "RelativeJoining",
+				joiningRequestId: 0n,
+				joiningStart: 0n,
 			},
+			parameters: { authorizationToken: [hex("aa")], fillTimeout: 5n },
 		},
-		{
-			name: "FETCH, Standalone, Group 100 (0x64 is one byte by §1.4.1)",
-			bytes:
-				"16 00 1b 00 01 02 04 78 6d 6f 71 06 70 68 61 73 65 30 06 6f 62 6a 65 63 74 64 00 65 00 00",
-			message: {
-				type: "FETCH",
-				requestId: 0n,
-				range: {
-					fetchType: "Standalone",
-					trackNamespace: [utf8("xmoq"), utf8("phase0")],
-					trackName: utf8("object"),
-					startLocation: { group: 100n, object: 0n },
-					endLocation: { group: 101n, object: 0n },
-				},
-				parameters: {},
-			},
+	},
+	{
+		name: "FETCH_OK with End Of Track and a Track Property (§10.13)",
+		bytes: "18 00 06 01 03 00 00 02 05",
+		message: {
+			type: "FETCH_OK",
+			endOfTrack: true,
+			endLocation: { group: 3n, object: 0n },
+			parameters: {},
+			trackProperties: [{ type: 2n, value: 5n }],
 		},
-		// The next two are the bytes the Rust tests have for the same.
-		{
-			name: "FETCH with FILL_TIMEOUT and GROUP_ORDER Descending, as in the Rust tests",
-			bytes: "16 00 09 04 02 00 00 02 0a 05 18 02",
-			message: {
-				type: "FETCH",
-				requestId: 4n,
-				range: {
-					fetchType: "RelativeJoining",
-					joiningRequestId: 0n,
-					joiningStart: 0n,
-				},
-				parameters: { fillTimeout: 5n, groupOrder: "Descending" },
-			},
-		},
-		{
-			name: "SUBSCRIBE_OK with DYNAMIC_GROUPS 1, the largest value (§12.6)",
-			bytes: "04 00 04 00 00 30 01",
-			message: {
-				type: "SUBSCRIBE_OK",
-				trackAlias: 0n,
-				parameters: {},
-				trackProperties: [{ type: 0x30n, value: 1n }],
-			},
-		},
-		{
-			name: "FETCH_OK with End Of Track and a Track Property, as in the Rust tests",
-			bytes: "18 00 06 01 02 03 00 0e 05",
-			message: {
-				type: "FETCH_OK",
-				endOfTrack: true,
-				endLocation: { group: 2n, object: 3n },
-				parameters: {},
-				trackProperties: [{ type: 0x0en, value: 5n }],
-			},
-		},
-		{
-			name: "FETCH with FILL_TIMEOUT and an AUTHORIZATION_TOKEN (§10.2.5, §10.2.2)",
-			bytes: "16 00 0a 00 02 00 00 02 03 01 aa 07 05",
-			message: {
-				type: "FETCH",
-				requestId: 0n,
-				range: {
-					fetchType: "RelativeJoining",
-					joiningRequestId: 0n,
-					joiningStart: 0n,
-				},
-				parameters: { authorizationToken: [hex("aa")], fillTimeout: 5n },
-			},
-		},
-		{
-			name: "FETCH_OK with End Of Track and a Track Property (§10.13)",
-			bytes: "18 00 06 01 03 00 00 02 05",
-			message: {
-				type: "FETCH_OK",
-				endOfTrack: true,
-				endLocation: { group: 3n, object: 0n },
-				parameters: {},
-				trackProperties: [{ type: 2n, value: 5n }],
-			},
-		},
-	];
+	},
+];
 
 describe("control messages encoded by hand from the draft", () => {
 	test.each(HAND_ENCODED)("decodes $name", ({ bytes, message }) => {
@@ -290,9 +323,12 @@ describe("control messages encoded by hand from the draft", () => {
 		});
 	});
 
-	test.each(HAND_ENCODED)("encodes $name", ({ bytes, message }) => {
-		expect(toHex(encodeControlMessage(message))).toBe(bytes);
-	});
+	test.each(HAND_ENCODED.filter(({ readOnly }) => readOnly === undefined))(
+		"encodes $name",
+		({ bytes, message }) => {
+			expect(toHex(encodeControlMessage(message))).toBe(bytes);
+		},
+	);
 });
 
 describe("decodeControlMessage", () => {

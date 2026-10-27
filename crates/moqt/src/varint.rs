@@ -59,74 +59,57 @@ pub fn decode(buf: &[u8]) -> Option<(u64, usize)> {
 mod tests {
     use super::*;
 
-    /// Table 2 of the draft, plus the edges of each length from Table 1.
-    const MINIMAL: &[(&[u8], u64)] = &[
-        (&[0x25], 37),
-        (&[0xbb, 0xbd], 15_293),
-        (&[0xed, 0x7f, 0x3e, 0x7d], 226_442_877),
-        (&[0xfa, 0xa1, 0xa0, 0xe4, 0x03, 0xd8], 2_893_212_287_960),
-        (
-            &[0xfc, 0x89, 0x98, 0xab, 0xc6, 0x6b, 0xc0],
-            151_288_809_941_952,
-        ),
-        (
-            &[0xfe, 0xfa, 0x31, 0x8f, 0xa8, 0xe3, 0xca, 0x11],
-            70_423_237_261_249_041,
-        ),
-        (
-            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
-            18_446_744_073_709_551_615,
-        ),
-        (&[0x00], 0),
-        (&[0x7f], 127),
-        (&[0x80, 0x80], 128),
-        (&[0xbf, 0xff], 16_383),
-        (&[0xc0, 0x40, 0x00], 16_384),
-        (&[0xdf, 0xff, 0xff], 2_097_151),
-        (&[0xe0, 0x20, 0x00, 0x00], 2_097_152),
-        (&[0xf0, 0x10, 0x00, 0x00, 0x00], 268_435_456),
-        (
-            &[0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
-            72_057_594_037_927_935,
-        ),
-        (
-            &[0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-            72_057_594_037_927_936,
-        ),
-        // Track Alias sent by moqtail-ts 0.13.0 in a PUBLISH, as logged by the
-        // moqtail relay 0.15.0 (alias=779698128977928661).
-        (
-            &[0xff, 0x0a, 0xd2, 0x0b, 0x51, 0x39, 0xc4, 0x21, 0xd5],
-            779_698_128_977_928_661,
-        ),
-    ];
-
-    #[test]
-    fn decodes_minimal_encodings() {
-        for (bytes, value) in MINIMAL {
-            assert_eq!(decode(bytes), Some((*value, bytes.len())), "{bytes:02x?}");
-        }
+    /// The rows of `fixtures/moqt-18-by-hand/varints.tsv`, which
+    /// `@xmoq/moqt` reads as well: Table 2 of §1.4.1 and the edges of each
+    /// length of Table 1, with whether an encoder writes those bytes for the
+    /// value (the fewest; §1.4.1: "any encoding length that can represent
+    /// the value is valid").
+    fn shared_varints() -> Vec<(Vec<u8>, u64, bool)> {
+        include_str!("../../../fixtures/moqt-18-by-hand/varints.tsv")
+            .lines()
+            .map(|row| match row.split('\t').collect::<Vec<_>>()[..] {
+                [hex, value, fewest] => (
+                    (0..hex.len())
+                        .step_by(2)
+                        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                        .collect(),
+                    value.parse().unwrap(),
+                    match fewest {
+                        "yes" => true,
+                        "no" => false,
+                        other => panic!("{other}"),
+                    },
+                ),
+                _ => panic!("a row of three columns: {row}"),
+            })
+            .collect()
     }
 
     #[test]
-    fn encodes_minimally() {
-        for (bytes, value) in MINIMAL {
+    fn varints_are_read_and_written_as_the_shared_table_says() {
+        let rows = shared_varints();
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 26);
+        for (bytes, value, fewest) in rows {
+            assert_eq!(decode(&bytes), Some((value, bytes.len())), "{bytes:02x?}");
             let mut out = Vec::new();
-            encode(*value, &mut out);
-            assert_eq!(out.as_slice(), *bytes, "{value}");
+            encode(value, &mut out);
+            assert_eq!(out == bytes, fewest, "{value}: {out:02x?}");
+            if fewest {
+                assert_eq!(encoded_len(value), bytes.len(), "{value}");
+            }
         }
     }
 
     #[test]
-    fn decodes_non_minimal_encodings() {
-        let cases: &[(&[u8], u64)] = &[
-            // Table 2: 37 in two bytes.
-            (&[0x80, 0x25], 37),
-            (&[0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25], 37),
-        ];
-        for (bytes, value) in cases {
-            assert_eq!(decode(bytes), Some((*value, bytes.len())), "{bytes:02x?}");
-        }
+    fn a_track_alias_of_nine_bytes_from_another_implementation_is_read() {
+        // The Track Alias sent by moqtail-ts 0.13.0 in a PUBLISH, as logged
+        // by the moqtail relay 0.15.0 (alias=779698128977928661).
+        let bytes = [0xff, 0x0a, 0xd2, 0x0b, 0x51, 0x39, 0xc4, 0x21, 0xd5];
+        assert_eq!(decode(&bytes), Some((779_698_128_977_928_661, 9)));
+        let mut out = Vec::new();
+        encode(779_698_128_977_928_661, &mut out);
+        assert_eq!(out, bytes);
     }
 
     #[test]
