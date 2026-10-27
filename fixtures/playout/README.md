@@ -2,7 +2,7 @@
 
 What the two players of this repository agree on: `@xmoq/media`, which the watching page plays by, and `crates/watch`, the viewer for the terminal. No draft says any of it. Both read these tables in their tests; a row is changed for both or for neither.
 
-The values are written out in whole numbers. **Every value in them is provisional**, as it is where it is defined.
+The values are written out in whole numbers. **Every value in them is provisional**, as it is where it is defined. The rules below name the constants of `@xmoq/media` (`packages/media/src/core/`), whose values `crates/watch` has under names of its own.
 
 ## `auto-buffer.tsv`: the buffer that follows how late things come
 
@@ -13,7 +13,7 @@ Tab-separated, a newline after each row.
 | 1 | A name, unique in the table |
 | 2 | The buffer the clock begins with, in milliseconds |
 | 3 | `yes`: the buffer is automatic; `no`: it is not |
-| 4 | The most the automatic buffer may become, in milliseconds; `-` for the default, 400 |
+| 4 | The most the automatic buffer may become, in milliseconds; `-` for the default (`DEFAULT_AUTO_MAX_MS`) |
 | 5 | How many Objects come |
 | 6 | How many milliseconds after the fastest way every Object but the first comes |
 | 7 | How many ticks follow |
@@ -21,9 +21,9 @@ Tab-separated, a newline after each row.
 
 The Objects come 10 ms apart on the publisher's clock: Object `n` has the time `n * 10` ms, and comes at `1000 + n * 10` ms of the player's clock, plus column 6 for every `n` but 0. The ticks come 1 ms after the last Object.
 
-The rule the rows pin: the buffer wanted is what 99 of 100 of the Objects of the last 10 seconds came within, after the fastest, and 10 ms more, rounded up to 10 ms and no more than the limit. At a tick an automatic buffer goes to it at once where that is more, and 10 ms towards it where it is less. Fewer than 50 Objects move nothing.
+The rule the rows pin: the buffer wanted is what the share `DEFAULT_AUTO_SHARE` of the Objects of the last `AUTO_WINDOW_MS` came within, after the fastest, and `AUTO_MARGIN_MS` more, rounded up to `AUTO_STEP_MS` and no more than the limit. At a tick an automatic buffer goes to it at once where that is more, and `AUTO_STEP_MS` towards it where it is less. Fewer than `AUTO_MIN_SAMPLES` Objects move nothing.
 
-## `least.tsv`: the fastest way is that of the last minute
+## `least.tsv`: the fastest way is that of the last `FASTEST_WINDOW_MS`
 
 Tab-separated, a newline after each row.
 
@@ -33,7 +33,7 @@ Tab-separated, a newline after each row.
 | 2 | The Objects in the order they come, a space between them: `when:took`, when it came on the player's clock and how long it took (when it came less the time it carries), both in milliseconds |
 | 3 | The fastest way after each, in milliseconds; `-` for an Object that is left out |
 
-The rule the rows pin: the fastest way is the smallest `took` among the Objects that came in this second of the player's clock and the 59 before it (seconds are whole: `when / 1000`, rounded down). An Object more than 10 seconds from it, either way, is left out and is not kept; where the 60 seconds hold nothing, the Object is the first. An Object that came before the newest second (a clock that was set back) counts for the newest. The 30 in a row after which the clock begins anew are in each implementation's own tests.
+The rule the rows pin: the fastest way is the smallest `took` among the Objects that came in this second of the player's clock and the seconds before it, `FASTEST_WINDOW_MS` in all (seconds are whole: `when / 1000`, rounded down). An Object more than `MOST_FROM_THE_FASTEST_MS` from it, either way, is left out and is not kept; where those seconds hold nothing, the Object is the first. An Object that came before the newest second (a clock that was set back) counts for the newest. The Objects in a row after which the clock begins anew (`ANEW_AFTER`) are in each implementation's own tests.
 
 ## `seam.tsv`: where a piece of sound begins
 
@@ -53,4 +53,4 @@ Tab-separated, a newline after each row. Every piece is 20 ms long. Times are mi
 
 Columns 6 to 9 are `-` for a piece that is not sounded.
 
-The rule the rows pin: a piece follows the one before it, to the sample, as long as that one still sounds and ends within 300 ms of the piece's own time; otherwise it begins at its own time, and is not sounded where that is over. A piece that follows and is more than 8 ms from its own time is played up to a twentieth slower or faster, so that the sound comes back to its own time without a gap.
+The rule the rows pin: a piece follows the one before it, to the sample, as long as that one still sounds and ends within `ABSORB_SECONDS` of the piece's own time; otherwise it begins at its own time, and is not sounded where that is over. A piece that follows and is more than `SEAM_SECONDS` from its own time is played up to `STRETCH` slower or faster, so that the sound comes back to its own time without a gap.

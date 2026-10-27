@@ -9,12 +9,12 @@ Every line has `type` and `at`, the writer's clock in milliseconds since the Uni
 | `type` | Fields | When |
 |---|---|---|
 | `broadcast` | `state` (`began`, `ended`), `namespace` | `began`: the broadcast's catalog came on the session, so the broadcast is there; `ended`: after `began`, the catalog's subscription ended (the broadcast left) or the session ended. Each `began` has its `ended`; a session in which the broadcast never came writes neither. With `--url`, the namespace of `--namespace`. Not in a meeting |
-| `chat` | `number`, `from`, `text`, `sent_at` (the sender's clock), `gathered_at` (the gatherer's clock) | A line of the room, each once, in the order of its number: the latest 16 when the reader comes, then each as it is said. The reader's own lines come back as well |
+| `chat` | `number`, `from`, `text`, `sent_at` (the sender's clock), `gathered_at` (the gatherer's clock) | A line of the room, each once, in the order of its number: the latest `RECENT_LINES` (`xmoq-viewer`) when the reader comes, then each as it is said. The reader's own lines come back as well |
 | `chat_gap` | `after`, `before` | More lines were said while the reader was away than `--chat-catch-up-lines`: those between were not fetched |
 | `joined`, `left` | `name` | Somebody's chat namespace `xmoq/chat/<kind>/<room>/<name>` was announced, or withdrawn |
-| `participant` | `state` (`joined`, `left`), `id` | In a meeting: a participant's broadcast `xmoq/meet/<room>/<id>` was announced, or withdrawn; on a new session, those not told of again within 2 s are written as left. `id` is not the participant's name in the chat |
-| `frame` | `path` (from the folder the line is in, with `/`: `frames/<when the run began, ms>/<file>`), `group`, `object`, `timestamp_us` (the Timestamp of LOC of the frame), `width`, `height`, `asked` (`command`, `every`); in a meeting, `id`, whose picture it is | A picture of the broadcast, written as a PNG in `<dir>/frames/<when the run began, ms>/`: asked for with `/frame`, or every `--frame-every-ms`. It is of the latest frame that decoded, which can be older than the moment it was asked for. `/frame` that gets none within 10 s gets an `error` |
-| `speech` | `number` (in the transcript), `from` (the namespace of the broadcast whose voice it was), `text`, `start_us`, `end_us` (on the clock of the Timestamps of LOC of that broadcast's audio), `read_at` (the transcriber's clock, ms) | Something said in a broadcast, as the transcriber (`xmoq-transcriber`) read it: the pieces of `speech` of `xmoq/transcript/<prefix>` ([`fixtures/transcript-tracks/`](../transcript-tracks/README.md)), each once, in the order of its number. The latest 16 when the reader comes, by a Joining FETCH, then each as it is read; those missed while away, as for the chat. Pieces not fetched are told as an `error`. With `--transcript`, the pieces of every broadcast under that prefix, each with its `from` |
+| `participant` | `state` (`joined`, `left`), `id` | In a meeting: a participant's broadcast `xmoq/meet/<room>/<id>` was announced, or withdrawn; on a new session, those not told of again within `SETTLE_MS` are written as left. `id` is not the participant's name in the chat |
+| `frame` | `path` (from the folder the line is in, with `/`: `frames/<when the run began, ms>/<file>`), `group`, `object`, `timestamp_us` (the Timestamp of LOC of the frame), `width`, `height`, `asked` (`command`, `every`); in a meeting, `id`, whose picture it is | A picture of the broadcast, written as a PNG in `<dir>/frames/<when the run began, ms>/`: asked for with `/frame`, or every `--frame-every-ms`. It is of the latest frame that decoded, which can be older than the moment it was asked for. `/frame` that gets none within `FRAME_WAIT` gets an `error` |
+| `speech` | `number` (in the transcript), `from` (the namespace of the broadcast whose voice it was), `text`, `start_us`, `end_us` (on the clock of the Timestamps of LOC of that broadcast's audio), `read_at` (the transcriber's clock, ms) | Something said in a broadcast, as the transcriber (`xmoq-transcriber`) read it: the pieces of `speech` of `xmoq/transcript/<prefix>` ([`fixtures/transcript-tracks/`](../transcript-tracks/README.md)), each once, in the order of its number. The latest `RECENT_LINES` when the reader comes, by a Joining FETCH, then each as it is read; those missed while away, as for the chat. Pieces not fetched are told as an `error`. With `--transcript`, the pieces of every broadcast under that prefix, each with its `from` |
 | `error` | `message` | Something went wrong, or a line the agent wrote was not said; the reader goes on |
 
 ```json
@@ -31,12 +31,12 @@ The text is as the sender wrote it: a line of JSON escapes what a terminal would
 
 | The line | What happens |
 |---|---|
-| `hello` | Said in the chat. Over 512 bytes, or while 16 lines wait for the gatherer, it is not, and an `error` says so |
-| `/frame` | A picture of the broadcast now, as a `frame` line; in a meeting, `/frame <id>` names whose, and `/frame` alone is of the participant whose voice was read last. Asked while the reader connects (again), it is kept and asked of the next session's video; within 10 s from when it was typed, or an `error`. Before the broadcast's catalog came, an `error` (`frame: no broadcast yet`) |
+| `hello` | Said in the chat. Over `TEXT_BYTES` of `xmoq-chat-tracks`, or while `SAID_WAITING` lines wait for the gatherer, it is not, and an `error` says so |
+| `/frame` | A picture of the broadcast now, as a `frame` line; in a meeting, `/frame <id>` names whose, and `/frame` alone is of the participant whose voice was read last. Asked while the reader connects (again), it is kept and asked of the next session's video; within `FRAME_WAIT` from when it was typed, or an `error`. Before the broadcast's catalog came, an `error` (`frame: no broadcast yet`) |
 | `//hello` | `/hello` is said: one `/` is taken off, so that a line can begin with `/` |
 | `/other` | An `error`: no such command |
 | An empty line | Nothing |
-| Over 4,096 bytes (`xmoq-agent`'s stdin) | Not read, and an `error` says so |
+| Over `MOST_A_LINE` bytes (`xmoq-agent`'s stdin) | Not read, and an `error` says so |
 
 ## `lines.tsv`
 

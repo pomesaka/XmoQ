@@ -12,10 +12,10 @@ A track asked for again on one session, after its subscription ended or was refu
 
 | Column | Content |
 |---|---|
-| 2 | The pause after an end, and after a refusal that names no time; `-` for the default, 1,000 ms |
-| 3 | The shortest pause after a refusal that names a time; `-` for 100 ms |
-| 4 | What the shortest pause grows to; `-` for 5,000 ms |
-| 5 | The longest pause a refusal is let name; `-` for 30,000 ms |
+| 2 | The pause after an end, and after a refusal that names no time; `-` for the default (`ASK_AGAIN_MS` of `xmoq-again`, `DEFAULT_ASK_AGAIN_DELAY_MS` of `@xmoq/moqt`) |
+| 3 | The shortest pause after a refusal that names a time; `-` for the default (`SHORTEST_MS`, `MIN_ASK_AGAIN_DELAY_MS`) |
+| 4 | What the shortest pause grows to; `-` for the default (`MOST_SHORTEST_MS`, `MAX_MIN_ASK_AGAIN_DELAY_MS`) |
+| 5 | The longest pause a refusal is let name; `-` for the default (`MOST_NAMED_MS`, `MAX_NAMED_ASK_AGAIN_DELAY_MS`) |
 | 6 | The steps |
 
 | Step | What happened | The pause |

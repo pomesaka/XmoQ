@@ -14,7 +14,7 @@ It runs until Ctrl-C or SIGTERM, and connects again after a session ends, as the
 
 | | |
 |---|---|
-| Listens to | Every namespace announced under a prefix of `--namespace` (up to 8, none under another), found with one `SUBSCRIBE_NAMESPACE` for each prefix. Of each, the first Opus track with LOC packaging that its catalog names (MSF §5), read with a SUBSCRIBE and a Joining FETCH, as the terminal viewer reads it. A catalog that names another audio track later moves the transcriber to that track |
+| Listens to | Every namespace announced under a prefix of `--namespace` (up to `PREFIXES_MOST` of `src/args.rs`, none under another), found with one `SUBSCRIBE_NAMESPACE` for each prefix. Of each, the first Opus track with LOC packaging that its catalog names (MSF §5), read with a SUBSCRIBE and a Joining FETCH, as the terminal viewer reads it. A catalog that names another audio track later moves the transcriber to that track |
 | Publishes | The track `speech` of `xmoq/transcript/<prefix>` for each prefix, with PUBLISH, from the start of each session. One piece is one Group, and its payload is in [`fixtures/transcript-tracks/`](../../fixtures/transcript-tracks/README.md) |
 | Answers | A FETCH of a transcript, from the latest `--keep` pieces it holds in memory. The pieces of the range that were let go of get one End of Unknown Range indicator, which in Descending order names no number before the first piece, as the Rust client answers (`plan_kept` of `xmoq-publisher`; `Transcript::fetch`) |
 

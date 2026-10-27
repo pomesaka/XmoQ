@@ -29,7 +29,7 @@ const READ_CHUNK: usize = 16 * 1024;
 /// fetch stream nobody reads holds one more read than this, the one that
 /// waits for room in the queue: five times [`READ_CHUNK`] at most, on top of
 /// what the transport holds in the stream's receive window. Its sender is
-/// held back by flow control.
+/// held back by flow control. **Provisional.**
 const FETCH_BODY_CHUNKS: usize = 4;
 
 /// The longest `FETCH_HEADER`: two variable-length integers of 9 bytes.
