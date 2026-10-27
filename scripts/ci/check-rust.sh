@@ -24,4 +24,13 @@ cargo test --workspace --all-features --locked
 # WHY once more without features: `xmoq-moqt-io` has to build and pass with the in-memory
 # connection alone, and nothing else in the workspace builds it that way.
 cargo test -p xmoq-moqt-io --no-default-features --locked
-ran "Rust checks (fmt, clippy, test)"
+# WHY the docs as well: a doc link to an item that is renamed or gone breaks, and nothing else
+# reads the docs. WHY --document-private-items: these crates are documented for the people who
+# change them, and most doc links point at private items; without it rustdoc would not resolve,
+# and so not check, those links. WHY every rustdoc lint (rustdoc::all) but
+# private_intra_doc_links: that one asks a public item not to link to a private one, because
+# the link breaks in docs built without private items, which this project does not build;
+# meeting it would turn such links into plain text, which no rename is checked against.
+RUSTDOCFLAGS="-D warnings -D rustdoc::all -A rustdoc::private_intra_doc_links" \
+	cargo doc --workspace --no-deps --document-private-items --all-features --locked
+ran "Rust checks (fmt, clippy, test, doc)"

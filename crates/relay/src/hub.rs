@@ -2986,7 +2986,8 @@ impl<C: Connection> Hub<C> {
     }
 
     /// Closes every session, and answers when the peers have been told or
-    /// [`CLOSE_REACHES_THE_PEER`] later ([`HubHandle::stop`]).
+    /// [`CLOSE_REACHES_THE_PEER`] later ([`HubHandle::stop_with`],
+    /// [`HubHandle::go_away`]).
     fn stop(&mut self, stopping: Stopping) {
         let (answer, code, reason) = match stopping {
             Stopping::GoAway {

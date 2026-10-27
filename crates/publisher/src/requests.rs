@@ -99,7 +99,8 @@ pub struct FetchAnswer {
     /// Its Group Order ([`answers::group_order`]).
     pub group_order: GroupOrder,
     /// What the fetch stream carries, in the order it is sent
-    /// (`pieces_of` of [`crate::fetch`]), held ([`PeerRequests::hold`]).
+    /// (`pieces_of` of [`crate::fetch`]), within what the answers may hold
+    /// ([`PeerRequests::fits`]).
     pub pieces: Vec<Piece>,
 }
 
