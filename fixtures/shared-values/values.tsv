@@ -1,0 +1,4 @@
+request-stream-open-wait-ms	10000	xmoq-moqt-client,@xmoq/moqt
+publish-done-peer-end-wait-ms	3000	xmoq-moqt-client,@xmoq/moqt
+served-fetch-peer-end-wait-ms	3000	xmoq-relay-core,xmoq-publisher,@xmoq/moqt
+chat-recent-lines	16	xmoq-viewer,@xmoq/chat

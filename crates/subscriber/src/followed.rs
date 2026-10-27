@@ -226,6 +226,14 @@ mod tests {
     #[test]
     fn what_is_fetched_for_a_subscription_to_lines() {
         let rows = include_str!("../../../fixtures/chat-history/history-to-fetch.tsv");
+        // The newest lines of a room had nothing: the chat's, which
+        // `fixtures/shared-values/` holds.
+        let recent = include_str!("../../../fixtures/shared-values/values.tsv")
+            .lines()
+            .find_map(|row| row.strip_prefix("chat-recent-lines\t"))
+            .and_then(|rest| rest.split('\t').next())
+            .map(|value| value.parse::<u64>().unwrap())
+            .unwrap();
         let number = |field: &str| (field != "-").then(|| field.parse::<u64>().unwrap());
         let mut read = 0;
         for row in rows.lines() {
@@ -242,7 +250,12 @@ mod tests {
                 fetch: number(start).map(|start| (start, gap)),
             };
             assert_eq!(
-                past_to_fetch(number(had), number(largest), 16, catch_up.parse().unwrap(),),
+                past_to_fetch(
+                    number(had),
+                    number(largest),
+                    recent,
+                    catch_up.parse().unwrap()
+                ),
                 expected,
                 "{name}"
             );

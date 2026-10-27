@@ -35,7 +35,8 @@ pub const LEAST_WINDOW_SECONDS: u64 = 60;
 /// (`DEFAULT_AUDIO_MIN_MS` of `@xmoq/media`). **Provisional.**
 pub const AUDIO_MIN_US: u64 = 30_000;
 
-/// The automatic buffer (**a trial, not the default**), as that of
+/// The automatic buffer (**a trial, not the default**; its values are
+/// **provisional**), as that of
 /// `@xmoq/media` (`packages/media/src/core/playout-clock.ts`), from where
 /// every value here is: it is what 99 of 100 Objects of the last
 /// [`AUTO_WINDOW_US`] came within, after the fastest, and

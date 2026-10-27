@@ -1,7 +1,7 @@
 // Where a decoded piece of audio begins on the clock of what sounds it, so
 // that it joins the piece before it without a click. No I/O.
 
-/** How far from its own time a piece may begin so as to follow the one before it without a seam, in seconds: less than half a piece of 20 ms. */
+/** How far from its own time a piece may begin so as to follow the one before it without a seam, in seconds: less than half a piece of 20 ms (**provisional**). */
 export const SEAM_SECONDS = 0.008;
 /** How much slower or faster a piece is played to get back to its own time (**provisional**): 20 ms of sound make up 1 ms. */
 export const STRETCH = 0.05;

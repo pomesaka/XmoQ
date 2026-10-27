@@ -109,7 +109,7 @@ const NAMESPACE_CHANGES_HIGH_WATER_MARK = 64;
 const MAX_STREAM_ERROR_CODE = 255;
 export const DEFAULT_SETUP_TIMEOUT_MS = 10_000;
 /** Provisional: how long a request may wait for its stream to be opened (`openStreamTimeoutMs`). The Rust client has the same (`STREAM_OPEN_WAIT_MS`). */
-const DEFAULT_OPEN_STREAM_TIMEOUT_MS = 10_000;
+export const DEFAULT_OPEN_STREAM_TIMEOUT_MS = 10_000;
 /** The Error Reason of the PUBLISH_DONE that ends a PUBLISH nobody answered; the Rust client sends the same. */
 const NO_ANSWER_IN_TIME = "no answer in time";
 
@@ -183,7 +183,7 @@ const UPDATE_REFUSED_WAIT_MS = 5_000;
  * WHY longer than the 2 seconds an XmoQ relay waits for the counted
  * streams: the relay's reset at the end of its wait is to be seen.
  */
-const DEFAULT_PEER_STREAM_END_TIMEOUT_MS = 3_000;
+export const DEFAULT_PEER_STREAM_END_TIMEOUT_MS = 3_000;
 
 /**
  * A wait of the connect options, checked for what a timer takes.

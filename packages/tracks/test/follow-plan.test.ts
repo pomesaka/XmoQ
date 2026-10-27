@@ -38,6 +38,28 @@ function sharedRows(): string[][] {
 		.map((row) => row.split("\t"));
 }
 
+/**
+ * The newest lines fetched where nothing was had: the chat's, which
+ * `fixtures/shared-values/values.tsv` holds.
+ */
+const chatRecentLines = Number(
+	readFileSync(
+		join(
+			import.meta.dir,
+			"..",
+			"..",
+			"..",
+			"fixtures",
+			"shared-values",
+			"values.tsv",
+		),
+		"utf8",
+	)
+		.split("\n")
+		.find((row) => row.startsWith("chat-recent-lines\t"))
+		?.split("\t")[1],
+);
+
 /** A column of the table: `-` is none. */
 const bigintOf = (column: string | undefined): bigint | undefined =>
 	column === undefined || column === "-" ? undefined : BigInt(column);
@@ -49,7 +71,7 @@ describe("what is fetched for a subscription: fixtures/chat-history", () => {
 			const plan = followPlan(
 				bigintOf(had),
 				bigintOf(largest),
-				16,
+				chatRecentLines,
 				Number(catchUp),
 			);
 			expect(plan.forget).toBe(forget === "yes");
