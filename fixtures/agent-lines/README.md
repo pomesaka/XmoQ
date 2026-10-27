@@ -99,7 +99,7 @@ What a reader reads of `inbox.txt` as it is now, after the read before. Six colu
 
 ## `AGENT.md`
 
-The text each reader puts in its folder as `AGENT.md`, as it is. The loop in it was run in dash, bash and zsh of macOS on 2026-10-27, with an empty file being written among the files, a name `.<number>.jsonl.tmp`, one `<number>.jsonl.crswap` and one `notes.jsonl`.
+The text each reader puts in its folder as `AGENT.md`, as it is. The loop in it was run in dash, bash and zsh of macOS on 2026-10-27, with an empty file being written among the files, a name `.<number>.jsonl.tmp`, one `<number>.jsonl.crswap` and one `notes.jsonl`. Its form with `jq` was run in dash and zsh with jq 1.7.1 and with jaq 1.4.0 on 2026-10-27, on the lines of every `type`, alike.
 
 ## `call.tsv`
 
