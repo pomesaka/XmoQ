@@ -26,3 +26,5 @@ publish-namespace-established-stop-sending	publish-namespace	established	stop-se
 subscribe-namespace-established-fin	subscribe-namespace	established	fin	ends
 subscribe-namespace-established-reset	subscribe-namespace	established	reset	ends
 publish-established-fin	publish	established	fin	nothing
+publish-pending-fin	publish	pending	fin	ends
+publish-pending-stop-sending	publish	pending	stop-sending	nothing

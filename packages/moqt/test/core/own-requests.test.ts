@@ -95,8 +95,8 @@ describe("fixtures/own-requests/events.tsv", () => {
 // direction is reported, the PUBLISH being over already (§10.11).
 describe("fixtures/own-requests/stream-ends.tsv", () => {
 	const rows = fixtureTable("own-requests", "stream-ends.tsv");
-	test("the table has its 28 rows of 5 columns", () => {
-		expect(rows.map((row) => row.length)).toEqual(Array(28).fill(5));
+	test("the table has its 30 rows of 5 columns", () => {
+		expect(rows.map((row) => row.length)).toEqual(Array(30).fill(5));
 	});
 	const ANSWERS: Record<string, string> = {
 		subscribe: "04 00 02 09 00",
