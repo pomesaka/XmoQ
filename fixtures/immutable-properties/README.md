@@ -17,12 +17,12 @@ What a receiver makes of the Properties of an Object or a Track that hold Immuta
 
 ## What the rows hold a reader to
 
-The rules are the rows "Immutable Properties (§12.7), of an Object and of a Track, in the two clients", "DEFAULT PUBLISHER PRIORITY above 255 ..." and "DEFAULT_PUBLISHER_GROUP_ORDER other than 1 and 2 ..." of [the implementation notes](../../docs/moqt-implementation-notes.md), with their reasons. Two rows are named for the rule they pin: `inner-types-count-from-zero`, the first Delta Type inside counts from 0, not from 0xB (Figure 2); `malformed-before-mandatory`, malformed is decided before a Mandatory Track Property is looked for.
+The rows are the rules; the sections of the draft they follow are at the code that reads them (`crates/moqt/src/immutable.rs`, `packages/moqt/src/properties.ts`). Two rows are named for the rule they pin: `inner-types-count-from-zero`, the first Delta Type inside counts from 0, not from 0xB (Figure 2); `malformed-before-mandatory`, malformed is decided before a Mandatory Track Property is looked for.
 
 What a row does not cover: the conditions of §12.8 and §12.9 that compare one Object with another, and a reader that is a relay.
 
 ## Source
 
-**Every byte was written by hand from the text of §1.4.3, §12.5 and §12.7 of `draft-ietf-moq-transport-18`, and column 5 is the reading of the implementation notes, not an observation.** No capture of another implementation carries Immutable Properties: `moqtail` 0.15.0 encodes and decodes them; no run of its relay or test client was made to send one. Where it reads the rows otherwise is in the row on Immutable Properties.
+**Every byte was written by hand from the text of §1.4.3, §12.5 and §12.7 of `draft-ietf-moq-transport-18`, and column 5 is the reading of the two implementations, not an observation.** No capture of another implementation carries Immutable Properties: `moqtail` 0.15.0 encodes and decodes them; no run of its relay or test client was made to send one. Where it reads the rows otherwise is under "Observations of other implementations and of the browser" in [the implementation notes](../../docs/moqt-implementation-notes.md).
 
 The Types in the rows: 0x04 MAX_CACHE_DURATION, 0x0E DEFAULT PUBLISHER PRIORITY, 0x10 and 0x11 Types no property of the draft has, 0x22 DEFAULT_PUBLISHER_GROUP_ORDER, 0x30 DYNAMIC_GROUPS, 0x3C Prior Group ID Gap, 0x3E Prior Object ID Gap, 0x4000 a Mandatory Track Property (`c0 40 00` in three bytes), 0x0B Immutable Properties.

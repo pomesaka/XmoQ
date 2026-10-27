@@ -449,7 +449,8 @@ function tookGroups(outcome: SubscriptionOutcome, groups: number[]): boolean {
 /**
  * The Stream Reset Error Code the relay gives a stream that its publisher
  * left unfinished (§11.4.3: such a stream ends with a reset): CANCELLED, the
- * code of docs/moqt-implementation-notes.md for a subscription that ended.
+ * code for a subscription that ended (`cancelled` of
+ * fixtures/moqt-18-verdicts/reset-codes.tsv).
  *
  * The relay gives CANCELLED where the publisher's session ended. Where the
  * publisher resets the stream itself, the relay hands on the publisher's
@@ -1276,8 +1277,7 @@ function refuseOptions(
 
 /**
  * The subscriptions go on while the track has a source left
- * (docs/moqt-implementation-notes.md, "A source of a track that goes while
- * another is left"): the relay has sent none of the subscribers PUBLISH_DONE.
+ * (crates/relay-core/src/tests/sources.rs): the relay has sent none of the subscribers PUBLISH_DONE.
  * The line is seen in every run, when the last source has gone.
  *
  * `by` is the relay's line for what `when` names.

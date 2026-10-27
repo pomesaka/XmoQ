@@ -4,7 +4,7 @@ A publisher that answers a Standalone FETCH for its own track (§10.12.3) from t
 
 **The rows hold for a publisher that publishes Object 0 of one Group after the other, without a gap, and nothing else.** Both publishers do. A publisher with several Objects a Group is not in the table.
 
-Where a Location the publisher published and let go of lies in the range, the stream carries one End of Unknown Range indicator (§11.4.4.2); where it stands and which Location it names are the rows "A publisher that answers a Standalone FETCH from what it published" and "Where a publisher puts an End of Unknown Range indicator in a Descending fetch" of [the implementation notes](../../docs/moqt-implementation-notes.md), with what is provisional. With one Object a Group that Location is Object 0 of a Group.
+Where a Location the publisher published and let go of lies in the range, the stream carries one End of Unknown Range indicator (§11.4.4.2); where it stands and which Location it names are column 10 of the rows, and what is provisional is the item "Where an End of Unknown Range indicator stands in a Descending fetch" under "Other observations about the draft" in [the implementation notes](../../docs/moqt-implementation-notes.md). With one Object a Group that Location is Object 0 of a Group.
 
 ## Format
 

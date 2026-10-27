@@ -1,6 +1,6 @@
 # The answers a subscriber gets to its REQUEST_UPDATEs
 
-A subscriber sends REQUEST_UPDATEs on the stream of its subscription, and the publisher answers each with REQUEST_OK or REQUEST_ERROR, in the order sent (§10.9). After a refusal the publisher ends the subscription with PUBLISH_DONE `UPDATE_FAILED` (§10.9.1). A publisher may coalesce several updates and answer them with "only a single REQUEST_ERROR" (§10.9.1), or answer each. Both sessions read `answers.tsv` in their tests: the Rust session for a SUBSCRIBE and for a subscription a PUBLISH made, `@xmoq/moqt` for a SUBSCRIBE, which is the only subscription it updates. The row "Answers to the REQUEST_UPDATEs a subscriber sent" of [the implementation notes](../../docs/moqt-implementation-notes.md) has the reasons.
+A subscriber sends REQUEST_UPDATEs on the stream of its subscription, and the publisher answers each with REQUEST_OK or REQUEST_ERROR, in the order sent (§10.9). After a refusal the publisher ends the subscription with PUBLISH_DONE `UPDATE_FAILED` (§10.9.1). A publisher may coalesce several updates and answer them with "only a single REQUEST_ERROR" (§10.9.1), or answer each. Both sessions read `answers.tsv` in their tests: the Rust session for a SUBSCRIBE and for a subscription a PUBLISH made, `@xmoq/moqt` for a SUBSCRIBE, which is the only subscription it updates. The reasons are at `update_answered` of `crates/moqt/src/session.rs` and `onUpdateAnswered` of `packages/moqt/src/core/requests.ts`.
 
 ## `answers.tsv`
 

@@ -701,9 +701,10 @@ const DISCONNECTS: Pairing[] = [
 		// after it are the library's wait for late streams before it ends the
 		// subscription.
 		mostlyWaits: true,
-	}, // Two sources of one track (docs/moqt-implementation-notes.md, the rows on
-	// a PUBLISH for a track that has a source, on a Subgroup from another
-	// source, and on a source that goes while another is left).
+	}, // Two sources of one track (a PUBLISH for a track that has a source:
+	// crates/relay-core/src/tests/answers.rs; a Subgroup from another source:
+	// the row of docs/moqt-implementation-notes.md; a source that goes while
+	// another is left: crates/relay-core/src/tests/sources.rs).
 	{
 		name: "two own-rust publishers send the same Group; own-rust and own-browser get it once",
 		script: "disconnect.ts",

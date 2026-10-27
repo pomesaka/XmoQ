@@ -16,7 +16,7 @@ import {
 } from "../helpers.ts";
 
 // What still comes on the stream of a request of the peer that was refused
-// (docs/moqt-implementation-notes.md, the row of that name). The request is
+// (fixtures/peer-subscribe/opened.tsv, fixtures/peer-fetch/served-end.tsv). The request is
 // kept until its stream is gone, whoever refused it: a REQUEST_UPDATE there
 // uses up its Request ID (§10.1) and gets no answer.
 

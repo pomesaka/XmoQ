@@ -49,7 +49,7 @@ Every FETCH is `../moqt-18/fetch-standalone-moqtail-rs.hex` or `../moqt-18/fetch
 
 ## Not in the tables
 
-- How many REQUEST_UPDATEs may wait for the answer to a FETCH, and how many FETCHes of the peer may be open at once: `held-fetch-updates`, `peer-fetches` and `peer-requests` of [`fixtures/limits/`](../limits/README.md), and the rows "REQUEST_UPDATE for a FETCH, received" and "Requests of the peer that are open at once" of [the implementation notes](../../docs/moqt-implementation-notes.md).
+- How many REQUEST_UPDATEs may wait for the answer to a FETCH, and how many FETCHes of the peer may be open at once: `held-fetch-updates`, `peer-fetches` and `peer-requests` of [`fixtures/limits/`](../limits/README.md), and the row "Requests of the peer that are open at once" and the section "Where the two implementations differ" of [the implementation notes](../../docs/moqt-implementation-notes.md).
 - What ends a FETCH that was accepted: the streams are not the session's in the Rust implementation.
 
 ## `served-end.tsv`

@@ -1,6 +1,6 @@
 # How long a request waits for its answer
 
-draft-ietf-moq-transport-18 does not say how long an endpoint waits for the answer to a request it sent. §13.6 has "Each implementation is expected to set its own timeouts", and §3.5 has a code for closing the session over it (`CONTROL_MESSAGE_TIMEOUT`, "the peer took too long to respond to a control message"). The two implementations of this repository wait the same time and do the same when it is over; the row "A request the peer does not answer" of [the implementation notes](../../docs/moqt-implementation-notes.md) has what they do. These rows pin the time.
+draft-ietf-moq-transport-18 does not say how long an endpoint waits for the answer to a request it sent. §13.6 has "Each implementation is expected to set its own timeouts", and §3.5 has a code for closing the session over it (`CONTROL_MESSAGE_TIMEOUT`, "the peer took too long to respond to a control message"). The two implementations of this repository wait the same time and do the same when it is over; what they do is at `in_time` of `crates/moqt-client/src/main.rs` and `answerTimeoutMs` of `packages/moqt/src/webtransport/connection.ts`. These rows pin the time.
 
 The rule: **`answer-wait-ms` of [`fixtures/limits/`](../limits/README.md)** (provisional, with its reason at the constant), **and as long again as the request itself tells a relay to wait**: the RENDEZVOUS_TIMEOUT of a SUBSCRIBE (§10.2.6, "The relay does not send SUBSCRIBE_OK until a publisher becomes available") or the FILL_TIMEOUT of a FETCH (§10.2.5, "the maximum total duration in milliseconds a relay SHOULD spend waiting for upstream sources"). No more than 2,147,483,647 ms, the longest delay a timer of a browser takes. No other parameter changes the time.
 
@@ -24,4 +24,4 @@ What ends a PUBLISH nobody answered in that time: a PUBLISH_DONE with the Status
 
 ## What is not in the table
 
-- What else an endpoint does when the time is over, and that the session stays open: the row named above.
+- What else an endpoint does when the time is over, and that the session stays open: the code named above.

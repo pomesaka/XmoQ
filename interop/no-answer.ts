@@ -13,8 +13,7 @@
 // relay answers first, and nothing is left unanswered. The time is counted
 // by the same code whatever it is.
 //
-// What a run has to show (the row "A request the peer does not answer" of
-// docs/moqt-implementation-notes.md):
+// What a run has to show (fixtures/request-answer-wait/):
 //   - The subscriber gives its SUBSCRIBE up between 1.5 and 4 seconds
 //     after it sent it, and says that no answer came in time: the page's
 //     `subscribe()` fails with `RequestAbortedError` of `no-answer-in-time`,

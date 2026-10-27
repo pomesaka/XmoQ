@@ -112,8 +112,8 @@ pub fn past_to_fetch(
 /// WHY live items wait while the FETCH is open: the FETCH brings the items
 /// before the ones of the subscription, and shown as they come the later
 /// ones would come first. WHY each once: the range of a Joining FETCH and
-/// the subscription can overlap (the row on a Joining FETCH in the relay
-/// of docs/moqt-implementation-notes.md).
+/// the subscription can overlap (the known gap on what a Joining FETCH and a
+/// subscription deliver overlapping, in docs/moqt-implementation-notes.md).
 #[derive(Debug)]
 pub struct Items<T> {
     /// How many live items wait at most while the FETCH is open.

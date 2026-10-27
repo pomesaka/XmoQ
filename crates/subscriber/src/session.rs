@@ -473,9 +473,8 @@ pub async fn send_subscribe<C: Connection>(
     let answer = match open.0.as_mut() {
         Some((send, reader)) => {
             send_message(send, &asked.message, &trace, &asked.name).await?;
-            // WHY from here, and the request alone given up: the row "A
-            // request the peer does not answer" of
-            // docs/moqt-implementation-notes.md, which the page and the Rust
+            // WHY from here, and the request alone given up:
+            // fixtures/request-answer-wait/, which the page and the Rust
             // client go by as well. What the viewer makes of a track it did
             // not get is its caller's.
             tokio::time::timeout(Duration::from_millis(asked.wait_ms), reader.next_event())

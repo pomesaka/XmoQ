@@ -1,6 +1,6 @@
 # The Retry Interval of a REQUEST_ERROR
 
-draft-ietf-moq-transport-18, §10.6.2: "Retry Interval: The minimum time (in milliseconds) before the request SHOULD be sent again, plus one. If the value is 0, the request SHOULD NOT be retried.", and "A Retry Interval value of 1 indicates the request can be retried immediately." The two implementations of this repository read the value in the same way and give the same one to a REQUEST_ERROR they make up themselves; the row "The Retry Interval of a REQUEST_ERROR" of [the implementation notes](../../docs/moqt-implementation-notes.md) has what they do with it. These rows pin the numbers.
+draft-ietf-moq-transport-18, §10.6.2: "Retry Interval: The minimum time (in milliseconds) before the request SHOULD be sent again, plus one. If the value is 0, the request SHOULD NOT be retried.", and "A Retry Interval value of 1 indicates the request can be retried immediately." The two implementations of this repository read the value in the same way and give the same one to a REQUEST_ERROR they make up themselves; what they do with it is at `retry_interval` of `crates/moqt/src/message.rs` and at `madeUpRetryInterval` and `retryAfterMs` of `packages/moqt/src/core/error.ts`. These rows pin the numbers.
 
 No peer was a source for them: the relay and the libraries of moqtail 0.15.0 and moqtransport 0.14.0 send 0 in every REQUEST_ERROR they make.
 

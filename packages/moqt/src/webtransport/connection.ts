@@ -148,8 +148,8 @@ function isAnswer(event: SessionEvent): event is Extract<
 export const DEFAULT_FIRST_BYTES_TIMEOUT_MS = 10_000;
 /**
  * Decided on 2026-10-24, and the value of the Rust implementation, which
- * gets it in another change (docs/moqt-implementation-notes.md, row on a
- * subgroup stream that sends nothing). The publishers of this repository
+ * gets it in another change (`idle-subgroup-stream-ms` of
+ * fixtures/limits/limits.tsv). The publishers of this repository
  * (read on 2026-10-24) close the stream of a Group that is one Object, the
  * chat line and the catalog, right after it, and send a Group of media as
  * its frames come. A publisher that pauses inside a Group for longer loses
@@ -334,8 +334,8 @@ export interface SessionConnectOptions {
 	 * (CONTROL_MESSAGE_TIMEOUT, "the peer took too long to respond to a
 	 * control message"): a relay answers a SUBSCRIBE when the publisher
 	 * behind it has, so one slow publisher would end every other
-	 * subscription of the session. docs/moqt-implementation-notes.md has the
-	 * row, and the Rust client does the same.
+	 * subscription of the session. fixtures/request-answer-wait/ has the
+	 * rows, and the Rust client does the same.
 	 */
 	answerTimeoutMs?: number;
 	/**

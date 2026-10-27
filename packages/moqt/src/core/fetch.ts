@@ -7,7 +7,9 @@
 //
 // The names and the readings follow the Rust implementation
 // (crates/moqt/src/fetch.rs); where the draft leaves a choice, the two make
-// the same one (docs/moqt-implementation-notes.md).
+// the same one (fixtures/moqt-18-verdicts/fetch-stream.tsv and
+// fixtures/moqt-18-by-hand/, which both read; what is provisional is under
+// "Other observations about the draft" in docs/moqt-implementation-notes.md).
 import {
 	type ByteReader,
 	type Bytes,

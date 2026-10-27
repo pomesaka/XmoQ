@@ -112,8 +112,8 @@
 //                        their Object IDs, `pieces=6` twice.
 //                     The relay sends no FETCH to the publisher.
 //
-// What is expected is in `EXPECTED`, written before the runs from the notes
-// (docs/moqt-implementation-notes.md) for the own relay, and from the records
+// What is expected is in `EXPECTED`, written before the runs from the rulings
+// of the own relay (its tests in `crates/relay-core`), and from the records
 // of the moqtail relay and of moqtail's test client for the rest; where a
 // run corrected it, the correction has its reason next to it.
 
@@ -436,8 +436,8 @@ const LAST_OBJECT = "18446744073709551615";
  * about that: the relay from its cache of the latest Group, or the
  * publisher. The relay's log has `WRITE_FETCH_STREAM … pieces=N` for a
  * fetch stream it writes itself, and `OPEN_REQUEST … FETCH` for a FETCH it
- * sends a publisher (docs/moqt-implementation-notes.md, "The relay's cache:
- * what it holds, and which FETCH it answers").
+ * sends a publisher (crates/relay-core/src/cache.rs, and its tests in
+ * crates/relay-core/src/tests/cache.rs).
  *
  * WHY written down: a case that is to show what a publisher's answer
  * becomes shows nothing when the relay answers in its place, and passes

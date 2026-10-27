@@ -2,7 +2,7 @@
 
 MoQ Transport for the browser, written from the text of `draft-ietf-moq-transport-18` (WebTransport subprotocol `moqt-18`): the client end of a session, its requests and the ones of the peer it serves, and when a client asks again and follows a GOAWAY (`src/core/again.ts`, `src/webtransport/keep-moving.ts`). `src/core/` does no input or output; `src/webtransport/connect.ts` alone touches the browser's `WebTransport`.
 
-What of the draft is not met, and how the two implementations read what the draft leaves open, are in the [implementation notes](../../docs/moqt-implementation-notes.md).
+How the two implementations read what the draft leaves open is in the tables of `fixtures/`, which both read in their tests, and in the comments of the code, with the section of the draft. What of the draft is not met, and the readings no test can hold, are in the [implementation notes](../../docs/moqt-implementation-notes.md).
 
 ## Known gaps
 

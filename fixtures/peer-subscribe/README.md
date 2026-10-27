@@ -2,7 +2,7 @@
 
 A client receives a SUBSCRIBE on a bidirectional stream the server opened: a relay asks the publisher of a namespace for a track. The session of each implementation decides, before the application sees the request, whether it is handed on, refused, or a reason to close the session. Both implementations read `opened.tsv` in their tests, so that the same bytes in the same state get the same answer from both.
 
-The draft has the rules. §5.1: "an endpoint can have at most one subscription to a Track acting as the publisher and at most one acting as a subscriber. If an endpoint receives a message attempting to establish a second subscription to a Track with the same role, it MUST fail that request with a DUPLICATE_SUBSCRIPTION error" (`0x19`, §10.6.2), and the same for a SUBSCRIBE while one for the Track is in the Pending (publisher) state. §10.1: a Request ID of the wrong parity, or a duplicate, closes the session with `INVALID_REQUEST_ID`. What the draft leaves open, and the two implementations settled, is in [the implementation notes](../../docs/moqt-implementation-notes.md).
+The draft has the rules. §5.1: "an endpoint can have at most one subscription to a Track acting as the publisher and at most one acting as a subscriber. If an endpoint receives a message attempting to establish a second subscription to a Track with the same role, it MUST fail that request with a DUPLICATE_SUBSCRIPTION error" (`0x19`, §10.6.2), and the same for a SUBSCRIBE while one for the Track is in the Pending (publisher) state. §10.1: a Request ID of the wrong parity, or a duplicate, closes the session with `INVALID_REQUEST_ID`. What the draft leaves open, and the two implementations settled, is in the rows of `opened.tsv`.
 
 ## The table
 

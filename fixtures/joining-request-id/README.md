@@ -26,7 +26,7 @@ The rule: the request is yet to come when the ID is one of the peer's (even from
 
 ## What is not in the table
 
-- What becomes of a FETCH that is held: the row "A Joining FETCH that names a Request ID the peer has not used yet" of [the implementation notes](../../docs/moqt-implementation-notes.md).
+- What becomes of a FETCH that is held: the code that holds it (`crates/moqt/src/session/peer.rs`, `packages/moqt/src/core/peer-requests.ts`), and at the relay `a_joining_fetch_whose_subscribe_never_comes_is_refused_after_the_time_for_first_bytes` of `crates/relay/src/tests.rs`.
 - An implementation remembers only so many IDs the peer used out of order (`request-ids-ahead` of [`fixtures/limits/`](../limits/README.md)). One that it forgot reads as yet to come, and the FETCH that names it is refused when the time runs out instead of at once.
 
 ## Source

@@ -45,7 +45,7 @@ The Group Order is that of the FETCH the stream answers. The bytes do not carry 
 
 ## Where the reading is not settled
 
-**The two `indicator-first` files depend on a place where the draft says two things**, and follow §11.4.4.2; read by §11.4.4.1, the Object of `fetch-stream-indicator-first` is a violation, and that of `fetch-stream-indicator-first-group-delta` is in Group 5. The decision, its basis and how `moqtail` 0.15.0 reads it are in the row "The first Object of a fetch stream, when an End of Range indicator came before it" of the [implementation notes](../../docs/moqt-implementation-notes.md), marked provisional.
+**The two `indicator-first` files depend on a place where the draft says two things**, and follow §11.4.4.2; read by §11.4.4.1, the Object of `fetch-stream-indicator-first` is a violation, and that of `fetch-stream-indicator-first-group-delta` is in Group 5. The decision, its basis and how `moqtail` 0.15.0 reads it are in the item "The first Object of a fetch stream after an End of Range indicator (§11.4.4.1, §11.4.4.2)" under Other observations of the [implementation notes](../../docs/moqt-implementation-notes.md#other-observations-about-the-draft), marked provisional.
 
 Reading the two fields of an indicator as a Location, and not as deltas, is provisional as well (row on the two fields of an End of Range indicator). All files but `fetch-stream-descending` and `fetch-stream-subgroup-id-modes` depend on it.
 

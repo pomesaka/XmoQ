@@ -194,9 +194,9 @@ pub struct Step {
 
 /// The whole of what the client decides about a FETCH of its own, apart from
 /// errors that end the session. Both implementations decide the same
-/// (`docs/moqt-state-models.md`, FETCH, on keeping a FETCH; the row of the
-/// implementation notes on the publisher finishing or resetting its
-/// direction of the request stream).
+/// (`docs/moqt-state-models.md`, FETCH, on keeping a FETCH; the `fetch`
+/// rows of `fixtures/own-requests/stream-ends.tsv` on the publisher
+/// finishing or resetting its direction of the request stream).
 ///
 /// The FETCH is over when it was refused, when it was given up, or when
 /// both its `FETCH_OK` came and its fetch stream ended, by a FIN or by a

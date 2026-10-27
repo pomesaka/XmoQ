@@ -1783,7 +1783,7 @@ impl Client<'_> {
     /// control message"): a relay answers a SUBSCRIBE when the publisher
     /// behind it has, so one slow publisher would end every other request
     /// of the session. `@xmoq/moqt` does the same
-    /// (`docs/moqt-implementation-notes.md`).
+    /// (`fixtures/request-answer-wait/`).
     async fn in_time<T>(
         &self,
         label: &str,

@@ -70,7 +70,7 @@ pub enum StreamEndDoes {
 /// `PUBLISH_OK` it ends the subscription (§5.1: a subscriber ends one with
 /// `STOP_SENDING`): §5.1 has no such transition from Pending, and §3.3.2
 /// lets a receiver cancel; the text does not decide, and this is the
-/// ruling of `docs/moqt-implementation-notes.md`, which `@xmoq/moqt` follows
+/// ruling of `fixtures/own-requests/stream-ends.tsv`, which `@xmoq/moqt` follows
 /// too. The PUBLISH waits for the subscriber's reset or answer.
 /// WHY NOT end it: the subscriber that stopped may still answer.
 ///
