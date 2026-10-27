@@ -1173,6 +1173,26 @@ struct Serving {
     done_due: Option<u64>,
 }
 
+/// Whether the end of a direction of the stream of the `PUBLISH_NAMESPACE`
+/// of this client, `how`, ends it: before its answer (`answered` false) and
+/// after it. `fixtures/own-requests/stream-ends.tsv` has the rows, which
+/// `@xmoq/moqt` reads as well.
+///
+/// Before the answer, a FIN or a reset of the peer ends it, since the
+/// answer can no longer come; this client does not watch its own direction
+/// then (`Client::request_attending` waits for the peer's). After
+/// `REQUEST_OK`, a FIN of the responder is no withdrawal (§3.3.2 cancels "by
+/// resetting or sending `STOP_SENDING`", §6.2 withdraws a namespace by
+/// cancelling the request): the namespace stays published; a reset, or a
+/// `STOP_SENDING` for this client's direction, withdraws it.
+fn namespace_stream_ends(answered: bool, how: &RequestClose) -> bool {
+    match how {
+        RequestClose::Fin => !answered,
+        RequestClose::Reset(_) => true,
+        RequestClose::Stopped(_) => answered,
+    }
+}
+
 /// The `PUBLISH_NAMESPACE` of this client, once it is answered with
 /// `REQUEST_OK`, and its stream while the namespace is published.
 struct Announced {
@@ -2558,7 +2578,7 @@ impl Client<'_> {
                 let event = on_request(&mut self.session, announced.request, message)?;
                 bail!("unexpected on the PUBLISH_NAMESPACE stream: {event:?}");
             }
-            RequestStreamEvent::Closed(RequestClose::Fin) => {}
+            RequestStreamEvent::Closed(how) if !namespace_stream_ends(true, &how) => {}
             RequestStreamEvent::Closed(how) => {
                 report::namespace_withdrawn(&how);
                 self.session.cancel(announced.request);
@@ -3505,6 +3525,36 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rows of `fixtures/own-requests/stream-ends.tsv` for a
+    /// `PUBLISH_NAMESPACE`, which `@xmoq/moqt` reads as well. In Rust the
+    /// session does not decide what the end of the stream of a request of
+    /// this end does; for a `PUBLISH_NAMESPACE` this client does
+    /// ([`namespace_stream_ends`]).
+    #[test]
+    fn the_end_of_the_stream_of_a_publish_namespace_does_what_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/own-requests/stream-ends.tsv");
+        let mut read = 0;
+        for row in table.lines() {
+            let [name, request, state, event, expected] = row.split('\t').collect::<Vec<_>>()[..]
+            else {
+                panic!("a row of five columns: {row}");
+            };
+            if request != "publish-namespace" {
+                continue;
+            }
+            read += 1;
+            let how = match event {
+                "fin" => RequestClose::Fin,
+                "reset" => RequestClose::Reset(Some(0x1)),
+                "stop-sending" => RequestClose::Stopped(Some(0x1)),
+                other => panic!("{name}: {other}"),
+            };
+            let ends = namespace_stream_ends(state == "established", &how);
+            assert_eq!(if ends { "ends" } else { "nothing" }, expected, "{name}");
+        }
+        assert_eq!(read, 5);
+    }
     use xmoq_moqt::message::{
         Publish, PublishDone, PublishNamespace, Subscribe, SubscribeNamespace,
     };

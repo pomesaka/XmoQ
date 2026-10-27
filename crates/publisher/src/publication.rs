@@ -20,6 +20,68 @@ pub const PUBLISH_AGAIN_AFTER: Duration = Duration::from_secs(5);
 /// has the next (§11.1: one alias a track of the session).
 pub const FIRST_TRACK_ALIAS: u64 = 1;
 
+/// Where a PUBLISH of the client stands, for what the end of its stream
+/// does to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishStage {
+    /// Sent, without its answer.
+    Pending,
+    /// Answered with `PUBLISH_OK`.
+    Established,
+    /// Ended by the client with `PUBLISH_DONE` and a FIN; the request's task
+    /// waits for the relay to end its direction (`crate::streams`).
+    Done,
+}
+
+/// How the relay ended a direction of the stream of a PUBLISH of the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestStreamEnd {
+    /// It finished its direction.
+    Fin,
+    /// It reset its direction.
+    Reset,
+    /// It sent `STOP_SENDING` for the client's direction.
+    StopSending,
+}
+
+/// What the end of a direction of the stream of a PUBLISH does to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEndDoes {
+    /// The PUBLISH is over: the client cancels it.
+    Ends,
+    /// Nothing: the PUBLISH goes on.
+    Nothing,
+    /// The PUBLISH was over already; this is the end of the relay's
+    /// direction its task waited for after `PUBLISH_DONE`, and is reported.
+    PeerEnd,
+}
+
+/// What `end` does to a PUBLISH of the client at `stage`; the gatherer of
+/// the chat and the transcriber go by it, and
+/// `fixtures/own-requests/stream-ends.tsv` has the rows. A reset ends a
+/// PUBLISH (§3.3.2), and so does a `STOP_SENDING`, by which a subscriber
+/// ends a subscription (§5.1); a FIN of the subscriber does not: §3.3.2
+/// has a request cancelled "by resetting or sending `STOP_SENDING`". After
+/// `PUBLISH_DONE` the end of the relay's direction is what the task waits
+/// for (§10.11), and a `STOP_SENDING` there finds the client's direction
+/// finished.
+#[must_use]
+pub fn stream_end(stage: PublishStage, end: RequestStreamEnd) -> StreamEndDoes {
+    match (stage, end) {
+        (PublishStage::Done, RequestStreamEnd::Fin | RequestStreamEnd::Reset) => {
+            StreamEndDoes::PeerEnd
+        }
+        (PublishStage::Done, RequestStreamEnd::StopSending)
+        | (PublishStage::Pending | PublishStage::Established, RequestStreamEnd::Fin) => {
+            StreamEndDoes::Nothing
+        }
+        (
+            PublishStage::Pending | PublishStage::Established,
+            RequestStreamEnd::Reset | RequestStreamEnd::StopSending,
+        ) => StreamEndDoes::Ends,
+    }
+}
+
 /// The PUBLISH of a track, and the Objects `T` that wait for it.
 pub struct Publication<T> {
     /// The token of its PUBLISH, while there is one.
@@ -27,6 +89,8 @@ pub struct Publication<T> {
     /// The Track Alias of its latest PUBLISH; 0 before the first, which is
     /// no alias a client gives ([`FIRST_TRACK_ALIAS`]).
     track_alias: u64,
+    /// Whether the PUBLISH has its `PUBLISH_OK`, whatever its Forward State.
+    answered: bool,
     /// Whether the PUBLISH has its `PUBLISH_OK` with Forward State 1:
     /// Objects are sent on it.
     live: bool,
@@ -88,6 +152,7 @@ impl<T> Publication<T> {
         Self {
             publish: None,
             track_alias: 0,
+            answered: false,
             live: false,
             opened: Arc::new(AtomicU64::new(0)),
             waiting: VecDeque::new(),
@@ -108,6 +173,7 @@ impl<T> Publication<T> {
     pub fn published(&mut self, token: u64, track_alias: u64) {
         self.publish = Some(token);
         self.track_alias = track_alias;
+        self.answered = false;
         self.live = false;
         self.opened = Arc::new(AtomicU64::new(0));
         self.not_before = None;
@@ -117,6 +183,16 @@ impl<T> Publication<T> {
     #[must_use]
     pub fn publish(&self) -> Option<u64> {
         self.publish
+    }
+
+    /// Where the PUBLISH of `token` stands, where it is this track's.
+    #[must_use]
+    pub fn stage(&self, token: u64) -> Option<PublishStage> {
+        (self.publish == Some(token)).then_some(if self.answered {
+            PublishStage::Established
+        } else {
+            PublishStage::Pending
+        })
     }
 
     /// Whether Objects are sent on it.
@@ -163,6 +239,7 @@ impl<T> Publication<T> {
         if self.publish != Some(token) {
             return VecDeque::new();
         }
+        self.answered = true;
         self.live = forward;
         std::mem::take(&mut self.waiting)
     }
@@ -175,6 +252,7 @@ impl<T> Publication<T> {
             return false;
         }
         self.publish = None;
+        self.answered = false;
         self.live = false;
         self.waiting.clear();
         self.not_before = failed.then(|| now + PUBLISH_AGAIN_AFTER);
@@ -186,6 +264,7 @@ impl<T> Publication<T> {
     /// none.
     pub fn end(&mut self, status: u64) -> Option<Ending> {
         let token = self.publish.take()?;
+        self.answered = false;
         self.live = false;
         self.waiting.clear();
         Some(Ending {
@@ -205,6 +284,66 @@ impl<T> Publication<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rows of `fixtures/own-requests/stream-ends.tsv` for a PUBLISH,
+    /// which `@xmoq/moqt` reads as well. In Rust the session does not decide
+    /// what the end of the stream of a request of this end does; for a
+    /// PUBLISH [`stream_end`] does, by which the gatherer of the chat and the
+    /// transcriber go.
+    /// A `PUBLISH_OK` with Forward State 0 answers the PUBLISH as one with
+    /// 1 does: what the end of its stream does goes by the answer, not by
+    /// whether Objects are sent.
+    #[test]
+    fn a_publish_is_established_by_its_publish_ok_whatever_its_forward_state() {
+        for (forward, answered, expected) in [
+            (true, false, Some(PublishStage::Pending)),
+            (true, true, Some(PublishStage::Established)),
+            (false, true, Some(PublishStage::Established)),
+        ] {
+            let mut publication = Publication::<()>::new(1);
+            publication.published(TOKEN, FIRST_TRACK_ALIAS);
+            if answered {
+                publication.established(TOKEN, forward);
+            }
+            assert_eq!(publication.stage(TOKEN), expected, "{forward} {answered}");
+            assert_eq!(publication.stage(TOKEN + 1), None);
+        }
+    }
+
+    #[test]
+    fn the_end_of_the_stream_of_a_publish_does_what_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/own-requests/stream-ends.tsv");
+        let mut read = 0;
+        for row in table.lines() {
+            let [name, request, state, event, expected] = row.split('\t').collect::<Vec<_>>()[..]
+            else {
+                panic!("a row of five columns: {row}");
+            };
+            if request != "publish" {
+                continue;
+            }
+            read += 1;
+            let at = match state {
+                "pending" => PublishStage::Pending,
+                "established" => PublishStage::Established,
+                "done" => PublishStage::Done,
+                other => panic!("{name}: {other}"),
+            };
+            let end = match event {
+                "fin" => RequestStreamEnd::Fin,
+                "reset" => RequestStreamEnd::Reset,
+                "stop-sending" => RequestStreamEnd::StopSending,
+                other => panic!("{name}: {other}"),
+            };
+            let got = match stream_end(at, end) {
+                StreamEndDoes::Ends => "ends",
+                StreamEndDoes::Nothing => "nothing",
+                StreamEndDoes::PeerEnd => "reported",
+            };
+            assert_eq!(got, expected, "{name}");
+        }
+        assert_eq!(read, 7);
+    }
 
     const TOKEN: u64 = 7;
     const ALIAS: u64 = 1;

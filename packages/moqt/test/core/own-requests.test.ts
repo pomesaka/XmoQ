@@ -77,3 +77,99 @@ describe("fixtures/own-requests/events.tsv", () => {
 		},
 	);
 });
+
+// fixtures/own-requests/stream-ends.tsv, which the Rust callers of the
+// session read as well, each for the requests of its role: what the peer's
+// FIN, reset or STOP_SENDING on the stream of a request of this end does to
+// it. §3.3.2 cancels a request by "resetting or sending STOP_SENDING"; §5.1
+// has the subscriber end a subscription with STOP_SENDING and the publisher
+// with PUBLISH_DONE, and a FIN is no cancellation. A FIN before the answer
+// ends a request, since the answer can no longer come; a FIN after
+// SUBSCRIBE_OK without PUBLISH_DONE ends the subscription, since PUBLISH_DONE
+// travels on that direction; a FIN after FETCH_OK or after the REQUEST_OK of a
+// PUBLISH_NAMESPACE ends nothing, the FETCH going on until its fetch stream
+// ends (§5.2) and the namespace staying published. A SUBSCRIBE_NAMESPACE ends
+// with either (§6.1). A STOP_SENDING ends nothing before the answer, nor on a
+// SUBSCRIBE, whose publisher ends it, and ends a PUBLISH, a PUBLISH_NAMESPACE,
+// whose subscriber withdraws it. After PUBLISH_DONE, the end of the peer's
+// direction is reported, the PUBLISH being over already (§10.11).
+describe("fixtures/own-requests/stream-ends.tsv", () => {
+	const rows = fixtureTable("own-requests", "stream-ends.tsv");
+	test("the table has its 28 rows of 5 columns", () => {
+		expect(rows.map((row) => row.length)).toEqual(Array(28).fill(5));
+	});
+	const ANSWERS: Record<string, string> = {
+		subscribe: "04 00 02 09 00",
+		fetch: "18 00 04 00 04 02 00",
+		publish: "07 00 01 00",
+		"publish-namespace": "07 00 01 00",
+		"subscribe-namespace": "07 00 01 00",
+	};
+	test.each(rows)(
+		"%s: a %s, %s, gets a %s: %s",
+		(_name, request, state, event, expected) => {
+			const session = createSession();
+			session.start();
+			// Request ID 0 on stream 1, the client's first.
+			switch (request) {
+				case "subscribe":
+					session.subscribe(TRACK);
+					break;
+				case "fetch":
+					session.fetch({
+						range: {
+							fetchType: "Standalone",
+							...TRACK,
+							startLocation: { group: 4n, object: 2n },
+							endLocation: { group: 9n, object: 0n },
+						},
+					});
+					break;
+				case "publish":
+					session.publish({ ...TRACK, trackAlias: 1n });
+					break;
+				case "publish-namespace":
+					session.publishNamespace({ trackNamespace: TRACK.trackNamespace });
+					break;
+				case "subscribe-namespace":
+					session.subscribeNamespace({
+						trackNamespacePrefix: TRACK.trackNamespace,
+					});
+					break;
+				default:
+					throw new Error(`no request ${request}`);
+			}
+			if (state !== "pending") {
+				session.receiveRequestStreamData(
+					1,
+					hex(ANSWERS[request ?? ""] ?? ""),
+					false,
+				);
+			}
+			if (state === "done" && request === "subscribe") {
+				// PUBLISH_DONE, Stream Count 1: the subscription drains.
+				session.receiveRequestStreamData(1, hex("0b 00 03 02 01 00"), false);
+			}
+			if (state === "done" && request === "publish") {
+				session.publishDone(0n, 2n, "");
+			}
+			const outputs =
+				event === "fin"
+					? session.receiveRequestStreamData(1, new Uint8Array(0), true)
+					: event === "reset"
+						? session.requestStreamReset(1, 1)
+						: session.localStreamStopped(1, 1);
+			const said = (type: string): boolean =>
+				outputs.some(
+					(output) => output.type === "event" && output.event.type === type,
+				);
+			expect(
+				said("request-closed")
+					? "ends"
+					: said("peer-direction-ended")
+						? "reported"
+						: "nothing",
+			).toBe(expected ?? "");
+		},
+	);
+});

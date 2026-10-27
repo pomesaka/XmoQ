@@ -204,6 +204,61 @@ mod tests {
 
     use super::*;
 
+    /// The rows of `fixtures/own-requests/stream-ends.tsv` for a
+    /// `SUBSCRIBE_NAMESPACE`, which `@xmoq/moqt` reads as well. In Rust the
+    /// session does not decide what the end of the stream of a request of
+    /// this end does; for a `SUBSCRIBE_NAMESPACE` a [`KeptNamespace`] does.
+    /// §6.1: "A `SUBSCRIBE_NAMESPACE` or `SUBSCRIBE_TRACKS` can be cancelled
+    /// by closing the stream with either a FIN or `RESET_STREAM`", so either
+    /// ends it, after its `REQUEST_OK` as before.
+    #[test]
+    fn the_end_of_the_stream_of_a_subscribe_namespace_does_what_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/own-requests/stream-ends.tsv");
+        let mut read = 0;
+        for row in table.lines() {
+            let [name, request, state, event, expected] = row.split('\t').collect::<Vec<_>>()[..]
+            else {
+                panic!("a row of five columns: {row}");
+            };
+            if request != "subscribe-namespace" {
+                continue;
+            }
+            read += 1;
+            let prefix = TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap();
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            let (request, _) = session.subscribe_namespace(prefix.clone(), vec![]).unwrap();
+            let mut kept = KeptNamespace::new(prefix, Pause::VIEWER);
+            let now = Instant::now();
+            kept.asked(now);
+            if state == "established" {
+                let ok = Ok(RequestStreamEvent::Message(ControlMessage::RequestOk(
+                    RequestOk::default(),
+                )));
+                assert!(matches!(
+                    kept.on_stream(&mut session, request, ok, now),
+                    Ok(NamespaceOutcome::Subscribed)
+                ));
+            }
+            let how = match event {
+                "fin" => RequestClose::Fin,
+                "reset" => RequestClose::Reset(Some(0x1)),
+                other => panic!("{name}: {other}"),
+            };
+            let got = match kept.on_stream(
+                &mut session,
+                request,
+                Ok(RequestStreamEvent::Closed(how)),
+                now,
+            ) {
+                Ok(NamespaceOutcome::Ended { .. }) => "ends",
+                Ok(_) => "nothing",
+                Err(error) => panic!("{name}: {error:?}"),
+            };
+            assert_eq!(got, expected, "{name}");
+        }
+        assert_eq!(read, 2);
+    }
+
     /// What happens to the request, and the pause after it.
     enum Step {
         /// It ended after it lasted this many milliseconds.

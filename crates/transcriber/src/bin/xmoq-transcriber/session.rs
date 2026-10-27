@@ -53,6 +53,7 @@ use xmoq_msf::{CATALOG_TRACK, MAX_CATALOG_LENGTH};
 use xmoq_publisher::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
 use xmoq_publisher::fetch::pieces_of;
 use xmoq_publisher::own::OwnRequests;
+use xmoq_publisher::publication::{PublishStage, RequestStreamEnd, StreamEndDoes, stream_end};
 use xmoq_publisher::publishing::{self, Publish, Publishing, Sent};
 use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
 use xmoq_publisher::streams::{COMMAND_QUEUE, Command, Heard};
@@ -1031,12 +1032,36 @@ impl Transcribing<'_> {
                     .map_err(fault)?;
                 self.on_answer(token, &purpose, event)
             }
-            // §5.1: a subscriber that only finishes its direction of a
-            // PUBLISH's stream has not ended the subscription; nor has a
-            // publisher that finishes its direction of a FETCH it answered.
-            Heard::Closed(RequestClose::Fin)
-                if matches!(purpose, Purpose::Speech(_) | Purpose::CatalogFetch(_)) =>
-            {
+            // What the end of the stream of a PUBLISH does to it is
+            // `stream_end` of `xmoq-publisher`.
+            Heard::Closed(_) | Heard::Stopped(_) if matches!(purpose, Purpose::Speech(_)) => {
+                let end = match &heard {
+                    Heard::Closed(RequestClose::Fin) => RequestStreamEnd::Fin,
+                    Heard::Stopped(_) => RequestStreamEnd::StopSending,
+                    _ => RequestStreamEnd::Reset,
+                };
+                let stage = match &purpose {
+                    Purpose::Speech(prefix) => self
+                        .publishing
+                        .get(prefix)
+                        .and_then(|entry| entry.stage(token)),
+                    _ => None,
+                }
+                .unwrap_or(PublishStage::Established);
+                if stream_end(stage, end) == StreamEndDoes::Ends {
+                    self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
+                    let why = match &heard {
+                        Heard::Stopped(code) => format!("stopped ({code:?})"),
+                        Heard::Closed(how) => format!("its stream ended ({how})"),
+                        _ => String::new(),
+                    };
+                    self.request_over(token, &purpose, Happened::Ended, &why);
+                }
+                Ok(None)
+            }
+            // A publisher that finishes its direction of a FETCH it answered
+            // has not ended it: the FETCH goes on until its fetch stream ends.
+            Heard::Closed(RequestClose::Fin) if matches!(purpose, Purpose::CatalogFetch(_)) => {
                 Ok(None)
             }
             Heard::Closed(how) => {

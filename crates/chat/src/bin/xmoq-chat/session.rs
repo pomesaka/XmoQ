@@ -77,6 +77,7 @@ use xmoq_again::next_session::{Pause, new_url};
 use xmoq_publisher::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
 use xmoq_publisher::fetch::{pieces_of, plan};
 use xmoq_publisher::own::OwnRequests;
+use xmoq_publisher::publication::{PublishStage, RequestStreamEnd, StreamEndDoes, stream_end};
 use xmoq_publisher::publishing::{self, Publish, Publishing, Sent};
 use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
 use xmoq_publisher::streams::{COMMAND_QUEUE, Command, Heard};
@@ -1147,10 +1148,38 @@ impl Gathering<'_> {
                     .map_err(fault)?;
                 self.on_answer(token, &purpose, event)
             }
-            // §5.1: a subscriber that only finishes its direction of a
-            // PUBLISH's stream has not ended the subscription.
-            Heard::Closed(RequestClose::Fin) if matches!(purpose, Purpose::Room(..)) => {
-                println!("PUBLISH_PEER_FINISHED_ITS_DIRECTION");
+            // What the end of the stream of a PUBLISH does to it is
+            // `stream_end` of `xmoq-publisher`.
+            Heard::Closed(_) | Heard::Stopped(_) if matches!(purpose, Purpose::Room(..)) => {
+                let end = match &heard {
+                    Heard::Closed(RequestClose::Fin) => RequestStreamEnd::Fin,
+                    Heard::Stopped(_) => RequestStreamEnd::StopSending,
+                    _ => RequestStreamEnd::Reset,
+                };
+                let stage = (match &purpose {
+                    Purpose::Room(room, track) => self
+                        .publishing
+                        .get(&(room.clone(), *track))
+                        .and_then(|entry| entry.stage(token)),
+                    _ => None,
+                })
+                .unwrap_or(PublishStage::Established);
+                match stream_end(stage, end) {
+                    StreamEndDoes::Ends => {
+                        self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
+                        let why = match &heard {
+                            Heard::Stopped(code) => format!("stopped ({code:?})"),
+                            Heard::Closed(how) => format!("its stream ended ({how})"),
+                            _ => String::new(),
+                        };
+                        self.request_over(token, &purpose, Happened::Ended, &why);
+                    }
+                    StreamEndDoes::Nothing | StreamEndDoes::PeerEnd => {
+                        if matches!(heard, Heard::Closed(RequestClose::Fin)) {
+                            println!("PUBLISH_PEER_FINISHED_ITS_DIRECTION");
+                        }
+                    }
+                }
                 Ok(None)
             }
             Heard::Closed(how) => {
@@ -1163,8 +1192,6 @@ impl Gathering<'_> {
                 );
                 Ok(None)
             }
-            // §5.1: a subscriber ends a subscription that PUBLISH made with
-            // STOP_SENDING.
             Heard::Stopped(code) => {
                 self.let_go(token, Command::Cancel(stream_reset_code::CANCELLED));
                 self.request_over(
