@@ -1,6 +1,6 @@
 # MoQ Transport state models
 
-The states that both MoQ Transport sessions keep, the Rust one (`crates/moqt`) and the TypeScript one (`packages/moqt`): the session, and each request on it. The states and their transitions are those of `draft-ietf-moq-transport-18`, with its section numbers. Where the draft is silent, contradicts itself or leaves a choice, a transition points to the row of the [implementation notes](moqt-implementation-notes.md) that decides it, by the row's Case; what the row decides is not repeated here. The relay's own states (a track, its sources, its subscribers) are outside this document.
+The states that both MoQ Transport sessions keep, the Rust one (`crates/moqt`) and the TypeScript one (`packages/moqt`): the session, and each request on it. The states and their transitions are those of `draft-ietf-moq-transport-18`, with its section numbers. Where the draft is silent, contradicts itself or leaves a choice, a transition points to the row of the [implementation notes](moqt-implementation-notes.md) that decides it, by the row's Case; what the row decides is not repeated here. The relay's own states (a track, its sources, its subscribers) are under [The relay](#the-relay).
 
 Each diagram holds both ends of a request. A transition is labelled with the message or the stream event, and with the end that sends it, where it matters: `SUBSCRIBE_OK (publisher)`. A reset and a STOP_SENDING are the two ways to cancel a request (§3.3.2); a FIN is not one.
 
@@ -159,3 +159,194 @@ stateDiagram-v2
 - **Ending.** §6.1 cancels a SUBSCRIBE_NAMESPACE "by closing the stream with either a FIN or RESET_STREAM": a FIN ends it, unlike the other requests ("A requester finishes its direction of a request stream and does nothing else (no reset, no STOP_SENDING)"). A subscriber treats the end of the stream as NAMESPACE_DONE for each namespace that is Named (§10.18). Subscriptions made by PUBLISH are not affected (§10.18).
 - **A namespace.** NAMESPACE_DONE for one that is not Named closes the session with `PROTOCOL_VIOLATION` (§10.18). The namespaces a session keeps Named are bounded (`MAX_NAMESPACES_OF_A_SUBSCRIPTION`, `crates/moqt/src/session.rs`).
 - **REQUEST_UPDATE.** A new prefix names the namespaces after its REQUEST_OK relative to it (§10.9.2); a refused update has the publisher close the stream (§10.9.1).
+
+## The relay
+
+What `crates/relay-core` keeps above the sessions of its peers: each track, where its Objects come from, who gets them, the streams that come before their Track Alias, and how the relay goes away. Each of its upstream and downstream requests also goes through the states above, in the session it is on.
+
+### A track
+
+A name is in one of three states, or has no entry at all. A source is an upstream subscription that is Established: a PUBLISH the relay accepted, or a SUBSCRIBE of the relay that a publisher accepted.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: SUBSCRIBE (subscriber) for a track with no source, publishers asked or the SUBSCRIBE held (§9.5, §10.2.6)
+    [*] --> Established: PUBLISH (publisher), PUBLISH_OK (relay)
+    Pending --> Established: SUBSCRIBE_OK (publisher), or PUBLISH (publisher)
+    Pending --> [*]: the last ask is over without a source, and no SUBSCRIBE is held
+    Pending --> [*]: the last waiting subscriber is gone, its asks cancelled (relay)
+    Established --> Established: one more source, SUBSCRIBE_OK or PUBLISH (publisher)
+    Established --> Draining: PUBLISH_DONE (publisher) of every source (§10.11)
+    Draining --> Established: PUBLISH (publisher), or SUBSCRIBE_OK of an ask
+    Established --> [*]: the last source cancelled or gone, or the track malformed (§2.4.2)
+    Established --> [*]: the last subscriber gone, every source a SUBSCRIBE of the relay
+    Established --> Draining: the last subscriber gone, the relay's SUBSCRIBEs cancelled, a source left that drains
+    Draining --> [*]: the streams the Stream Count named have ended, or the drain timer
+    Draining --> Pending: the track is over and SUBSCRIBEs are held for a publisher
+```
+
+- **Pending.** No SUBSCRIBE_OK goes downstream before an upstream subscription is Established (§9.4). The relay sends its own SUBSCRIBE to the publishers of a matching namespace (§9.5): "A SUBSCRIBE for a track that has no source, and which publishers the relay asks", "The relay's SUBSCRIBE to a publisher". A SUBSCRIBE with `RENDEZVOUS_TIMEOUT` keeps the track Pending while nobody is asked: "A SUBSCRIBE for a track nobody publishes (RENDEZVOUS_TIMEOUT)". An edge with `--parent` asks the parent relay, and holds the track while its session is opened: "A relay above this one (relay, `--parent`)".
+- **Established.** At least one source does not drain. A SUBSCRIBE gets SUBSCRIBE_OK at once (§9.5), and the publishers of the namespace are still asked, each one more source (§9.3): "PUBLISH for a track the relay knows already". A source that goes while another is left takes only its own Subgroups with it: "A source of a track that goes while another is left".
+- **Draining.** Every source said PUBLISH_DONE, and the relay waits for the streams their Stream Count named (§10.11), or for the drain timer. An ask of the relay can still be open then, sent before the drain or for a namespace announced during it; its SUBSCRIBE_OK makes the track Established again, and its subscribers get no PUBLISH_DONE. A track whose last subscriber goes cancels the relay's own SUBSCRIBEs and drains on with the sources that drain, with nobody left to tell when it ends. A SUBSCRIBE with `RENDEZVOUS_TIMEOUT` waits with the track; one without is refused: "A SUBSCRIBE for a track whose sources have all said PUBLISH_DONE and whose last streams are still awaited". While the track drains, the publishers of its namespace are not asked for a held SUBSCRIBE alone, which is in the [known gaps](moqt-implementation-notes.md#known-gaps-against-the-draft), under several publishers of one track
+- **Over.** Every subscriber gets PUBLISH_DONE, with the code of why the track ended: "What ends the upstream subscriptions of a track", "A malformed track that has several sources". The last subscriber of a track whose sources came with PUBLISH does not end it: "The last subscriber of a track leaves".
+
+#### The relay's SUBSCRIBE to one publisher
+
+```mermaid
+stateDiagram-v2
+    [*] --> Asked: SUBSCRIBE (relay)
+    Asked --> Established: SUBSCRIBE_OK (publisher)
+    Asked --> AwaitsPublish: REQUEST_ERROR DUPLICATE_SUBSCRIPTION (publisher) (§5.1)
+    Asked --> Over: REQUEST_ERROR (publisher), or no answer in time
+    Asked --> Over: the publisher's direction ends, or its session is gone
+    Asked --> Over: cancelled (relay), nobody waits, or PUBLISH of the same publisher (§5.1)
+    AwaitsPublish --> Over: PUBLISH (publisher), or no PUBLISH in time
+    Established --> Draining: PUBLISH_DONE (publisher) (§10.11)
+    Established --> Over: cancelled (relay), the last subscriber gone or the track malformed (§2.4.2)
+    Established --> Over: the publisher's direction ends, or its session is gone
+    Draining --> Over: the streams the Stream Count named have ended, or the drain timer
+    Over --> [*]
+```
+
+- **Asked.** An ask of the track: subscribers that come wait for the same answers (§9.4): "Subscribers while the publisher has not answered the relay's SUBSCRIBE". When the last ask of a Pending track is over, its waiting subscribers are refused: "The publisher's answer to the relay's SUBSCRIBE". A publisher whose ask ended without a source is not asked for the track again until it announces anew (row above on which publishers the relay asks).
+- **A SUBSCRIBE_OK the track cannot take.** The track has as many sources as it takes ("PUBLISH for a track the relay knows already"), or the answer carries a Mandatory Track Property the relay does not understand: the relay cancels the subscription (§3.3.2): "A PUBLISH, or an upstream SUBSCRIBE_OK, whose Track Properties make the Track malformed (§12.7), in Rust alone: `@xmoq/moqt` takes no PUBLISH, and is no relay".
+- **AwaitsPublish.** The request is over on its stream; the relay waits for the PUBLISH that `DUPLICATE_SUBSCRIPTION` stands for (§5.1). When it comes, it is the source: "A PUBLISH for a track the relay has asked a publisher for and has no answer about".
+- **A GOAWAY.** One on the request stream changes nothing: "GOAWAY (§10.4), received". One of the parent relay on its control stream has the relay open a new session there, whose subscriptions become further sources; the old ones end with the old session: "A relay above this one (relay, `--parent`)".
+
+#### A PUBLISH
+
+```mermaid
+stateDiagram-v2
+    [*] --> Source: PUBLISH (publisher), PUBLISH_OK with Forward State 1 (relay)
+    [*] --> Refused: REQUEST_ERROR (relay)
+    Source --> Draining: PUBLISH_DONE (publisher) (§10.11)
+    Source --> Over: reset, STOP_SENDING or FIN of the publisher's direction, or its session gone
+    Source --> Over: reset (relay), the track malformed (§2.4.2)
+    Draining --> Over: FIN (relay), the streams the Stream Count named have ended
+    Draining --> Over: reset (relay), the drain timer
+    Over --> [*]
+    Refused --> [*]
+```
+
+- **Source.** Accepted in whatever state the track is, up to the most sources a track takes: "PUBLISH for a track the relay knows already". The relay's own SUBSCRIBE to the same publisher gives way first (§5.1). The Forward State: "Forward State in the answer to PUBLISH". A track that came with PUBLISH stays without subscribers.
+- **Over.** The publisher's FIN without PUBLISH_DONE ends the PUBLISH, unlike a SUBSCRIBE's: "A requester finishes its direction of a request stream and does nothing else (no reset, no STOP_SENDING)". A publisher whose connection goes: "A publisher whose connection goes".
+
+Names in the code: `TrackPhase` and `TrackEnd` (`crates/relay-core/src/lib.rs`) for a track; `PendingTrack` and `UpstreamPhase` (`crates/relay-core/src/routing.rs`) for a track without a source and for the relay's SUBSCRIBE.
+
+### A subscriber
+
+The relay is the publisher of each downstream SUBSCRIBE.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Waiting: SUBSCRIBE (subscriber), track Pending or new, or Draining and held
+    [*] --> Established: SUBSCRIBE (subscriber), track Established, SUBSCRIBE_OK (relay) (§9.5)
+    [*] --> Refused: REQUEST_ERROR (relay)
+    Waiting --> Established: SUBSCRIBE_OK (relay), once the track has a source (§9.4)
+    Waiting --> Refused: REQUEST_ERROR (relay), every ask over, or the hold over (§10.2.6)
+    Waiting --> Cancelled: reset or STOP_SENDING (subscriber)
+    Established --> Done: PUBLISH_DONE and FIN (relay)
+    Established --> Cancelled: reset or STOP_SENDING (subscriber)
+    Done --> [*]: the subscriber ends its direction, or STOP_SENDING (relay)
+    Cancelled --> [*]
+    Refused --> [*]
+```
+
+- **Waiting.** No SUBSCRIBE_OK before the track has an Established upstream subscription (§9.4). A held SUBSCRIBE is refused with `TIMEOUT` when its time is over and nobody is asked (§10.2.6); one whose asks are over gets what the last publisher answered, or `TIMEOUT` where none answered in time (§10.6.2). The rows: "Subscribers while the publisher has not answered the relay's SUBSCRIBE", "The publisher's answer to the relay's SUBSCRIBE", "A SUBSCRIBE for a track nobody publishes (RENDEZVOUS_TIMEOUT)". When the last waiting subscriber goes, what was asked for it is cancelled. A SUBSCRIBE held while its track drained is asked for when the drain ends; nobody taking the track before its time is over refuses it with `TIMEOUT`, and a publisher asked then still answers it.
+- **Established.** Objects go out from the Start Location of its filter, while its Forward State is 1 (§5.1): "SUBSCRIBE with FORWARD 0". A REQUEST_UPDATE: "REQUEST_UPDATE for an Established subscription that the receiver publishes to (on the stream of the peer's SUBSCRIBE, or of its own PUBLISH)".
+- **Done.** PUBLISH_DONE with the Status Code of why it ended: `TRACK_ENDED` or `MALFORMED_TRACK` with the track ("What ends the upstream subscriptions of a track"), `TOO_FAR_BEHIND` for a subscriber that does not take what is sent (§8; "A subscriber that does not take what is sent to it", "What may wait to be written at the relay, and what ends when it is too much"), `UPDATE_FAILED` after a refused update (§10.9.1). Streams the relay cannot finish are reset before it, and FIN follows it (§10.11): "Stream Count in the PUBLISH_DONE the relay sends". A subscriber that keeps its direction open: "A subscriber that does not close its direction of the request stream after the relay's PUBLISH_DONE".
+- **Cancelled.** The relay resets the subscription's open streams. A FIN of the subscriber is no cancellation: "A requester finishes its direction of a request stream and does nothing else (no reset, no STOP_SENDING)", "STOP_SENDING on a request stream the peer opened". A subscriber whose session is gone is cancelled the same way.
+
+#### A FETCH of a subscriber
+
+Where a FETCH stands at the relay before its answer. The FETCH itself goes through the states of [FETCH](#fetch) towards the subscriber, and an upstream FETCH of the relay through them towards the publisher.
+
+```mermaid
+stateDiagram-v2
+    state "Held for its SUBSCRIBE" as HeldForSubscribe
+    state "Held for an Object" as HeldForObject
+    state "Held for the parent" as HeldForParent
+    state "Written from the cache" as Written
+    state "Asked upstream" as Relayed
+    [*] --> HeldForSubscribe: Joining FETCH (subscriber), its SUBSCRIBE Waiting or yet to come (§10.12.2)
+    [*] --> Range: Standalone FETCH (subscriber)
+    HeldForSubscribe --> Range: SUBSCRIBE_OK (relay), the range from its LARGEST_OBJECT
+    HeldForSubscribe --> Refused: its SUBSCRIBE refused, or not come in time
+    Range --> Written: the range is in the cache, FETCH_OK and the fetch stream (relay)
+    Range --> HeldForObject: an Object of the range is being received (§9.4)
+    Range --> HeldForParent: nobody to ask, the session with the parent is opened
+    Range --> Relayed: FETCH (relay) to one publisher
+    Range --> Refused: nobody to ask
+    HeldForObject --> Written: the Object is whole
+    HeldForObject --> Relayed: the Object did not arrive whole, or the wait is over
+    HeldForParent --> Relayed: the parent's session is open
+    HeldForParent --> Refused: no session with the parent
+    Relayed --> Relayed: REQUEST_ERROR or no answer (publisher), the next publisher asked
+    Relayed --> Answered: FETCH_OK or the fetch stream (publisher), passed on
+    Relayed --> Refused: nobody left to ask
+    Written --> [*]
+    Answered --> [*]
+    Refused --> [*]
+```
+
+- **Range.** A Joining FETCH becomes a range of the track, counted from the LARGEST_OBJECT of the SUBSCRIBE_OK the relay sent: "A Joining FETCH in the relay", "A Joining FETCH for a SUBSCRIBE the relay has not answered yet", "A Joining FETCH that names a Request ID the peer has not used yet". `FILL_TIMEOUT` 0 is answered from the cache alone: "FILL_TIMEOUT 0 in a FETCH".
+- **Written from the cache.** "The relay's cache: what it holds, and which FETCH it answers".
+- **Held for an Object.** No FETCH_OK while the relay lacks what it needs for one (§9.4): "A FETCH for an Object the relay is receiving".
+- **Asked upstream.** One publisher at a time: "Whom a Standalone FETCH is asked of". Its waits: "A FETCH that does not come to its end".
+- **Cancelled**, from any of these states, by the subscriber (§5.2): "The subscriber gives its FETCH up". A track found malformed ends its FETCH requests with it (§2.4.2).
+
+Names in the code: `Waiter` (`crates/relay-core/src/routing.rs`) for Waiting, `Subscriber` and `RequestSlot` (`crates/relay-core/src/lib.rs`) for a subscriber, and `Standing` (`crates/relay-core/src/fetch.rs`) for a FETCH.
+
+### A subgroup stream before its Track Alias
+
+A subgroup stream can arrive before the PUBLISH or the SUBSCRIBE_OK that gives its Track Alias, which travel on other streams. §11.4.2 lets a receiver abandon it or "buffer it for a brief period".
+
+```mermaid
+stateDiagram-v2
+    [*] --> Taken: the alias is one of a source, going on or draining
+    [*] --> Held: the alias is not known (§11.4.2)
+    [*] --> Stopped: the alias is one of a subscription that is over, or the limit of held streams is reached
+    Held --> Held: an Object, within the limits of Objects and bytes, or the stream's end
+    Held --> Taken: PUBLISH accepted, or SUBSCRIBE_OK of the relay's SUBSCRIBE, gives the alias
+    Held --> Stopped: an Object beyond the limit of Objects or of bytes
+    Held --> Stopped: the PUBLISH refused, or a SUBSCRIBE_OK the relay cannot take
+    Held --> Stopped: the time a stream is held is over
+    Taken --> [*]
+    Stopped --> [*]
+```
+
+- **Held.** Within limits of streams, Objects, bytes and time for each session, the bytes counted as a client counts them: "A subgroup stream whose Track Alias is not known yet". The relay decides each stream and Object by the rule a client uses, with an answer that may always still come, where a client asks whether one of its SUBSCRIBEs waits; its own timer ends the wait.
+- **Taken.** The held Objects, and the stream's end where it came, are fed to the track in the order they came. Which streams a track takes: "Which subgroup streams the relay takes for a track".
+- **Stopped.** STOP_SENDING with `INTERNAL_ERROR` at a limit, `CANCELLED` otherwise. A stream that ended while it was held is let go of without one.
+
+Names in the code: `EarlyStream` (`crates/relay-core/src/lib.rs`).
+
+### GOAWAY from the relay
+
+The relay sends GOAWAY on the control stream in two cases: to every session when it is told to stop, and to one session that comes when it is full. Each session then goes through GoAwaySent of [the session](#the-session).
+
+```mermaid
+stateDiagram-v2
+    state "Going away" as GoingAway
+    [*] --> Serving
+    Serving --> GoingAway: SIGTERM or SIGINT, GOAWAY on every control stream (relay) (§3.6, §10.4)
+    GoingAway --> Stopped: no session of a client left, the parent's closed with NO_ERROR (relay)
+    GoingAway --> Stopped: the Timeout is over, every session closed with GOAWAY_TIMEOUT (relay) (§3.6)
+    Stopped --> [*]
+```
+
+```mermaid
+stateDiagram-v2
+    state "Sent away" as SentAway
+    [*] --> Served: a session within --max-sessions
+    [*] --> SentAway: a session beyond --max-sessions, with --when-full, SETUP and GOAWAY (relay)
+    [*] --> Closed: a session beyond --max-sessions, nowhere to send it (relay)
+    SentAway --> Closed: the peer closes, or GOAWAY_TIMEOUT after its Timeout (relay) (§3.6)
+    Served --> [*]
+    Closed --> [*]
+```
+
+- **Going away.** The New Session URI is `--redirect-uri` towards a client, where an empty one has the client reuse its URI, and empty towards the parent (§10.4); the Timeout is `--goaway-timeout-ms`. Every request of a peer after the GOAWAY is refused with `GOING_AWAY` (§10.4). Connections that come are refused; a client whose handshake was under way, and the session with the parent relay, still open, and each gets the GOAWAY after its SETUP. What drains is what was taken before: the subscriptions and FETCH requests go on, and the relay does not unsubscribe upstream; its upstream subscriptions end with the sessions. The rest is the row's: "GOAWAY (§10.4), sent by the relay".
+- **Sent away.** The URL of `--when-full`, with `sent-away=1` added, and a short Timeout. A session that came with that query, or that would be one more than the relay sends away at once, is closed at once; so is every session beyond `--max-sessions` without `--when-full`. Its peer's requests are refused with `GOING_AWAY` as above. A sent-away session does not count among the `--max-sessions`.
+
+Names in the code: `Stopping` (`crates/relay/src/hub.rs`).

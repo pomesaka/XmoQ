@@ -1387,6 +1387,155 @@ fn a_held_track_that_was_passed_over_is_asked_for_when_the_session_has_room_agai
     assert_eq!(relay.counts().own_requests, 8);
 }
 
+/// Bob publishes the track and says `PUBLISH_DONE`, counting a stream that
+/// does not come, and Alice's SUBSCRIBE is held for ten seconds while the
+/// track drains. PUBLISHER has announced the namespace where `announced`.
+fn relay_with_a_subscribe_held_by_a_draining_track(announced: bool) -> Relay {
+    let mut relay = relay();
+    if announced {
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+    }
+    relay.step(Event::RequestOpened {
+        session: BOB,
+        stream: StreamKey(0),
+        first: publish(0, b"a"),
+    });
+    bob_is_done(&mut relay);
+    let held = relay.step(Event::RequestOpened {
+        session: ALICE,
+        stream: StreamKey(0),
+        first: ControlMessage::Subscribe(Subscribe {
+            request_id: 0,
+            full_track_name: track_in(&[b"xmoq"]),
+            parameters: vec![Parameter::RendezvousTimeout(10_000)],
+        }),
+    });
+    assert!(
+        held.contains(&Action::StartRendezvousTimer {
+            session: ALICE,
+            stream: StreamKey(0),
+            wait_ms: 10_000,
+        }),
+        "{held:?}"
+    );
+    relay
+}
+
+/// Bob's wait for the stream he counted runs out: his track is over.
+fn bobs_drain_ends(relay: &mut Relay) -> Vec<Action> {
+    relay.step(Event::DrainTimeout {
+        session: BOB,
+        track_alias: UPSTREAM_ALIAS,
+        wait: 0,
+    })
+}
+
+fn tells_alice(actions: &[Action]) -> bool {
+    actions
+        .iter()
+        .any(|action| matches!(action, Action::SendRequest { session: ALICE, .. }))
+}
+
+fn nothing_is_left_of_the_track(relay: &Relay) -> bool {
+    let counts = relay.counts();
+    (
+        counts.tracks,
+        counts.pending_tracks,
+        counts.asks,
+        counts.own_requests,
+    ) == (0, 0, 0, 0)
+}
+
+#[test]
+fn a_subscribe_held_while_its_track_drained_gets_timeout_when_nobody_takes_the_track_in_its_time() {
+    struct Row {
+        name: &'static str,
+        announced: bool,
+        /// Whom the relay asks for the track when it is over.
+        asked: Vec<SessionKey>,
+        /// What comes after, before Alice's time is over.
+        then: Vec<Event>,
+    }
+    let rows = [
+        Row {
+            name: "nobody announced the namespace",
+            announced: false,
+            asked: vec![],
+            then: vec![],
+        },
+        Row {
+            name: "the publisher of the namespace refuses",
+            announced: true,
+            asked: vec![PUBLISHER],
+            then: vec![upstream(
+                PUBLISHER,
+                0,
+                ControlMessage::RequestError(error(0x10)),
+            )],
+        },
+    ];
+    for row in rows {
+        let name = row.name;
+        let mut relay = relay_with_a_subscribe_held_by_a_draining_track(row.announced);
+        let over = bobs_drain_ends(&mut relay);
+        let asked: Vec<SessionKey> = over
+            .iter()
+            .filter_map(|action| match action {
+                Action::OpenRequest { session, .. } => Some(*session),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, row.asked, "{name}");
+        assert!(!tells_alice(&over), "{name}: {over:?}");
+        for event in row.then {
+            let actions = relay.step(event);
+            assert!(!tells_alice(&actions), "{name}: {actions:?}");
+        }
+        // §10.2.6: "If the timeout expires without a publisher, the relay
+        // SHOULD respond with REQUEST_ERROR with error code TIMEOUT."
+        assert_eq!(
+            relay.step(Event::RendezvousTimeout {
+                session: ALICE,
+                stream: StreamKey(0),
+            }),
+            refused(ALICE, 0, error(0x2)),
+            "{name}"
+        );
+        assert!(nothing_is_left_of_the_track(&relay), "{name}");
+    }
+}
+
+#[test]
+fn a_subscribe_held_while_its_track_drained_gets_the_answer_of_the_publisher_asked_when_its_time_ran_out()
+ {
+    let mut relay = relay_with_a_subscribe_held_by_a_draining_track(true);
+    bobs_drain_ends(&mut relay);
+    assert_eq!(
+        relay.step(Event::RendezvousTimeout {
+            session: ALICE,
+            stream: StreamKey(0),
+        }),
+        []
+    );
+    assert_eq!(
+        relay.step(upstream(
+            PUBLISHER,
+            0,
+            ControlMessage::RequestError(error(0x10))
+        )),
+        [
+            [Action::FinishOwnRequest {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+            }]
+            .as_slice(),
+            &refused(ALICE, 0, error(0x10)),
+        ]
+        .concat()
+    );
+    assert!(nothing_is_left_of_the_track(&relay));
+}
+
 #[test]
 fn only_so_many_namespaces_are_kept_for_one_session() {
     // (the limit the relay is given, if any; how many are kept)
@@ -1895,6 +2044,235 @@ fn what_was_asked_is_cancelled_when_the_track_ends_with_its_last_source() {
     expected.extend(done_actions(ALICE, 0x2, 0));
     assert_eq!(relay.step(Event::SessionClosed { session: BOB }), expected);
     assert_eq!(routed(&relay), (1, 0, 0, 0, 0));
+}
+
+/// Whether a stream that `session` opens as its `stream`, under the alias
+/// the publishers of these tests use, reaches Alice.
+fn reaches_alice(relay: &mut Relay, session: SessionKey, stream: u64) -> bool {
+    relay
+        .step(Event::DataStreamOpened {
+            session,
+            stream: StreamKey(stream),
+            header: header_of_group(UPSTREAM_ALIAS, stream),
+        })
+        .iter()
+        .any(|action| matches!(action, Action::OpenDataStream { session: ALICE, .. }))
+}
+
+/// Bob's PUBLISH says `PUBLISH_DONE` and counts a stream that does not
+/// come: his source drains.
+fn bob_is_done(relay: &mut Relay) {
+    relay.step(Event::RequestMessage {
+        session: BOB,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 1),
+    });
+}
+
+#[test]
+fn a_draining_track_goes_on_with_a_publisher_that_accepts_what_the_relay_asked() {
+    struct Row {
+        name: &'static str,
+        /// A track Alice is subscribed to, whose every source drains while
+        /// the relay's SUBSCRIBE `request` to `answers` has no answer.
+        relay: fn() -> Relay,
+        answers: SessionKey,
+        request: u64,
+        /// The source that drains, and what the relay does when the wait
+        /// for its counted stream runs out.
+        drained: SessionKey,
+        drain_ends: Vec<Action>,
+    }
+    fn asked_before_it_drained() -> Relay {
+        let mut relay = relay_with_a_source_and_an_ask();
+        bob_is_done(&mut relay);
+        relay
+    }
+    fn asked_while_it_drains() -> Relay {
+        let mut relay = relay_with_routed_track();
+        relay.step(upstream(PUBLISHER, 0, publish_done(0x2, 1)));
+        // §9.5: a namespace announced for a track with subscribers has its
+        // publisher asked, whether or not the track drains.
+        assert_eq!(
+            &announce(&mut relay, BOB, 0, &[b"xmoq"])[1..],
+            &asked(BOB, 1, 1, &[b"xmoq"])
+        );
+        relay
+    }
+    let rows = [
+        Row {
+            name: "asked before the track drained",
+            relay: asked_before_it_drained,
+            answers: PUBLISHER,
+            request: 0,
+            drained: BOB,
+            drain_ends: vec![Action::ResetRequest {
+                session: BOB,
+                stream: StreamKey(0),
+                code: 0x1,
+            }],
+        },
+        Row {
+            name: "asked while the track drains",
+            relay: asked_while_it_drains,
+            answers: BOB,
+            request: 1,
+            drained: PUBLISHER,
+            drain_ends: vec![Action::CancelOwnRequest {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+                code: 0x1,
+            }],
+        },
+    ];
+    for row in rows {
+        let name = row.name;
+        let mut relay = (row.relay)();
+        // The track has no Established subscription: a subscriber that
+        // does not ask to be held is turned away.
+        assert_eq!(
+            subscribe_to(&mut relay, CAROL, 0, &[b"xmoq"]),
+            refused(CAROL, 0, error(0x10)),
+            "{name}"
+        );
+        // Alice, who is subscribed, is told nothing of the answer.
+        assert_eq!(
+            relay.step(upstream(
+                row.answers,
+                row.request,
+                upstream_subscribe_ok(None)
+            )),
+            [Action::StopUpstreamTimer {
+                session: row.answers,
+                request: OwnRequestKey(row.request),
+            }],
+            "{name}"
+        );
+        let carol = subscribe_to(&mut relay, CAROL, 1, &[b"xmoq"]);
+        assert!(
+            matches!(
+                carol.first(),
+                Some(Action::SendRequest {
+                    session: CAROL,
+                    message: ControlMessage::SubscribeOk(_),
+                    ..
+                })
+            ),
+            "{name}: {carol:?}"
+        );
+        assert!(reaches_alice(&mut relay, row.answers, 9), "{name}");
+        // The source that drained is let go of, and the track goes on
+        // without a PUBLISH_DONE to anyone.
+        assert_eq!(
+            relay.step(Event::DrainTimeout {
+                session: row.drained,
+                track_alias: UPSTREAM_ALIAS,
+                wait: 0,
+            }),
+            row.drain_ends,
+            "{name}"
+        );
+        assert!(reaches_alice(&mut relay, row.answers, 11), "{name}");
+    }
+}
+
+#[test]
+fn with_the_last_subscriber_the_relays_subscribe_is_cancelled_and_the_other_source_drains_to_the_end()
+ {
+    struct Row {
+        name: &'static str,
+        /// A track Alice is subscribed to, with the relay's SUBSCRIBE
+        /// `cancelled` Established and another source that drains.
+        relay: fn() -> Relay,
+        cancelled: (SessionKey, u64),
+        /// The source that drains, and what the relay does when the wait
+        /// for its counted stream runs out.
+        drained: SessionKey,
+        drain_ends: Vec<Action>,
+    }
+    fn a_publish_drains() -> Relay {
+        let mut relay = relay_with_a_source_and_an_ask();
+        relay.step(upstream(PUBLISHER, 0, upstream_subscribe_ok(None)));
+        bob_is_done(&mut relay);
+        relay
+    }
+    fn a_subscribe_drains() -> Relay {
+        let mut relay = relay();
+        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
+        announce(&mut relay, BOB, 0, &[b"xmoq"]);
+        subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
+        relay.step(upstream(PUBLISHER, 0, upstream_subscribe_ok(None)));
+        relay.step(upstream(BOB, 1, upstream_subscribe_ok(None)));
+        relay.step(upstream(PUBLISHER, 0, publish_done(0x2, 1)));
+        relay
+    }
+    let rows = [
+        Row {
+            name: "the source that drains came with PUBLISH",
+            relay: a_publish_drains,
+            cancelled: (PUBLISHER, 0),
+            drained: BOB,
+            drain_ends: vec![Action::ResetRequest {
+                session: BOB,
+                stream: StreamKey(0),
+                code: 0x1,
+            }],
+        },
+        Row {
+            name: "the source that drains is another SUBSCRIBE of the relay",
+            relay: a_subscribe_drains,
+            cancelled: (BOB, 1),
+            drained: PUBLISHER,
+            drain_ends: vec![Action::CancelOwnRequest {
+                session: PUBLISHER,
+                request: OwnRequestKey(0),
+                code: 0x1,
+            }],
+        },
+    ];
+    for row in rows {
+        let name = row.name;
+        let mut relay = (row.relay)();
+        let (session, request) = row.cancelled;
+        assert_eq!(
+            relay.step(Event::RequestClosed {
+                session: ALICE,
+                stream: StreamKey(0),
+                how: RequestEnd::Aborted,
+            }),
+            [
+                Action::FinishRequest {
+                    session: ALICE,
+                    stream: StreamKey(0),
+                },
+                Action::CancelOwnRequest {
+                    session,
+                    request: OwnRequestKey(request),
+                    code: 0x1,
+                },
+            ],
+            "{name}"
+        );
+        // The track is there and drains: a subscriber is turned away, where
+        // for a track that is gone the publishers would be asked.
+        assert_eq!(
+            subscribe_to(&mut relay, CAROL, 0, &[b"xmoq"]),
+            refused(CAROL, 0, error(0x10)),
+            "{name}"
+        );
+        // Nobody is left to be told PUBLISH_DONE.
+        assert_eq!(
+            relay.step(Event::DrainTimeout {
+                session: row.drained,
+                track_alias: UPSTREAM_ALIAS,
+                wait: 0,
+            }),
+            row.drain_ends,
+            "{name}"
+        );
+        let counts = relay.counts();
+        assert_eq!((counts.tracks, counts.own_requests), (0, 0), "{name}");
+    }
 }
 
 #[test]
