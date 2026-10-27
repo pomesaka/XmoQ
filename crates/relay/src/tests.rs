@@ -753,6 +753,37 @@ async fn a_session_over_the_limit_is_sent_to_when_full_once_and_closed_otherwise
     }
 }
 
+/// WHY a client can come after the GOAWAY at all: `main.rs` refuses the
+/// connections that arrive from then on, but a handshake that was under way
+/// runs in a task of its own and hands its session to the hub when it ends.
+#[tokio::test(start_paused = true)]
+async fn a_client_that_comes_to_a_relay_that_goes_away_is_told_after_its_setup() {
+    const URI: &[u8] = b"https://other.example/";
+    let (hub, _task) = hub::spawn(HubConfig::default());
+    // Alice is there, so the relay is not drained.
+    let mut alice = Peer::connect(&hub, true).await;
+    let going_away = {
+        let hub = hub.clone();
+        tokio::spawn(async move { hub.go_away(URI.to_vec(), 10_000).await })
+    };
+    let UniEvent::Control(ControlMessage::GoAway(_)) = alice.next_data().await else {
+        panic!("Alice was not told");
+    };
+    let mut bob = Peer::connect(&hub, true).await;
+    let UniEvent::Control(ControlMessage::GoAway(go_away)) = bob.next_data().await else {
+        panic!("Bob was not told");
+    };
+    assert_eq!(
+        (
+            go_away.new_session_uri.as_slice(),
+            go_away.timeout_ms,
+            go_away.request_id
+        ),
+        (URI, 10_000, Some(0)),
+    );
+    going_away.abort();
+}
+
 #[test]
 fn a_session_came_sent_away_where_its_query_has_the_pair() {
     // (the query of the URL; how the session came)
