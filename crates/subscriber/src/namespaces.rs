@@ -1,13 +1,51 @@
 //! A `SUBSCRIBE_NAMESPACE` kept on a session: when it is asked for again
-//! after it ended or was refused, by the rule of `xmoq-again`. The gatherer
+//! after it ended or was refused, by the rule of `xmoq-again`, and what each
+//! thing on its stream is to do ([`KeptNamespace::on_stream`]). The gatherer
 //! of the chat, the transcriber and the agent keep theirs so; each sends it
-//! and reads its stream itself.
+//! itself, and the agent reads its stream by `on_stream`.
 
 use std::time::{Duration, Instant};
 
 use xmoq_again::AskAgain;
 use xmoq_again::next_session::{Growing, Pause};
+use xmoq_moqt::message::GoAway;
 use xmoq_moqt::name::TrackNamespace;
+use xmoq_moqt::session::{RequestEvent, RequestId, Session};
+use xmoq_moqt::{Error, RequestFault};
+use xmoq_moqt_io::{RequestReadError, RequestStreamEvent};
+
+/// What a thing on the stream of a [`KeptNamespace`] is to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NamespaceOutcome {
+    /// Its `REQUEST_OK`: the namespaces follow.
+    Subscribed,
+    /// NAMESPACE: a namespace under the prefix, whole.
+    Namespace(TrackNamespace),
+    /// `NAMESPACE_DONE`: a namespace withdrawn, whole.
+    Done(TrackNamespace),
+    /// The request is over, `how`, and is asked for again in `pause_ms`;
+    /// the caller cancels its stream. The namespaces told of on it are as
+    /// though each got `NAMESPACE_DONE` (§10.18 for a FIN or a reset).
+    Ended {
+        /// What ended it.
+        how: String,
+        /// The pause before it is asked for again, in milliseconds.
+        pause_ms: u64,
+    },
+    /// The request was refused, `how`, and is asked for again in
+    /// `pause_ms`; the caller cancels its stream. No namespace was told of
+    /// on it.
+    Refused {
+        /// The refusal.
+        how: String,
+        /// The pause before it is asked for again, in milliseconds.
+        pause_ms: u64,
+    },
+    /// A GOAWAY on its stream: the caller moves the session.
+    Moved(GoAway),
+    /// Anything else the session told of; the request stays as it was.
+    Other(RequestEvent),
+}
 
 /// One `SUBSCRIBE_NAMESPACE` for `prefix`, and when it is asked for again.
 #[derive(Debug, Clone)]
@@ -91,10 +129,79 @@ impl KeptNamespace {
         self.again_at = Some(now + Duration::from_millis(pause_ms));
         pause_ms
     }
+
+    /// Hands what came at `now` on the stream of this request, `request`
+    /// of `session`, to the session, and says what the caller does.
+    ///
+    /// WHY one NAMESPACE more than the session keeps asks again, where a
+    /// message that breaks the protocol closes the session: the limit is
+    /// this endpoint's, and the relay was within the draft; a fresh request
+    /// is told the namespaces there are then.
+    ///
+    /// # Errors
+    ///
+    /// A message that breaks the protocol, on the stream or as what the
+    /// session reads of it: the session is to be closed with the code of
+    /// the error (`Error::termination_code`, `PROTOCOL_VIOLATION` for
+    /// `NAMESPACE_DONE` before its NAMESPACE, §10.18). The request is left
+    /// as it was.
+    pub fn on_stream(
+        &mut self,
+        session: &mut Session,
+        request: RequestId,
+        event: Result<RequestStreamEvent, RequestReadError>,
+        now: Instant,
+    ) -> Result<NamespaceOutcome, Error> {
+        let how = match event {
+            Ok(RequestStreamEvent::Message(message)) => {
+                match session.on_request_message(request, message) {
+                    Ok(RequestEvent::NamespacesSubscribed) => {
+                        self.subscribed();
+                        return Ok(NamespaceOutcome::Subscribed);
+                    }
+                    Ok(RequestEvent::Namespace(namespace)) => {
+                        return Ok(NamespaceOutcome::Namespace(namespace));
+                    }
+                    Ok(RequestEvent::NamespaceDone(namespace)) => {
+                        return Ok(NamespaceOutcome::Done(namespace));
+                    }
+                    Ok(RequestEvent::Rejected(error)) => {
+                        let pause_ms = self.refused(error.retry_wait_ms(), now);
+                        return Ok(NamespaceOutcome::Refused {
+                            how: format!("refused with {:#x}", error.error_code),
+                            pause_ms,
+                        });
+                    }
+                    Ok(RequestEvent::GoAway(go_away)) => {
+                        return Ok(NamespaceOutcome::Moved(go_away));
+                    }
+                    Ok(RequestEvent::TooManyNamespaces { limit }) => {
+                        format!("more namespaces than the {limit} a request keeps")
+                    }
+                    Ok(other) => return Ok(NamespaceOutcome::Other(other)),
+                    Err(RequestFault::Peer(error)) => return Err(error),
+                    // The request is of another session; this one is not at
+                    // fault.
+                    Err(RequestFault::Usage(error)) => format!("{error}"),
+                }
+            }
+            Ok(RequestStreamEvent::Closed(closed)) => format!("the relay closed it ({closed:?})"),
+            Err(RequestReadError::Peer(error)) => return Err(error),
+            Err(error @ RequestReadError::Lost) => format!("{error}"),
+        };
+        session.cancel(request);
+        let pause_ms = self.ended(now);
+        Ok(NamespaceOutcome::Ended { how, pause_ms })
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use xmoq_moqt::TerminationCode;
+    use xmoq_moqt::message::{ControlMessage, ReasonPhrase, RequestError, RequestOk};
+    use xmoq_moqt::session::{MAX_NAMESPACES_OF_A_SUBSCRIPTION, RequestState, Role, Transport};
+    use xmoq_moqt_io::RequestClose;
+
     use super::*;
 
     /// What happens to the request, and the pause after it.
@@ -174,6 +281,212 @@ mod tests {
                 assert!(kept.due(now), "{case}: after it");
             }
             assert_eq!(pauses, expected, "{case}");
+        }
+    }
+
+    fn namespace(fields: &[&str]) -> TrackNamespace {
+        TrackNamespace::new(
+            fields
+                .iter()
+                .map(|field| field.as_bytes().to_vec())
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn request_ok() -> ControlMessage {
+        ControlMessage::RequestOk(RequestOk {
+            parameters: vec![],
+            track_properties: vec![],
+        })
+    }
+
+    fn named(suffix: &str) -> ControlMessage {
+        ControlMessage::Namespace(namespace(&[suffix]))
+    }
+
+    /// What the caller is told.
+    #[derive(Debug)]
+    enum Expected {
+        Subscribed,
+        Namespace(&'static [&'static str]),
+        Done(&'static [&'static str]),
+        /// Asked again after an end: how, and the pause.
+        Ended(&'static str, u64),
+        /// Asked again after a refusal: how, and the pause.
+        Refused(&'static str, u64),
+        /// Moved, with the GOAWAY's Timeout.
+        Moved(u64),
+        /// The session closed, with this code.
+        Close(u32),
+    }
+
+    /// (case, what the session was told on the stream before, what came,
+    /// what the caller is told)
+    type Case = (
+        &'static str,
+        Vec<ControlMessage>,
+        Result<RequestStreamEvent, RequestReadError>,
+        Expected,
+    );
+
+    fn cases() -> [Case; 13] {
+        let mut too_many = vec![request_ok()];
+        too_many
+            .extend((0..MAX_NAMESPACES_OF_A_SUBSCRIPTION).map(|index| named(&index.to_string())));
+        [
+            (
+                "REQUEST_OK",
+                vec![],
+                Ok(RequestStreamEvent::Message(request_ok())),
+                Expected::Subscribed,
+            ),
+            (
+                "a NAMESPACE",
+                vec![request_ok()],
+                Ok(RequestStreamEvent::Message(named("alice"))),
+                Expected::Namespace(&["xmoq", "alice"]),
+            ),
+            (
+                "its NAMESPACE_DONE",
+                vec![request_ok(), named("alice")],
+                Ok(RequestStreamEvent::Message(ControlMessage::NamespaceDone(
+                    namespace(&["alice"]),
+                ))),
+                Expected::Done(&["xmoq", "alice"]),
+            ),
+            (
+                "a REQUEST_ERROR waits its Retry Interval",
+                vec![],
+                Ok(RequestStreamEvent::Message(ControlMessage::RequestError(
+                    RequestError {
+                        error_code: 0x1,
+                        retry_interval: 3_001,
+                        error_reason: ReasonPhrase::default(),
+                        redirect: None,
+                    },
+                ))),
+                Expected::Refused("refused with 0x1", 3_000),
+            ),
+            (
+                "a GOAWAY",
+                vec![request_ok()],
+                Ok(RequestStreamEvent::Message(ControlMessage::GoAway(
+                    GoAway {
+                        new_session_uri: b"https://elsewhere/".to_vec(),
+                        timeout_ms: 7,
+                        request_id: None,
+                    },
+                ))),
+                Expected::Moved(7),
+            ),
+            // The limit is this endpoint's: asked again, not closed.
+            (
+                "one NAMESPACE more than the session keeps",
+                too_many,
+                Ok(RequestStreamEvent::Message(named("one more"))),
+                Expected::Ended("more namespaces than the 4096 a request keeps", 1_000),
+            ),
+            (
+                "a FIN",
+                vec![request_ok()],
+                Ok(RequestStreamEvent::Closed(RequestClose::Fin)),
+                Expected::Ended("the relay closed it (Fin)", 1_000),
+            ),
+            (
+                "a reset",
+                vec![request_ok()],
+                Ok(RequestStreamEvent::Closed(RequestClose::Reset(Some(5)))),
+                Expected::Ended("the relay closed it (Reset(Some(5)))", 1_000),
+            ),
+            (
+                "the connection lost",
+                vec![request_ok()],
+                Err(RequestReadError::Lost),
+                Expected::Ended("connection lost", 1_000),
+            ),
+            (
+                "NAMESPACE_DONE before its NAMESPACE",
+                vec![request_ok()],
+                Ok(RequestStreamEvent::Message(ControlMessage::NamespaceDone(
+                    namespace(&["alice"]),
+                ))),
+                Expected::Close(0x3),
+            ),
+            (
+                "a NAMESPACE before REQUEST_OK",
+                vec![],
+                Ok(RequestStreamEvent::Message(named("alice"))),
+                Expected::Close(0x3),
+            ),
+            (
+                "a second REQUEST_OK",
+                vec![request_ok()],
+                Ok(RequestStreamEvent::Message(request_ok())),
+                Expected::Close(0x3),
+            ),
+            (
+                "bytes on the stream that break the protocol",
+                vec![request_ok()],
+                Err(RequestReadError::Peer(Error::UnknownMessageType(0x99))),
+                Expected::Close(0x3),
+            ),
+        ]
+    }
+
+    #[test]
+    fn what_comes_on_the_stream_tells_a_namespace_asks_again_or_closes_the_session() {
+        for (case, before, event, expected) in cases() {
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            let mut kept = KeptNamespace::new(namespace(&["xmoq"]), Pause::VIEWER);
+            let (request, _) = session
+                .subscribe_namespace(kept.prefix().clone(), vec![])
+                .unwrap();
+            let now = Instant::now();
+            kept.asked(now);
+            for message in before {
+                session.on_request_message(request, message).unwrap();
+            }
+            let outcome = kept.on_stream(&mut session, request, event, now);
+            let again_ms = match (outcome, expected) {
+                (Ok(NamespaceOutcome::Subscribed), Expected::Subscribed) => None,
+                (Ok(NamespaceOutcome::Namespace(got)), Expected::Namespace(fields))
+                | (Ok(NamespaceOutcome::Done(got)), Expected::Done(fields)) => {
+                    assert_eq!(got, namespace(fields), "{case}");
+                    None
+                }
+                (Ok(NamespaceOutcome::Ended { how, pause_ms }), Expected::Ended(expected, ms))
+                | (
+                    Ok(NamespaceOutcome::Refused { how, pause_ms }),
+                    Expected::Refused(expected, ms),
+                ) => {
+                    assert_eq!((how.as_str(), pause_ms), (expected, ms), "{case}");
+                    assert_eq!(
+                        session.request_state(request),
+                        Some(RequestState::Terminated),
+                        "{case}: the session holds it no more"
+                    );
+                    Some(ms)
+                }
+                (Ok(NamespaceOutcome::Moved(go_away)), Expected::Moved(timeout_ms)) => {
+                    assert_eq!(go_away.timeout_ms, timeout_ms, "{case}");
+                    None
+                }
+                (Err(error), Expected::Close(code)) => {
+                    assert_eq!(
+                        error.termination_code().map(TerminationCode::code),
+                        Some(code),
+                        "{case}"
+                    );
+                    None
+                }
+                (other, expected) => panic!("{case}: {other:?}, not {expected:?}"),
+            };
+            assert_eq!(
+                kept.again_at(),
+                again_ms.map(|ms| now + Duration::from_millis(ms)),
+                "{case}: when it is asked again"
+            );
         }
     }
 }
