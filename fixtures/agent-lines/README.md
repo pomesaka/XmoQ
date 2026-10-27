@@ -1,11 +1,6 @@
 # The lines an agent reads and writes
 
-The lines of `events.jsonl` that a reader writes for an agent, and how a line the agent writes back is read: [`xmoq-agent`](../../crates/agent/README.md) (its stdin) (`xmoq_agent::events::Event`), and the meeting's page through a folder (`agentLine` of `@xmoq/meeting`, `packages/meeting/src/core/agent-lines.ts`). An agent reads the two in the same way, so the two write the same line for the same event.
-
-| File | Read by |
-|---|---|
-| `lines.tsv` | `crates/agent` (`src/events.rs`) and `@xmoq/meeting` (`test/agent-lines.test.ts`) |
-| `inbox.tsv` | `crates/agent` (`src/input.rs`) and `@xmoq/meeting` (`test/agent-inbox.test.ts`) |
+The lines of `events.jsonl` that a reader writes for an agent, and how a line the agent writes back is read: [`xmoq-agent`](../../crates/agent/README.md) (its stdin), and the meeting's page through a folder (`@xmoq/meeting`). An agent reads the two in the same way, so the two write the same line for the same event; both read `lines.tsv` and `inbox.tsv` in their tests.
 
 ## The lines
 

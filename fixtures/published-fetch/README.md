@@ -4,7 +4,7 @@ A publisher that answers a Standalone FETCH for its own track (§10.12.3) from t
 
 **The rows hold for a publisher that publishes Object 0 of one Group after the other, without a gap, and nothing else.** Both publishers do. A publisher with several Objects a Group is not in the table.
 
-The rule for what is no longer kept: the stream carries one End of Unknown Range indicator (§11.4.4.2) where a Location the publisher published and let go of lies in the range. It names the last such Location and stands before the Objects; in Descending order it names the first such Location and stands after them. With one Object a Group that Location is Object 0 of a Group. The rows "A publisher that answers a Standalone FETCH from what it published" and "Where a publisher puts an End of Unknown Range indicator in a Descending fetch" of [the implementation notes](../../docs/moqt-implementation-notes.md) have the reasons, and what is provisional.
+Where a Location the publisher published and let go of lies in the range, the stream carries one End of Unknown Range indicator (§11.4.4.2); where it stands and which Location it names are the rows "A publisher that answers a Standalone FETCH from what it published" and "Where a publisher puts an End of Unknown Range indicator in a Descending fetch" of [the implementation notes](../../docs/moqt-implementation-notes.md), with what is provisional. With one Object a Group that Location is Object 0 of a Group.
 
 ## Format
 
@@ -28,7 +28,7 @@ The rows whose name begins with `catalog-` have the newest Group alone kept (col
 ## What is not in the table
 
 - A publisher that has published nothing: `INVALID_RANGE`. The row has no first Group to name.
-- Which limit made a publisher let go of a Group (the Rust client: 1,024 Objects, 4 MiB of payload).
+- Which limit made a publisher let go of a Group.
 - A FETCH the publisher refuses for another reason: a Joining FETCH, another track, more requests at once than it answers.
 - The payloads, Publisher Priorities and Subgroup IDs of the Objects.
 
@@ -36,4 +36,4 @@ The rows whose name begins with `catalog-` have the newest Group alone kept (col
 
 **The table is a decision, not an observation.** §10.12.3 has `INVALID_RANGE` and the End Location; where an indicator for a range a publisher no longer keeps stands in a Descending fetch, and which Location it names, the draft does not say, and no other implementation was asked.
 
-The answers of columns 8 to 10 are what the Rust client gave when the rows were written: its test `a_fetch_gets_what_the_shared_table_says` (`crates/moqt-client/src/published.rs`) builds a publisher from columns 2 to 4, reads every row, and carries each answer through the fetch stream encoder and decoder of `crates/moqt` before it compares. The expectations of the `catalog-` rows were written for `@xmoq/msf` first, from the rule, and came out the same in the Rust client. `plan_kept` of `crates/publisher/src/fetch.rs`, by which the Rust client, the gatherer of the chat and the transcriber plan their answers, reads every row in its test `a_fetch_gets_what_the_shared_table_says`. The three share that one calculation, so the table does not check them against each other: the one implementation of its own that reads it is `@xmoq/msf`. `@xmoq/msf` reads the rows a publisher of a catalog can be, the 19 that keep the newest Group alone (`packages/msf/test/catalog-publication.test.ts`), and counts them.
+The answers of columns 8 to 10 are what the Rust client gave when the rows were written; the expectations of the `catalog-` rows were written for `@xmoq/msf` first, from the rule, and came out the same in the Rust client. The Rust client, the gatherer of the chat and the transcriber plan their answers with one calculation, `plan_kept` of `crates/publisher/src/fetch.rs`, so the table does not check them against each other: the one implementation of its own that reads it is `@xmoq/msf`, which reads the rows a publisher of a catalog can be, those that keep the newest Group alone.

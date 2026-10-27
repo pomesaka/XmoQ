@@ -26,11 +26,11 @@ The rule: the request is yet to come when the ID is one of the peer's (even from
 
 ## What is not in the table
 
-- What becomes of a FETCH that is held: it waits for the SUBSCRIBE to come for as long as a stream of the peer gets to say what it is (10 seconds, [`fixtures/first-bytes/`](../first-bytes/README.md)); it goes on as a Joining FETCH for a Pending SUBSCRIBE when the SUBSCRIBE comes, and is refused with `0x32` when the ID is used by anything else or the time runs out. The row "A Joining FETCH that names a Request ID the peer has not used yet" of [the implementation notes](../../docs/moqt-implementation-notes.md) has it.
-- An implementation remembers only so many IDs the peer used out of order (1,024 in both). One that it forgot reads as yet to come, and the FETCH that names it is refused when the time runs out instead of at once.
+- What becomes of a FETCH that is held: the row "A Joining FETCH that names a Request ID the peer has not used yet" of [the implementation notes](../../docs/moqt-implementation-notes.md).
+- An implementation remembers only so many IDs the peer used out of order (`request-ids-ahead` of [`fixtures/limits/`](../limits/README.md)). One that it forgot reads as yet to come, and the FETCH that names it is refused when the time runs out instead of at once.
 
 ## Source
 
 **The table is a decision, not an observation.** The draft says nothing of a Joining FETCH that is read before its SUBSCRIBE; no other implementation was asked. The rows were written by hand for the rule above.
 
-The Rust session reads the table in a test of `crates/moqt` (`a_joining_request_id_is_yet_to_come_where_the_shared_table_says`). `@xmoq/moqt` is a client, so it reads the rows in which the peer is the `server`; those rows repeat the cases of the `client` rows that the rule has, with IDs up to 63. It serves no Joining FETCH: where a row has `held`, it refuses the FETCH at once with `NOT_SUPPORTED` (`0x3`), as the Rust client does with a FETCH its session hands it, and where a row has `refused`, with `0x32`.
+`@xmoq/moqt` is a client, so it reads the rows in which the peer is the `server`; those rows repeat the cases of the `client` rows that the rule has, with IDs up to 63. It serves no Joining FETCH: where a row has `held`, it refuses the FETCH at once with `NOT_SUPPORTED` (`0x3`), as the Rust client does with a FETCH its session hands it, and where a row has `refused`, with `0x32`.

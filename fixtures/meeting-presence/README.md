@@ -1,8 +1,8 @@
 # Who is in a meeting
 
-Every participant of a meeting publishes under `xmoq/meet/<room>/<id>`, and a reader learns who is there from one SUBSCRIBE_NAMESPACE for `xmoq/meet/<room>` (NAMESPACE and NAMESPACE_DONE, draft 18 §6.1; decided on 2026-10-25, `docs/scale-and-meetings.md`). Two implementations keep who is there by the same rule: `Presence` of `xmoq-viewer` (`crates/viewer/src/presence.rs`) with `participant_of` of `xmoq-meeting-tracks` (`crates/meeting-tracks`), which the reader for agents uses, and `createPresence` and `participantOf` of `@xmoq/meeting` (`packages/meeting/src/core/`), which a page uses. These rows pin it; the reasons are in those files.
+Every participant of a meeting publishes under `xmoq/meet/<room>/<id>`, and a reader learns who is there from one SUBSCRIBE_NAMESPACE for `xmoq/meet/<room>` (NAMESPACE and NAMESPACE_DONE, draft 18 §6.1; [`docs/scale-and-meetings.md`](../../docs/scale-and-meetings.md)). Two implementations keep who is there by the same rule: `xmoq-viewer` with `xmoq-meeting-tracks`, which the reader for agents uses, and `@xmoq/meeting`, which a page uses. These rows pin it; the reasons are at that code.
 
-`namespaces.tsv` pins the namespaces themselves: `xmoq-meeting-tracks` (`prefix`, `participant`, `seat_subscribe`) and `@xmoq/meeting` (`meetingPrefix`, `participantNamespace`, `seatSubscribeNamespace`) read it, and so does the room (`packages/room/test/rules.test.ts`), whose seats give the namespaces of its rows `participant` and `seat-subscribe`.
+`namespaces.tsv` pins the namespaces themselves: `xmoq-meeting-tracks` and `@xmoq/meeting` read it, and so does the room, whose seats give the namespaces of its rows `participant` and `seat-subscribe`.
 
 ## Format
 

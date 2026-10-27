@@ -28,7 +28,7 @@ The session is that of a client, after its own SETUP.
 | `subscribe-rejected-then-update` | As `subscribe-rejected`, and the server then sent, on the stream of that SUBSCRIBE, a REQUEST_UPDATE with Request ID 3 and no parameters (`../moqt-18-by-hand/request-update-request-id-3.hex`) |
 | `subscribe-refused-then-update` | As `subscribe`, and the server then sent a second SUBSCRIBE for the track `"object"`, with Request ID 3, on a stream of its own, which the session refused by itself (`DUPLICATE_SUBSCRIPTION`); and after it, on that same stream, a REQUEST_UPDATE with Request ID 5 and no parameters (`../moqt-18-by-hand/request-update-request-id-5.hex`) |
 
-The last two states are about what still comes on the stream of a request that was refused: a REQUEST_UPDATE there gets no answer and uses up its Request ID (§10.1: "Each ... REQUEST_UPDATE ... message consumes a Request ID", with no condition), whether the application refused the request or the session did. The two REQUEST_UPDATE messages are written by hand: no capture of one exists; the Rust implementation has a test that reads the same bytes (`the_request_updates_named_for_the_shared_table_say_what_they_were_meant_to`).
+The last two states are about what still comes on the stream of a request that was refused: a REQUEST_UPDATE there gets no answer and uses up its Request ID (§10.1: "Each ... REQUEST_UPDATE ... message consumes a Request ID", with no condition), whether the application refused the request or the session did. The two REQUEST_UPDATE messages are written by hand: no capture of one exists.
 
 ## Where the bytes come from
 
@@ -36,5 +36,5 @@ Every `sent` is `../moqt-18/subscribe-moqtail-rs.hex`, captured from the `moqtai
 
 ## Not in the table
 
-- How many requests of the peer may be open at once, and `EXCESSIVE_LOAD` (`0x9`) for one more: the number differs between the two implementations (64 in `@xmoq/moqt`, 256 in the Rust session), for the reason the implementation notes give.
+- How many requests of the peer may be open at once, and `EXCESSIVE_LOAD` (`0x9`) for one more: `peer-requests` of [`fixtures/limits/`](../limits/README.md), which differs between the two, and the row "Requests of the peer that are open at once" of the implementation notes.
 - A SUBSCRIBE that does not decode.

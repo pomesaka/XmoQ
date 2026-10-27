@@ -1,8 +1,8 @@
 # What a room answers, and how a client reads it
 
-A room is asked over HTTP, with JSON (decided on 2026-10-26): where its relay is, tokens for that relay, and the seats of a meeting. What happens in a room as it goes (a broadcast that begins, who is there, reactions, who comes to a meeting and leaves) goes over MoQ, and not through the room. There are two kinds of room, each under a path of its own: the room of a broadcast and the room of a meeting.
+A room is asked over HTTP, with JSON: where its relay is, tokens for that relay, and the seats of a meeting. What happens in a room as it goes (a broadcast that begins, who is there, reactions, who comes to a meeting and leaves) goes over MoQ, and not through the room. There are two kinds of room, each under a path of its own: the room of a broadcast and the room of a meeting.
 
-The room is [`@xmoq/room`](../../packages/room/README.md). Two clients read its answers, and read `answers.tsv` in their tests: `@xmoq/room-client` (`packages/room-client`), which the pages use, and `xmoq-viewer` (`crates/viewer/src/room.rs`), which the terminal viewer and the reader for agents use.
+The room is [`@xmoq/room`](../../packages/room/README.md). Two clients read its answers, and read `answers.tsv` in their tests: `@xmoq/room-client`, which the pages use, and `xmoq-viewer`, which the terminal viewer and the reader for agents use.
 
 ## The requests
 
@@ -16,7 +16,7 @@ The room is [`@xmoq/room`](../../packages/room/README.md). Two clients read its 
 | `POST /meetings/<name>/seats/<participant>/renew` with `{lease}` | The seat for longer, with new tokens | 200 a seat; 404 `gone` where it has run out or was never there |
 | `DELETE /meetings/<name>/seats/<participant>` with `{lease}` | Leaving: the seat is free at once | 204, nothing |
 
-**A seat holds until `expiresAt`** (milliseconds since the Unix epoch, the room's clock) and is renewed every `renewMs`; one that is not renewed is free again when it runs out. Both times are the room's settings, provisional (60 and 20 seconds). The `lease` is the seat's own: whoever renews or leaves a seat names it, so that another client cannot take a participant's seat by its id. Why each answer is what it is, at the top of `packages/room/src/worker.ts`.
+**A seat holds until `expiresAt`** (milliseconds since the Unix epoch, the room's clock) and is renewed every `renewMs`; one that is not renewed is free again when it runs out. Both times are the room's settings, provisional. The `lease` is the seat's own: whoever renews or leaves a seat names it, so that another client cannot take a participant's seat by its id. Why each answer is what it is, at the top of `packages/room/src/worker.ts`.
 
 ## `answers.tsv`
 
@@ -40,4 +40,4 @@ One row a line, five columns separated by tabs, no header; every row ends with o
 
 A namespace is written with its fields joined by `/`, as the tokens have it.
 
-**What a client does not take** (decided on 2026-10-26: the stricter of the two readers, as a receiver's checks are safer strict): a status the table of requests above does not give for that request, whatever the body; a relay whose `url` does not begin with `https://` (a relay over WebTransport stands on HTTPS alone) or whose `certSha256Hex` is not 64 hex digits; a namespace or a prefix of a transcript with no field, or with a field that is empty. Each is `malformed`.
+**What a client does not take** (the stricter of the two readers, as a receiver's checks are safer strict): a status the table of requests above does not give for that request, whatever the body; a relay whose `url` does not begin with `https://` (a relay over WebTransport stands on HTTPS alone) or whose `certSha256Hex` is not 64 hex digits; a namespace or a prefix of a transcript with no field, or with a field that is empty. Each is `malformed`.

@@ -1,6 +1,6 @@
 # Reasons of a WebTransport session close
 
-Reasons an application closes a session with, and the bytes a browser sent for each. XmoQ's implementations cut the reason themselves before they hand it to the transport, so that what an endpoint reports about its own close is what the peer was told; these rows pin that cut to what a browser does. The Rust tests and the TypeScript tests read the same file.
+Reasons an application closes a session with, and the bytes a browser sent for each. XmoQ's implementations cut the reason themselves before they hand it to the transport, so that what an endpoint reports about its own close is what the peer was told; these rows pin that cut to what a browser does. Both implementations read the file in their tests.
 
 ## Format
 
@@ -28,7 +28,7 @@ The relay does not hand on the bytes of the reason. It has the reason as text an
 - **The 12 `utf8` rows.** The reason is valid text all the way, so the text the relay had is what was on the wire, byte for byte. These rows are what Chromium sent.
 - **The 2 `utf16` rows**, whose reason holds half of a surrogate pair. Column 4 has U+FFFD (`ef bf bd`) in its place. **The capture cannot tell whether Chromium sent U+FFFD, or sent other bytes that were replaced on the way to the relay's text.** What speaks for Chromium:
   - The specification makes the browser replace it. `reason` is a `USVString` (W3C WebTransport §6.10), and a value becomes one by "converting string to a sequence of scalar values" (Web IDL §3.2.12, Living Standard of 6 October 2026), which is "replace any surrogates with U+FFFD" (Infra §4.7, Living Standard of 5 October 2026).
-  - The library under the relay has two ways to a reason. Its decoder of the WT_CLOSE_SESSION capsule refuses a reason that is not UTF-8 and does not replace anything (`String::from_utf8` in `web-transport-proto` 0.6.2, `src/capsule.rs`, read on 2026-10-10). A reason taken from the close of the QUIC connection is converted with replacement (`String::from_utf8_lossy` in `web-transport-quinn` 0.13.2, `src/error.rs`). Which of the two the relay took for these rows was not recorded.
+  - The library under the relay has two ways to a reason. Its decoder of the WT_CLOSE_SESSION capsule refuses a reason that is not UTF-8 and does not replace anything (`String::from_utf8` in `web-transport-proto` 0.6.2, `src/capsule.rs`). A reason taken from the close of the QUIC connection is converted with replacement (`String::from_utf8_lossy` in `web-transport-quinn` 0.13.2, `src/error.rs`). Which of the two the relay took for these rows was not recorded.
 
   The raw bytes were not captured: with the capsule decoded inside the library, the relay never has them, and that was not changed for this fixture.
 

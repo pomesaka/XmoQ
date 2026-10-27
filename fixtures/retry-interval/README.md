@@ -22,10 +22,10 @@ The value is a `vi64` of this draft, which carries every 64-bit number (§1.4.1)
 
 The Retry Interval of a REQUEST_ERROR that the session of either implementation makes up itself, by its Error Code. Three columns: the name of the code, the code, the Retry Interval.
 
-The rule: **`EXCESSIVE_LOAD` gets 1,001** (ask again after a second; provisional), of which §10.6.2 has "The sender SHOULD use the Retry Interval to indicate when the request can be retried"; every other code gets 0.
+The rule and its basis are in the row named above.
 
 ## What is not in the tables
 
-- The relay's own values, which it knows more for: `TIMEOUT` with 1, `DOES_NOT_EXIST` with 1,001, and the refusal of a PUBLISH_NAMESPACE that comes too often with the time one takes to come back. They are in the implementation notes and in the relay's tests.
+- The relay's own values, which it knows more for: at its constant (row named above).
 - A REQUEST_ERROR an application refuses a request with through `@xmoq/moqt`: the library gives it the value of this table for its code.
 - What the caller does with the value. The libraries hand it on and do not wait by themselves.

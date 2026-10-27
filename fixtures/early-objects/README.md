@@ -2,7 +2,7 @@
 
 A subscriber can read the first Objects of a track before the SUBSCRIBE_OK that gives their Track Alias: the two come on different streams. A relay that held a SUBSCRIBE for a publisher (RENDEZVOUS_TIMEOUT) answers it and passes on that publisher's first Object at once. draft-ietf-moq-transport-18 §11.4.2 lets the receiver choose: "If an endpoint receives a subgroup with an unknown Track Alias, it MAY abandon the stream, or choose to buffer it for a brief period to handle reordering with the control message that establishes the Track Alias."
 
-Both implementations of this repository hold such Objects **while a SUBSCRIBE of theirs waits for its answer**, up to **1 MiB for the session** (provisional), and give them to the subscription once the alias is known, in the order they came. `@xmoq/moqt` does it in `packages/moqt/src/core/incoming-subgroups.ts` (`arrivalOf`, `settleOf`, `heldBytesOf`), and the Rust implementation in `crates/moqt/src/early.rs`, which the terminal viewer, the reader for agents, the gatherer and the transcriber use. Why that choice and that limit is written where the rule is. These rows pin the rule; both read them in a test.
+Both implementations of this repository hold such Objects **while a SUBSCRIBE of theirs waits for its answer**, up to a limit for the session, and give them to the subscription once the alias is known, in the order they came: the row "Objects of a subgroup stream whose Track Alias is unknown, in the clients (Objects read before the SUBSCRIBE_OK that gives their alias)" of [the implementation notes](../../docs/moqt-implementation-notes.md), and `early-objects-bytes` of [`fixtures/limits/`](../limits/README.md). These rows pin the rule; both read them in a test.
 
 ## Format
 
@@ -26,7 +26,7 @@ Tab-separated, no header, one line feed after every row. Column 1 is the name of
 | 3 | Whether a SUBSCRIBE still waits for its answer |
 | 4 | `release` (to the subscription), `keep`, `stop-cancelled` |
 
-`held-bytes.tsv`: what a held Object is counted at. 64 bytes, its payload, and for each Object Property 16 bytes and the bytes of its value (none for a varint).
+`held-bytes.tsv`: what a held Object is counted at. `early-object-overhead-bytes`, its payload, and for each Object Property `early-property-overhead-bytes` and the bytes of its value (none for a varint), the two of [`fixtures/limits/`](../limits/README.md).
 
 | Column | Content |
 |---|---|
@@ -44,6 +44,5 @@ Tab-separated, no header, one line feed after every row. Column 1 is the name of
 
 ## What is not in the tables
 
-- A stream reset while it holds Objects lets go of them; one that ended with its FIN keeps them for its alias, by the rule of `settle.tsv` as a stream still open (`reused-alias.tsv` has such rows) (`reset` of `incoming-subgroups.ts`; a test of `crates/moqt/src/session.rs`).
+- A stream reset while it holds Objects lets go of them; one that ended with its FIN keeps them for its alias, by the rule of `settle.tsv` as a stream still open (`reused-alias.tsv` has such rows).
 - Held Objects stay on a stream once one of its Objects is held, so that its Objects stay in their order.
-- Where a stream is stopped for being over the limit, what it held is let go of and no longer counted.

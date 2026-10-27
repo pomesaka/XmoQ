@@ -1,6 +1,6 @@
 # Where a parameter may appear
 
-Each Message Parameter of draft 18 and the messages it may appear in (§10.2.1: "If it appears in some other type of message, the receiving endpoint MUST close the connection with a PROTOCOL_VIOLATION"), as both implementations check them. `xmoq-moqt` reads `scopes.tsv` in a test of `crates/moqt/src/params.rs` (`allowed_in`), and `@xmoq/moqt` in `test/core/parameter-scopes.test.ts` (`parameterAllowedIn` of `src/core/parameters.ts`). Written by hand from §10.2.2 to §10.2.14.
+Each Message Parameter of draft 18 and the messages it may appear in (§10.2.1: "If it appears in some other type of message, the receiving endpoint MUST close the connection with a PROTOCOL_VIOLATION"), as both implementations check them; both read `scopes.tsv` in their tests. Written by hand from §10.2.2 to §10.2.14.
 
 ## `scopes.tsv`
 
