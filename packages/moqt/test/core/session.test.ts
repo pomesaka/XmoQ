@@ -5,6 +5,7 @@ import {
 	decodeControlMessage,
 	type FetchRange,
 } from "../../src/core/control-message.ts";
+import { InactiveError } from "../../src/core/error.ts";
 import type { SessionLimits } from "../../src/core/limits.ts";
 import type { SubgroupOptions } from "../../src/core/outgoing-subgroups.ts";
 import { createSession, type Session } from "../../src/core/session.ts";
@@ -1058,15 +1059,26 @@ describe("Session", () => {
 	});
 
 	// STOP_SENDING closes only the direction this endpoint sends in.
-	test.each([
-		{ name: "a Pending SUBSCRIBE", stream: 1 },
-		{ name: "a Pending PUBLISH", stream: 2 },
-	])(
-		"STOP_SENDING on the request stream of $name changes nothing",
-		({ stream }) => {
-			expect(withRequests().localStreamStopped(stream, 7)).toEqual([]);
-		},
-	);
+	test("STOP_SENDING on the request stream of a Pending SUBSCRIBE changes nothing", () => {
+		expect(withRequests().localStreamStopped(1, 7)).toEqual([]);
+	});
+
+	// §3.3.2: the subscriber cancels the PUBLISH "by resetting or sending
+	// STOP_SENDING", where the figure of §5.1 has no transition from Pending.
+	test("STOP_SENDING on the request stream of a Pending PUBLISH ends it", () => {
+		expect(withRequests().localStreamStopped(2, 7)).toEqual([
+			{
+				type: "event",
+				event: {
+					type: "request-closed",
+					requestId: 2n,
+					reason: "peer-reset",
+					resetCode: 7,
+				},
+			},
+			{ type: "reset", stream: 2, code: 1 },
+		]);
+	});
 
 	test("a SUBSCRIBE whose request stream was stopped still reads its REQUEST_ERROR", () => {
 		const session = withRequests();
@@ -1080,11 +1092,20 @@ describe("Session", () => {
 		).toEqual(["request-error"]);
 	});
 
-	test("PUBLISH_DONE is not written to a request stream the peer stopped", () => {
-		const session = withRequests();
-		session.localStreamStopped(2, 7);
-		expect(session.publishDone(2n, 2n, "")).toEqual([]);
-	});
+	// STOP_SENDING ends a PUBLISH, pending or established: nothing is left
+	// for a PUBLISH_DONE to end.
+	test.each([
+		{ name: "Pending", answer: "" },
+		{ name: "Established", answer: "07 00 01 00" },
+	])(
+		"PUBLISH_DONE is refused for a $name PUBLISH the peer stopped",
+		({ answer }) => {
+			const session = withRequests();
+			session.receiveRequestStreamData(2, hex(answer), false);
+			session.localStreamStopped(2, 7);
+			expect(() => session.publishDone(2n, 2n, "")).toThrow(InactiveError);
+		},
+	);
 
 	// §10.11: Objects can arrive after PUBLISH_DONE, whatever becomes of the
 	// request stream.

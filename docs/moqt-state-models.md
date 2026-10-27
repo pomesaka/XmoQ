@@ -54,6 +54,7 @@ stateDiagram-v2
     PendingSubscriber --> Terminated: REQUEST_ERROR (publisher)
     PendingSubscriber --> Terminated: STOP_SENDING (subscriber)
     PendingPublisher --> Terminated: REQUEST_ERROR (subscriber)
+    PendingPublisher --> Terminated: STOP_SENDING (subscriber), below
     PendingPublisher --> Draining: PUBLISH_DONE (publisher)
     Established --> Established: REQUEST_UPDATE (subscriber), below
     Established --> Terminated: STOP_SENDING (subscriber)
@@ -66,6 +67,7 @@ stateDiagram-v2
 - **One subscription a track in each role.** A second is refused with `DUPLICATE_SUBSCRIPTION` (§5.1): [`fixtures/peer-subscribe/`](../fixtures/peer-subscribe/README.md). A PUBLISH for a track whose SUBSCRIBE is Pending (Subscriber) is accepted only after that subscription is Terminated (§5.1).
 - **Established.** Objects flow while the Forward State is 1 (§5.1). The Track Alias comes with SUBSCRIBE_OK or PUBLISH (§11.1): [`fixtures/early-objects/`](../fixtures/early-objects/README.md).
 - **Draining.** The publisher closes all its streams before PUBLISH_DONE, and may forget the subscription once it sent it (§10.11). The subscriber keeps it until the streams that the Stream Count names have closed, or until a timer (§10.11): [`fixtures/early-objects/`](../fixtures/early-objects/README.md), "SUBSCRIBE_OK, or a PUBLISH that is accepted, that reuses a Track Alias whose previous subscription received PUBLISH_DONE and is still draining", "A subscription ends while subgroup streams for it are open". On the stream of a PUBLISH that ended so: [`fixtures/request-update/`](../fixtures/request-update/README.md), "A publisher that ended its PUBLISH with PUBLISH_DONE and wants to close the session".
+- **A PUBLISH stopped before its answer.** The figure of §5.1 has no transition from Pending (Publisher) on a STOP_SENDING; both clients end the PUBLISH as a request the subscriber cancelled (§3.3.2): [`fixtures/own-requests/`](../fixtures/own-requests/README.md).
 - **A malformed track.** The subscriber cancels the subscription and the FETCH requests of the same track (§2.4.2): "A track that a subscriber finds malformed, by any condition of §2.4.2".
 
 Names in the code: `RequestState` and `Request::Subscribe` and `Request::Publish` of `crates/moqt/src/session.rs`, `SubscribePhase` and `PeerRequestState` of `crates/moqt/src/session/peer.rs`; `packages/moqt/src/core/requests.ts` and `packages/moqt/src/core/peer-requests.ts`. Draining is the alias's state: `crates/moqt/src/aliases.rs`, `AliasState` of `packages/moqt/src/core/incoming-subgroups.ts`.

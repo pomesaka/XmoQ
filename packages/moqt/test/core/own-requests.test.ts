@@ -89,10 +89,13 @@ describe("fixtures/own-requests/events.tsv", () => {
 // travels on that direction; a FIN after FETCH_OK or after the REQUEST_OK of a
 // PUBLISH_NAMESPACE ends nothing, the FETCH going on until its fetch stream
 // ends (§5.2) and the namespace staying published. A SUBSCRIBE_NAMESPACE ends
-// with either (§6.1). A STOP_SENDING ends nothing before the answer, nor on a
-// SUBSCRIBE, whose publisher ends it, and ends a PUBLISH, a PUBLISH_NAMESPACE,
-// whose subscriber withdraws it. After PUBLISH_DONE, the end of the peer's
-// direction is reported, the PUBLISH being over already (§10.11).
+// with either (§6.1). A STOP_SENDING ends nothing on a SUBSCRIBE, whose
+// publisher ends it, nor on a FETCH before its answer; it ends a PUBLISH,
+// pending as well (§3.3.2 cancels "by resetting or sending STOP_SENDING",
+// where the figure of §5.1 has no such transition from Pending), and a
+// PUBLISH_NAMESPACE, whose subscriber withdraws it. After PUBLISH_DONE, the
+// end of the peer's direction is reported, the PUBLISH being over already
+// (§10.11).
 describe("fixtures/own-requests/stream-ends.tsv", () => {
 	const rows = fixtureTable("own-requests", "stream-ends.tsv");
 	test("the table has its 30 rows of 5 columns", () => {

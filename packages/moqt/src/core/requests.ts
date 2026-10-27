@@ -2663,7 +2663,13 @@ export function createRequests(options: RequestsOptions): Requests {
 			// still on their way and have to be read.
 			// A subscriber that stops the stream of its SUBSCRIBE reads no
 			// answer and no PUBLISH_DONE on it (§3.3.2 has it cancel that way).
-			if (outlivesPeerFin(request)) {
+			// A PUBLISH not answered yet ends as well: the figure of §5.1 has
+			// no such transition from Pending, and §3.3.2 has the subscriber
+			// cancel a request "by resetting or sending STOP_SENDING".
+			if (
+				outlivesPeerFin(request) ||
+				(request.kind === "PUBLISH" && request.state === "Pending")
+			) {
 				abandonRequest(request, "peer-reset", out, code);
 			}
 		},
