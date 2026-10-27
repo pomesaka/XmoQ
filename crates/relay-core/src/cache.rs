@@ -773,6 +773,7 @@ mod tests {
         Option<&'static [&'static str]>,
     );
 
+    /// `FILL_TIMEOUT` 0 in a FETCH.
     #[test]
     fn a_fetch_that_waits_for_nothing_gets_the_objects_of_the_kept_group_and_unknown_for_the_rest()
     {
@@ -880,6 +881,7 @@ mod tests {
         )
     }
 
+    /// The relay's cache: what it holds, and which FETCH it answers.
     #[test]
     fn a_range_is_answered_when_every_object_id_up_to_its_last_is_known() {
         // (the Objects of Group 5 that came, as (Object ID, Prior Object ID
@@ -1108,6 +1110,8 @@ mod tests {
         }
     }
 
+    /// An Object that comes again, and a Group that contradicts itself
+    /// (relay).
     #[test]
     fn an_object_is_compared_with_what_is_kept_of_its_group() {
         use Verdict::{Fine, Malformed};
@@ -1139,7 +1143,9 @@ mod tests {
             (&[(0, 0, two), (1, 0, two)], (2, 0, two), Fine, true),
             (&[(0, 0, two), (2, 0, two)], (1, 0, two), Fine, true),
             // After an End of Group: malformed. Below it: an Object like
-            // any other.
+            // any other. §2.1 says "not malformed" where §2.4.2 and §12.9 say
+            // malformed: the border is between these and the very Object ID
+            // of the End of Group, or of a gap.
             (&[(0, 0, two), (2, 0, END)], (3, 0, two), Malformed, true),
             (&[(0, 0, two), (2, 0, END)], (9, 0, two), Malformed, true),
             (&[(0, 0, two), (2, 0, END)], (1, 0, two), Fine, true),
@@ -1159,7 +1165,9 @@ mod tests {
             (&[(0, 0, two), (2, 0, END)], (4, 0, END), Fine, false),
             (&[(0, 0, two), (2, 0, END)], (3, 0, END), Fine, false),
             // Inside a gap that a later Object announced: Object 3 said
-            // that 1 and 2 do not exist.
+            // that 1 and 2 do not exist. §12.9 calls malformed what §2.1 and
+            // §9.1 allow: a gap over an Object is held against the track, a
+            // status where an Object is (above) is not.
             (&[(0, 0, two), (3, 2, two)], (1, 0, two), Malformed, true),
             (&[(0, 0, two), (3, 2, two)], (2, 0, two), Malformed, true),
             // A status there says nothing the gap did not: not malformed,

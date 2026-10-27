@@ -1276,7 +1276,8 @@ fn a_fetch_that_waits_for_nothing_gets_what_the_cache_has_of_its_range() {
             None,
             vec![unknown(2, u64::MAX), cached(3, 0), cached(3, 1)],
         ),
-        // Descending and reaching Group 2: one indicator for the range.
+        // GROUP_ORDER Descending, reaching Group 2: one indicator for the
+        // range.
         (
             (at(2, 0), at(3, 2)),
             Some(descending.clone()),

@@ -4,7 +4,7 @@ use super::*;
 
 const CAROL: SessionKey = SessionKey(4);
 
-fn namespace_of(fields: &[&[u8]]) -> TrackNamespace {
+pub(super) fn namespace_of(fields: &[&[u8]]) -> TrackNamespace {
     TrackNamespace::new(fields.iter().map(|field| field.to_vec()).collect()).unwrap()
 }
 
@@ -13,7 +13,7 @@ fn track_in(fields: &[&[u8]]) -> FullTrackName {
 }
 
 /// A relay with four sessions and nothing else.
-fn relay() -> Relay {
+pub(super) fn relay() -> Relay {
     let mut relay = Relay::new("test/0");
     for session in [PUBLISHER, ALICE, BOB, CAROL] {
         relay.step(Event::SessionOpened {
@@ -26,7 +26,12 @@ fn relay() -> Relay {
 
 /// `session` announces a namespace on `stream`, with the Request ID `stream`
 /// times two (the streams of a session are numbered from 0 in these tests).
-fn announce(relay: &mut Relay, session: SessionKey, stream: u64, fields: &[&[u8]]) -> Vec<Action> {
+pub(super) fn announce(
+    relay: &mut Relay,
+    session: SessionKey,
+    stream: u64,
+    fields: &[&[u8]],
+) -> Vec<Action> {
     relay.step(Event::RequestOpened {
         session,
         stream: StreamKey(stream),
@@ -38,7 +43,7 @@ fn announce(relay: &mut Relay, session: SessionKey, stream: u64, fields: &[&[u8]
     })
 }
 
-fn subscribe_to(
+pub(super) fn subscribe_to(
     relay: &mut Relay,
     session: SessionKey,
     stream: u64,
@@ -78,7 +83,7 @@ fn asked(session: SessionKey, own: u64, request_id: u64, fields: &[&[u8]]) -> [A
     ]
 }
 
-fn refused(session: SessionKey, stream: u64, error: RequestError) -> [Action; 2] {
+pub(super) fn refused(session: SessionKey, stream: u64, error: RequestError) -> [Action; 2] {
     [
         Action::SendRequest {
             session,
@@ -616,6 +621,26 @@ fn a_subscribe_namespace_is_told_of_many_namespaces_as_they_are_written_and_refu
     assert_eq!(named(&written(&mut relay)), 0);
 }
 
+/// The relay tells one namespace subscription of as many namespaces as a
+/// `SUBSCRIBE_NAMESPACE` of the Rust session keeps, which ends its request at
+/// one more: the second column of the row `namespaces-of-a-subscription` of
+/// `fixtures/limits/limits.tsv`.
+#[test]
+fn the_relay_tells_of_as_many_namespaces_as_a_session_keeps() {
+    let of_the_session = include_str!("../../../../fixtures/limits/limits.tsv")
+        .lines()
+        .find_map(|row| match row.split('\t').collect::<Vec<_>>()[..] {
+            ["namespaces-of-a-subscription", rust, _] => {
+                Some(rust.parse::<usize>().expect("a number"))
+            }
+            _ => None,
+        });
+    assert_eq!(
+        of_the_session,
+        Some(crate::discovery::MAX_NAMESPACES_OF_A_SUBSCRIPTION)
+    );
+}
+
 /// What comes from the publisher, what the relay does to its own request
 /// first, and what Alice and Bob get; `None`: `SUBSCRIBE_OK`.
 type AnswerCase = (&'static str, Event, Vec<Action>, Option<RequestError>);
@@ -1105,28 +1130,6 @@ fn the_upstream_subscribe_is_cancelled_when_nobody_waits_for_its_answer() {
 }
 
 #[test]
-fn only_so_many_subscribers_wait_for_one_answer() {
-    // The expectation below is spelled out for a limit of 64.
-    assert_eq!(crate::MAX_WAITING_SUBSCRIBERS, 64);
-    let mut relay = relay();
-    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
-    for number in 0..65 {
-        let session = SessionKey(100 + number);
-        relay.step(Event::SessionOpened {
-            session,
-            role: Role::Server,
-        });
-        let actions = subscribe_to(&mut relay, session, 0, &[b"xmoq"]);
-        match number {
-            0 => assert_eq!(actions, asked(PUBLISHER, 0, 1, &[b"xmoq"])),
-            1..=63 => assert_eq!(actions, [], "subscriber {number}"),
-            // The 65th: EXCESSIVE_LOAD (0x9).
-            _ => assert_eq!(actions, refused(session, 0, error(0x9))),
-        }
-    }
-}
-
-#[test]
 fn a_session_gets_back_one_announcement_for_each_time_its_timer_runs_out() {
     assert_eq!(crate::MAX_ANNOUNCEMENTS_AT_ONCE, 5);
     let mut relay = relay();
@@ -1216,28 +1219,6 @@ fn a_refusal_of_the_relays_own_says_when_to_ask_again() {
             "{code:#x}"
         );
     }
-}
-
-#[test]
-fn an_announcement_too_many_is_refused_with_the_time_one_takes_to_come_back() {
-    let mut relay = Relay::new("test/0");
-    // One at once, and one more every 2.5 seconds.
-    relay.set_announcements(1, 2_500);
-    relay.step(Event::SessionOpened {
-        session: PUBLISHER,
-        role: Role::Server,
-    });
-    announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
-    let too_often = RequestError {
-        error_code: 0x9,
-        retry_interval: 2_501,
-        error_reason: ReasonPhrase::default(),
-        redirect: None,
-    };
-    assert_eq!(
-        announce(&mut relay, PUBLISHER, 1, &[b"xmoq"]),
-        refused(PUBLISHER, 1, too_often)
-    );
 }
 
 #[test]
@@ -2093,7 +2074,7 @@ fn reaches_alice(relay: &mut Relay, session: SessionKey, stream: u64) -> bool {
 
 /// Bob's PUBLISH says `PUBLISH_DONE` and counts a stream that does not
 /// come: his source drains.
-fn bob_is_done(relay: &mut Relay) {
+pub(super) fn bob_is_done(relay: &mut Relay) {
     relay.step(Event::RequestMessage {
         session: BOB,
         stream: StreamKey(0),
@@ -2789,69 +2770,6 @@ fn a_reason_that_is_passed_on_is_cut_between_characters() {
         assert_eq!(
             actions.get(1..),
             Some(refused(ALICE, 0, expected).as_slice())
-        );
-    }
-}
-
-#[test]
-fn a_publishers_error_code_is_passed_on_or_replaced() {
-    // (the publisher's Error Code, the subscriber's, whether the publisher's
-    //  reason goes with it, the subscriber's Retry Interval). The publisher's
-    // Retry Interval is 7 in every row. REDIRECT, which needs a Redirect, is
-    // a row of the table of answers above.
-    let cases: [(u64, u64, bool, u64); 17] = [
-        // About the track at the publisher or its load, and the generic
-        // error: as they are, with the publisher's Retry Interval, also
-        // where the relay would give the code another of its own (1 with
-        // 0x2, 1,001 with 0x9 and 0x10).
-        (0x0, 0x0, true, 7),
-        (0x2, 0x2, true, 7),
-        (0x9, 0x9, true, 7),
-        (0x10, 0x10, true, 7),
-        (0x33, 0x33, true, 7),
-        // The three about tokens: as they are, until authorization is decided.
-        (0x1, 0x1, true, 7),
-        (0x4, 0x4, true, 7),
-        (0x5, 0x5, true, 7),
-        // NOT_SUPPORTED and GOING_AWAY are true of the publisher and the
-        // relay only: DOES_NOT_EXIST, with the relay's own Retry Interval
-        // for that code (after a second), and not the publisher's 7.
-        (0x3, 0x10, false, 1_001),
-        (0x6, 0x10, false, 1_001),
-        // No answer to this SUBSCRIBE: INTERNAL_ERROR, and no word on a
-        // retry. INVALID_RANGE (the relay names no range), MALFORMED_TRACK
-        // (defined for FETCH), UNINTERESTED, PREFIX_OVERLAP,
-        // NAMESPACE_TOO_LARGE, INVALID_JOINING_REQUEST_ID, and a code draft 18
-        // does not have.
-        (0x11, 0x0, false, 0),
-        (0x12, 0x0, false, 0),
-        (0x20, 0x0, false, 0),
-        (0x30, 0x0, false, 0),
-        (0x31, 0x0, false, 0),
-        (0x32, 0x0, false, 0),
-        (0x7777, 0x0, false, 0),
-    ];
-    for (from_publisher, to_subscriber, with_reason, retry_interval) in cases {
-        let mut relay = relay();
-        announce(&mut relay, PUBLISHER, 0, &[b"xmoq"]);
-        subscribe_to(&mut relay, ALICE, 0, &[b"xmoq"]);
-        let actions = relay.step(rejected(RequestError {
-            error_code: from_publisher,
-            retry_interval: 7,
-            error_reason: ReasonPhrase::new(b"why".to_vec()).unwrap(),
-            redirect: None,
-        }));
-        let reason: &[u8] = if with_reason { b"why" } else { b"" };
-        let expected = RequestError {
-            error_code: to_subscriber,
-            retry_interval,
-            error_reason: ReasonPhrase::new(reason.to_vec()).unwrap(),
-            redirect: None,
-        };
-        assert_eq!(
-            actions.get(1..),
-            Some(refused(ALICE, 0, expected).as_slice()),
-            "{from_publisher:#x}"
         );
     }
 }

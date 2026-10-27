@@ -20,6 +20,7 @@ pub(super) fn from(group: u64, object: u64) -> SubscriptionFilter {
     }
 }
 
+/// The Subscription Filter of a SUBSCRIBE, in the relay.
 #[test]
 fn the_start_location_of_a_filter_is_counted_from_the_largest_object() {
     let last = u64::MAX;

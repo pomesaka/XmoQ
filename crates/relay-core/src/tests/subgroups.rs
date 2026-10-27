@@ -846,6 +846,7 @@ enum Second {
     Reset,
 }
 
+/// A Subgroup that ends twice, or goes past its end (relay).
 #[test]
 fn a_second_stream_of_a_subgroup_delivered_whole_is_read_for_the_check() {
     use Second::{Fin, Object, Reset};
@@ -999,6 +1000,8 @@ fn a_stream_read_for_the_check_is_stopped_when_its_time_is_over() {
     assert_eq!(relay.counts().tracks, 1);
 }
 
+/// A Subgroup that ends twice, or goes past its end (relay), where the final
+/// Object is a status.
 #[test]
 fn a_status_is_the_final_object_it_ends_on() {
     let end_of_group = SubgroupObject {

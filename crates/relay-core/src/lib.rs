@@ -161,7 +161,8 @@ pub const CHECKED_STREAM_WAIT_MS: u64 = 10_000;
 /// room of a track is counted when the relay asks
 /// (`Relay::ask_the_publishers`), and a PUBLISH is accepted without a look
 /// at what is asked, so a track can have sources and open requests that are
-/// more than this together.
+/// more than this together. Held by
+/// `the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`.
 pub const MAX_SOURCES: usize = 4;
 
 /// The Stream Count of a `PUBLISH_DONE` whose sender cannot give the exact
@@ -2782,7 +2783,14 @@ impl Relay {
     }
 
     /// Whether the relay's authorization, where it has one, allows a
-    /// request.
+    /// request. §9.4: "Relays MUST ensure subscribers are authorized to
+    /// access the content associated with the Track"; §9.5: "Relays MUST
+    /// verify that publishers are authorized to publish the set of Tracks
+    /// whose Track Namespace matches the namespace in a `PUBLISH_NAMESPACE`, or
+    /// the Full Track Name in PUBLISH". Which request is asked as which
+    /// [`Operation`] is held by
+    /// `each_request_needs_a_token_for_its_operation_and_its_namespace` of
+    /// `xmoq-relay`.
     fn allowed(&self, session: SessionKey, request: &PeerRequest) -> Result<(), Denied> {
         let Some(Authorization(authorizer)) = &self.authorizer else {
             return Ok(());
@@ -2977,7 +2985,8 @@ impl Relay {
                 if !self.takes_an_announcement(session, actions) {
                     // One is back after that long at the latest (§10.6.2:
                     // "The sender SHOULD use the Retry Interval to indicate
-                    // when the request can be retried").
+                    // when the request can be retried"). Held by
+                    // `the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`.
                     let too_often = Refusal::loaded_for_ms(self.announcement_every_ms);
                     self.refuse(session, stream, request, &too_often, actions);
                     return;
@@ -3101,7 +3110,8 @@ impl Relay {
             // may take (`UPSTREAM_ANSWER_WAIT_MS`). WHY a PUBLISH_NAMESPACE
             // that arrives now does have its publisher asked: the track has
             // subscribers, who are there already and stay if that publisher
-            // accepts.
+            // accepts. Held by
+            // `the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`.
             //
             // One that is held for a publisher to appear waits with the
             // track: its sources are all done, so it has no publisher
@@ -3589,6 +3599,12 @@ impl Relay {
                         stream_reset_code::CANCELLED,
                         actions,
                     ),
+                    // §10.9: "The receiver of a REQUEST_UPDATE MUST respond
+                    // with exactly one REQUEST_OK or REQUEST_ERROR". Where
+                    // the session ends the request with it, also one not
+                    // answered yet, the stream gets nothing after it. Held,
+                    // for a SUBSCRIBE not answered yet, by
+                    // `the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`.
                     (AfterRefusal::CloseStream, _) => {
                         actions.push(Action::FinishRequest { session, stream });
                         // The session has rejected the request; what the
