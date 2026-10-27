@@ -165,7 +165,12 @@ pub const CHECKED_STREAM_WAIT_MS: u64 = 10_000;
 pub const MAX_SOURCES: usize = 4;
 
 /// The Stream Count of a `PUBLISH_DONE` whose sender cannot give the exact
-/// number (§10.11: "it MUST set Stream Count to 2^62 - 1").
+/// number (§10.11: "it MUST set Stream Count to 2^62 - 1"). The relay counts
+/// the subgroup streams it opened for the subscription, and gives this
+/// where one was reset before the transport reported it open. Held by
+/// `a_stream_that_may_never_have_been_opened_makes_the_count_unknown`,
+/// `publish_done_counts_the_streams_of_a_subscriber_that_joined_late` and
+/// `the_publishers_stream_count_has_the_streams_the_relay_did_not_pass_on`.
 const STREAM_COUNT_UNKNOWN: u64 = (1 << 62) - 1;
 
 /// What a request stream of a peer is for.
@@ -759,6 +764,17 @@ enum Admission {
 /// same source while the first is open (above), and nothing is compared; a
 /// stream past [`MAX_CHECKED_STREAMS_PER_TRACK`] or [`CHECKED_STREAM_WAIT_MS`];
 /// and a Subgroup that is forgotten.
+///
+/// Held by these tests. The same source:
+/// `a_second_stream_of_a_subgroup_from_the_same_publisher`,
+/// `a_stream_that_takes_the_place_of_another_does_so_for_every_subscriber`,
+/// `only_so_many_streams_of_a_track_are_read_for_the_check_at_once` and
+/// `a_stream_read_for_the_check_is_stopped_when_its_time_is_over`. Another
+/// source: `a_subgroup_is_taken_from_the_source_that_sends_it_first` and
+/// `a_stream_of_another_source_is_left_when_its_first_object_names_the_subgroup`.
+/// What is remembered: `subgroups_are_remembered_for_the_newest_groups_only`,
+/// `only_so_many_subgroups_are_remembered` and
+/// `a_stream_of_a_group_that_is_too_old_to_tell_is_left_once_there_were_two_sources`.
 #[derive(Debug, Default)]
 struct Subgroups {
     /// By Group ID and Subgroup ID.
@@ -1096,6 +1112,9 @@ struct Track {
 /// draft has no rule that lowers it, the publisher has sent the Object, and
 /// the value is the largest the relay has observed (§10.2.11), as one a
 /// source says in its answer is, ahead of what the relay has.
+///
+/// Held by `the_largest_object_is_raised_at_the_first_byte_of_an_object`
+/// and `the_largest_object_of_a_publish_is_passed_on` in the tests.
 ///
 /// WHY the fields of the track and not the track: a stream of the track is
 /// held while this is done.
@@ -1574,7 +1593,13 @@ impl Tracks {
     ///
     /// A track that has a source gets another. Its Track Properties are the
     /// ones of the new source from then on, and its largest Location the
-    /// larger of the two (§10.2.11: "the largest of the following").
+    /// larger of the two (§10.2.11: "the largest of the following"); an
+    /// Object on a stream the relay stopped does not count. WHY the last
+    /// source's properties: §2.5 has "the most recent set SHOULD replace any
+    /// cached values" for unknown properties. Held by
+    /// `the_properties_and_the_largest_object_of_a_track_with_two_publishers`,
+    /// `a_filter_is_counted_over_what_both_publishers_of_a_track_brought` and
+    /// `an_object_on_a_stream_the_relay_stopped_does_not_count_for_the_largest_object`.
     ///
     /// What a publisher that says `PUBLISH_DONE` and publishes anew at once
     /// gets depends on a race: where every stream it counted has ended, its
@@ -2343,9 +2368,26 @@ impl Relay {
     ///   `out_stream` plays no part: it may be gone already, ended by a
     ///   limit of the session that the same Object reached first.
     ///
+    /// The three limits and their values are those of `HubConfig` of
+    /// `xmoq-relay` (`send_for_one_subscription`, `send`,
+    /// `send_for_the_relay_bytes`), all provisional; the draft has no
+    /// number. Held by `the_subscription_that_carries_the_most_is_the_one_that_falls_behind`,
+    /// `over_the_relay_s_limit_the_subscription_with_the_most_waiting_of_any_session_ends`
+    /// and `over_the_relay_s_limit_what_waits_is_summed_by_subscription`
+    /// here, and by
+    /// `a_subscriber_that_stops_reading_is_cut_off_alone_by_each_of_the_limits`
+    /// of `xmoq-relay` over the streams.
+    ///
     /// WHY end one subscription: its queue is the only place the delay can
-    /// go without holding back the publisher and the other subscribers (§8
-    /// names `TOO_FAR_BEHIND` for it). WHY the one that carried the most of
+    /// go without holding back the publisher and the other subscribers. §8:
+    /// "If a subscriber fails to consume Objects at a sufficient rate,
+    /// causing the publisher to exceed its resource limits, the publisher
+    /// MAY terminate the subscription using `PUBLISH_DONE` with error
+    /// `TOO_FAR_BEHIND`", and "Publishers can, at their discretion,
+    /// discontinue forwarding Objects before either of the timeouts
+    /// occurs"; §13.1: "Publishers SHOULD monitor the number of active
+    /// subscriptions and enforce limits to prevent resource exhaustion".
+    /// WHY the one that carried the most of
     /// the session, and not the one that went over: the limit is the
     /// session's, and the one that went over is as often a small track that
     /// comes often, the sound behind its own video, as the track that fills
@@ -2671,7 +2713,12 @@ impl Relay {
     }
 
     /// [`Event::GoingAway`]: every session is sent its GOAWAY, in the order
-    /// of their numbers, once.
+    /// of their numbers, once, and a session that opens after it gets one
+    /// after its SETUP. The relay sends it at SIGINT or SIGTERM (`main.rs`
+    /// of `xmoq-relay`); §3.6: "The sender SHOULD close the session with
+    /// `GOAWAY_TIMEOUT` after the indicated timeout if there are still open
+    /// subscriptions or fetches on a connection", which `xmoq-relay` does.
+    /// Held by the tests in `tests/going_away.rs`.
     fn on_going_away(&mut self, going_away: GoingAway, actions: &mut Vec<Action>) {
         if self.going_away.is_some() {
             return;
@@ -2685,8 +2732,15 @@ impl Relay {
     }
 
     /// Sends the session its GOAWAY, once the relay is to stop
-    /// ([`Event::GoingAway`]). From then on the session refuses every
-    /// request of the peer with `GOING_AWAY` (§10.4).
+    /// ([`Event::GoingAway`]). It carries the smallest Request ID of the
+    /// peer the session has not seen (§10.4: "The smallest peer Request ID
+    /// that was not or might not have been processed prior to sending the
+    /// GOAWAY"), and no URI where the relay is the client (§10.4: "A client
+    /// MUST send a zero-length New Session URI in any GOAWAY"). From then on
+    /// the session refuses every request of the peer with `GOING_AWAY`
+    /// (§10.4: "any requests that arrive after the GOAWAY, MUST be rejected
+    /// with `REQUEST_ERROR` using error code `GOING_AWAY`"); what was taken goes
+    /// on (§10.4: "The GOAWAY message does not impact subscription state").
     fn go_away(&mut self, session: SessionKey, actions: &mut Vec<Action>) {
         let (Some(going_away), Some(state)) = (&self.going_away, self.sessions.get_mut(&session))
         else {
@@ -3266,9 +3320,13 @@ impl Relay {
         let Some(state) = self.sessions.get_mut(&session) else {
             return;
         };
-        // WHY Forward State 1 from the start: §9.5 allows 0 until a subscriber
-        // comes, which would need a REQUEST_UPDATE towards the publisher later.
-        // Objects that arrive while nobody subscribes are dropped instead.
+        // WHY Forward State 1 from the start: §9.5 allows 0 ("The relay MAY
+        // respond with PUBLISH_OK in Forward State=0 until there are known
+        // subscribers for new Tracks"), which would need a REQUEST_UPDATE
+        // towards the publisher later. Objects that arrive while nobody
+        // subscribes are dropped instead. Held by `relay_with_track` and
+        // `a_track_that_came_with_publish_stays_without_subscribers` in the
+        // tests.
         let response = state
             .moqt
             .accept_publish(request, vec![Parameter::Forward(true)])
@@ -3311,6 +3369,16 @@ impl Relay {
         // two endpoints, so the sentence is about the PUBLISH of the session
         // the SUBSCRIBE went to. What the relay asked of other sessions is
         // still asked, and an answer that comes makes a further source.
+        // §9.5: "if the relay is holding a downstream SUBSCRIBE awaiting a
+        // publisher for this Track (see Section 10.2.6), it MUST proceed
+        // with the SUBSCRIBE". Once the publisher has accepted the relay's
+        // SUBSCRIBE, its PUBLISH for the track is a second subscription in
+        // the same role, `DUPLICATE_SUBSCRIPTION`. Held by
+        // `the_relays_subscribe_gives_way_to_a_publish_of_the_publisher_it_asked`,
+        // `a_publish_for_a_track_that_already_came_through_the_relays_subscribe_is_a_duplicate`,
+        // `what_was_asked_of_a_publisher_stays_asked_when_another_publishes_the_track`,
+        // and `a_publish_that_crosses_the_relays_subscribe_becomes_the_source_of_the_track`
+        // of `xmoq-relay`.
         let asked_here = self.is_asked_of(&publish.full_track_name, session);
         // A track takes the source in whatever state it is (§9.3, §9.5: "When
         // it receives an authorized PUBLISH message for a Track that has
@@ -3861,7 +3929,17 @@ impl Relay {
     /// fields"), and the draft does not say what a receiver does with it. A
     /// stream whose header leaves the Subgroup ID to its first Object and
     /// that starts inside a Subgroup is taken for a Subgroup of its own
-    /// ([`Track::taking_of_whole`]).
+    /// ([`Track::taking_of_whole`]). Held by
+    /// `a_stream_is_opened_downstream_once_its_subgroup_is_known`,
+    /// `a_stream_that_ends_without_an_object` and
+    /// `a_subgroup_whose_stream_ended_with_a_fin_and_no_object_counts_as_delivered_whole`.
+    ///
+    /// Only a stream under a Track Alias that is a source of the track, going
+    /// on or draining, is taken; any other is stopped with `CANCELLED`. §11.1:
+    /// "Objects can arrive after a subscription has been cancelled.
+    /// Subscribers SHOULD retain sufficient state to quickly discard these
+    /// unwanted Objects". Held by `a_stream_that_opens_while_its_source_drains_is_taken`
+    /// and `a_stream_of_a_session_that_is_no_source_of_the_track_is_stopped`.
     fn on_data_stream_opened(
         &mut self,
         session: SessionKey,
@@ -4498,8 +4576,15 @@ impl Relay {
     /// Takes sources off a track that keeps others. Each is told that nothing
     /// more of it is wanted, as when its track ends. The Subgroups that were
     /// being taken from it end for the subscribers where they are: their
-    /// streams are reset, and no other source goes on with them (see
-    /// [`Subgroups`]). The subscriptions to the track are not touched.
+    /// streams are reset with `CANCELLED` unless the source's stream ended
+    /// with a FIN, and no other source goes on with them (see
+    /// [`Subgroups`]). The subscriptions to the track are not touched, and
+    /// the subscribers are told nothing: for them the upstream subscription
+    /// goes on (§9.4, "the upstream publisher terminates the subscription",
+    /// taken to mean the last one, [`Self::source_gone`]). Held by
+    /// `a_source_that_goes_leaves_the_track_to_the_others`,
+    /// `the_source_that_is_left_does_not_bring_back_what_the_one_that_went_had_sent`
+    /// and `a_source_the_relay_subscribed_to_that_goes_leaves_the_track_to_the_others`.
     fn let_go_of_sources(
         &mut self,
         track_name: &FullTrackName,
@@ -4843,7 +4928,13 @@ impl Relay {
         // With sources of both kinds, the relay's SUBSCRIBEs are cancelled
         // and the track stays for its publishers. A SUBSCRIBE whose publisher
         // said PUBLISH_DONE is left to drain. A SUBSCRIBE that has no answer
-        // yet is cancelled as well: it asks for what nobody would get.
+        // yet is cancelled as well: it asks for what nobody would get. The
+        // cancellation is a reset and STOP_SENDING with `CANCELLED` (§3.3.2:
+        // "Implementations SHOULD cancel requests by abruptly terminating
+        // any directions of a stream that are still open by resetting or
+        // sending STOP_SENDING"). Held by
+        // `the_upstream_subscription_is_cancelled_when_its_last_subscriber_leaves`
+        // and `a_track_that_came_with_publish_stays_without_subscribers`.
         if track.subscribers.is_empty() {
             let unanswered = std::mem::take(&mut track.asks);
             for ask in unanswered {
@@ -5125,6 +5216,11 @@ impl OutStreamAllocator<'_> {
         header: SubgroupHeader,
         actions: &mut Vec<Action>,
     ) {
+        // §5.1: "The publisher does not send Objects if the Forward State is
+        // 0", and "Control messages, such as PUBLISH_DONE (Section 10.11)
+        // are sent regardless of the forward state". Held by
+        // `a_subscriber_with_forward_state_0_gets_no_objects` and
+        // `a_subscriber_with_forward_state_0_and_a_filter_gets_no_objects`.
         if !subscriber.forward {
             return;
         }
@@ -5308,8 +5404,14 @@ impl TrackEnd {
     /// code streams are reset and stopped with.
     ///
     /// The draft has no rule for the status a relay sends when its upstream
-    /// ends; `TRACK_ENDED` for a track whose last source is over is the
-    /// relay's choice.
+    /// ends; `TRACK_ENDED` for a track whose last source is over, whatever
+    /// that source said, is the relay's choice. The other statuses a
+    /// subscriber gets are for what the relay finds itself:
+    /// `MALFORMED_TRACK` here, `UPDATE_FAILED` and `TOO_FAR_BEHIND` for one
+    /// subscription. Held by
+    /// `the_subscribers_of_a_track_whose_last_source_is_done_get_track_ended_whatever_it_said`,
+    /// `a_publisher_that_leaves_ends_the_track_for_every_subscriber` and
+    /// `a_track_ends_when_the_last_of_its_sources_has_drained`.
     fn codes(self) -> (u64, u32) {
         match self {
             Self::Done | Self::TimedOut | Self::SourceGone | Self::Unwanted => (

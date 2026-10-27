@@ -858,6 +858,31 @@ fn a_subscriber_that_leaves_does_not_disturb_the_others() {
 }
 
 #[test]
+fn the_subscribers_of_a_track_whose_last_source_is_done_get_track_ended_whatever_it_said() {
+    // The Status Code of the publisher's PUBLISH_DONE: INTERNAL_ERROR,
+    // TRACK_ENDED, SUBSCRIPTION_ENDED, GOING_AWAY, TOO_FAR_BEHIND.
+    for status in [0x0, 0x2, 0x3, 0x4, 0x5] {
+        let mut relay = relay_with_track();
+        subscribe_to_track(&mut relay, ALICE);
+        let mut expected = vec![Action::FinishRequest {
+            session: PUBLISHER,
+            stream: StreamKey(0),
+        }];
+        // TRACK_ENDED (0x2), with no stream to count.
+        expected.extend(done_actions(ALICE, 0x2, 0));
+        assert_eq!(
+            relay.step(Event::RequestMessage {
+                session: PUBLISHER,
+                stream: StreamKey(0),
+                message: publish_done(status, 0),
+            }),
+            expected,
+            "{status:#x}"
+        );
+    }
+}
+
+#[test]
 fn a_publisher_that_leaves_ends_the_track_for_every_subscriber() {
     // (how the publisher leaves)
     let leavings = [

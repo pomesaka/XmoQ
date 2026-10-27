@@ -505,9 +505,10 @@ pub enum Action {
     /// The subscriber changed the `SUBGROUP_DELIVERY_TIMEOUT` of its
     /// subscription with a `REQUEST_UPDATE` (§10.9). Sent for every stream
     /// of the subscription that is not done; the I/O side lets it hold for
-    /// the ones it has not been told to finish (see
-    /// docs/moqt-implementation-notes.md, the row on a delivery timeout
-    /// that changes).
+    /// the ones it has not been told to finish; a stream whose timer runs
+    /// keeps the time it was finished with (§8 starts the timer "once it
+    /// becomes aware that all of the objects on the subgroup have been
+    /// published"; `xmoq-relay` holds it).
     SetDeliveryTimeout {
         /// The stream.
         out_stream: OutStreamKey,

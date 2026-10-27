@@ -3745,8 +3745,8 @@ mod delivery_timeouts {
     /// §10.9: a `REQUEST_UPDATE` that sets `SUBGROUP_DELIVERY_TIMEOUT` is
     /// answered with `REQUEST_OK`, and holds for the streams the relay
     /// learns the end of after it. A stream whose timer runs keeps the
-    /// time it was finished with (docs/moqt-implementation-notes.md,
-    /// provisional).
+    /// time it was finished with (provisional; the reason is at
+    /// `Hub::set_delivery_timeout`).
     #[tokio::test(start_paused = true)]
     async fn an_update_of_the_delivery_timeout_holds_for_the_streams_that_end_after_it() {
         // (the timeout of the SUBSCRIBE; that of the update, 0 for none;

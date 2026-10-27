@@ -347,6 +347,72 @@ fn a_fetch_goes_to_a_publisher_of_the_namespace_when_the_track_has_no_source() {
     );
 }
 
+#[test]
+fn a_fetch_is_asked_of_neither_its_sender_nor_a_source_on_its_way_out() {
+    let announces = |relay: &mut Relay, session: SessionKey| {
+        relay.step(Event::RequestOpened {
+            session,
+            stream: StreamKey(0),
+            first: ControlMessage::PublishNamespace(PublishNamespace {
+                request_id: 0,
+                track_namespace: namespace(),
+                parameters: vec![],
+            }),
+        });
+    };
+    // (case; whether the publisher's source of "a" is on its way out, with a
+    //  PUBLISH_DONE whose stream has not come; who else announced the
+    //  namespace; what becomes of Alice's FETCH)
+    let cases: [(&str, bool, Option<SessionKey>, &str); 4] = [
+        ("the source", false, None, "asked of 1"),
+        (
+            "a source on its way out, and Bob announced",
+            true,
+            Some(BOB),
+            "asked of 3",
+        ),
+        ("a source on its way out alone", true, None, "refused 0x10"),
+        (
+            "Alice herself announced, and the source is on its way out",
+            true,
+            Some(ALICE),
+            "refused 0x10",
+        ),
+    ];
+    for (name, on_its_way_out, announced_by, expected) in cases {
+        let mut relay = relay_with_track();
+        if on_its_way_out {
+            relay.step(Event::RequestMessage {
+                session: PUBLISHER,
+                stream: StreamKey(0),
+                message: publish_done(0x2, 1),
+            });
+        }
+        if let Some(session) = announced_by {
+            announces(&mut relay, session);
+        }
+        // Request ID 2: Alice's announcement may have used 0.
+        let actions = relay.step(Event::RequestOpened {
+            session: ALICE,
+            stream: FETCH_STREAM,
+            first: standalone(2, b"a", (at(0, 0), at(2, 0)), vec![]),
+        });
+        let what = actions
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenRequest { session, .. } => Some(format!("asked of {}", session.0)),
+                Action::SendRequest {
+                    session: ALICE,
+                    message: ControlMessage::RequestError(error),
+                    ..
+                } => Some(format!("refused {:#x}", error.error_code)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "nothing".to_string());
+        assert_eq!(what, expected, "{name}: {actions:?}");
+    }
+}
+
 /// What happens to the FETCH of [`fetching`], in order, and what the relay
 /// does at each step; and whether the FETCH is over after the last step.
 type Case = (&'static str, bool, Vec<(Happens, Vec<Action>)>);

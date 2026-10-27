@@ -901,10 +901,9 @@ fn the_cache_keeps_what_the_relay_passes_on_and_lets_go_of_it_with_the_track() {
 }
 
 /// A Standalone FETCH of `session` on `stream` for the whole Group `group`
-/// of the track "a": "written" where the relay answers it from its cache,
-/// "asked" where it asks the publisher, or the code it refuses with.
-fn fetches_group(relay: &mut Relay, session: SessionKey, stream: u64, group: u64) -> String {
-    let actions = relay.step(Event::RequestOpened {
+/// of the track "a".
+fn fetch_of_group(session: SessionKey, stream: u64, group: u64) -> Event {
+    Event::RequestOpened {
         session,
         stream: StreamKey(stream),
         first: ControlMessage::Fetch(Fetch {
@@ -916,7 +915,14 @@ fn fetches_group(relay: &mut Relay, session: SessionKey, stream: u64, group: u64
             },
             parameters: vec![],
         }),
-    });
+    }
+}
+
+/// [`fetch_of_group`], and what became of it: "written" where the relay
+/// answers it from its cache, "asked" where it asks the publisher, or the
+/// code it refuses with.
+fn fetches_group(relay: &mut Relay, session: SessionKey, stream: u64, group: u64) -> String {
+    let actions = relay.step(fetch_of_group(session, stream, group));
     actions
         .iter()
         .find_map(|action| match action {
@@ -1030,6 +1036,28 @@ fn a_session_that_has_its_share_kept_beyond_the_cache_is_refused_and_no_other() 
         given_up: None,
     });
     assert_eq!(fetches_group(&mut relay, ALICE, 11, 8), "written");
+}
+
+#[test]
+fn a_fetch_refused_for_what_is_kept_beyond_the_cache_is_not_asked_of_the_publisher() {
+    // 24 bytes for the relay, so 3 for a session: what Group 3 has.
+    let mut relay = relay_with_three_objects();
+    relay.set_held_beyond_the_cache(24);
+    assert_eq!(fetches_group(&mut relay, ALICE, 7, 3), "written");
+    assert_eq!(the_cache_moves_on_to(&mut relay, 8), []);
+    let actions = relay.step(fetch_of_group(ALICE, 9, 8));
+    // (refusals, requests the relay opens)
+    let refused_and_asked = actions
+        .iter()
+        .fold((0, 0), |(refused, asked), action| match action {
+            Action::SendRequest {
+                message: ControlMessage::RequestError(_),
+                ..
+            } => (refused + 1, asked),
+            Action::OpenRequest { .. } => (refused, asked + 1),
+            _ => (refused, asked),
+        });
+    assert_eq!(refused_and_asked, (1, 0), "{actions:?}");
 }
 
 #[test]

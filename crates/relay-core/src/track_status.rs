@@ -71,6 +71,16 @@ impl Relay {
     /// would bring Objects nobody asked for. `moqtail` 0.15.0 answers a track
     /// it has with `LARGEST_OBJECT` alone and asks the first publisher it
     /// finds otherwise (`fixtures/moqt-18/`, capture P).
+    ///
+    /// A source on its way out does not count: the track is asked of the
+    /// publishers as one without a source. The relay's `TRACK_STATUS`
+    /// carries no parameter of the requester's (§10.2.1: "Message Parameters
+    /// are always intended for the peer endpoint only and are not forwarded
+    /// by Relays").
+    /// The requester's FIN before the answer cancels nothing; its reset
+    /// cancels the relay's `TRACK_STATUS`. Held by the tests of
+    /// `tests/track_status.rs` and
+    /// `a_fetch_or_track_status_is_not_asked_of_a_publisher_that_sent_goaway`.
     pub(crate) fn on_track_status(
         &mut self,
         session: SessionKey,
