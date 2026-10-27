@@ -468,7 +468,7 @@ export type OwnPageExtras = {
 	 * `@xmoq/meeting`, in the page's own storage), as an agent would.
 	 */
 	agentInbox(line: string): Promise<void>;
-	/** The lines of the files of `events/` of that folder, in the order of their names, and of each picture a `frame` line names, its length and its bytes 1 to 3. */
+	/** The lines of the files of `events/` of that folder, in the order of their names, of each picture a `frame` line names its length and its bytes 1 to 3, and its `AGENT.md`. */
 	agentFolderReport(): Promise<PageAgentFolderReport>;
 	/**
 	 * Whether the browser has a decoder for the codec, for Annex B without a
@@ -792,6 +792,8 @@ export type PageBroadcastReport = {
 export type PageAgentFolderReport = {
 	lines: string[];
 	pictures: Record<string, string>;
+	/** The text of `AGENT.md` of the folder. */
+	guide: string;
 };
 
 export type PageMeetingReport = {

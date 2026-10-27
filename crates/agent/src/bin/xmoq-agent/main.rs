@@ -2,7 +2,7 @@
 //! its meeting is (and in a meeting takes a seat), connects there, and
 //! writes what happens in its chat as lines of JSON on stdout and in the
 //! files of `<DIR>/events/`; a line of stdin or of `<DIR>/inbox.txt` is
-//! said in the chat. It follows a
+//! said in the chat. `<DIR>/AGENT.md` tells an agent how. It follows a
 //! broadcast that ends and begins again.
 //! `xmoq_agent::args::USAGE` has the flags.
 //!
@@ -22,11 +22,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tokio::sync::{mpsc, watch};
 use xmoq_again::next_session::{After, NextSession, Pause};
 use xmoq_agent::args::{Args, Source};
 use xmoq_agent::events::{BroadcastState, Event};
+use xmoq_agent::guide::{GUIDE, GUIDE_FILE, call_line};
 use xmoq_agent::input::{self, Input};
 use xmoq_agent::presence::Presence;
 use xmoq_chat_tracks::names::Person;
@@ -762,10 +763,25 @@ fn at_relay(args: &Args, url: &str, cert_sha256: [u8; 32], namespace: Option<&[S
     }
 }
 
+/// Puts the guide for an agent in `out`, and says on stderr the line a
+/// person gives an agent to have it take part, with the folder in full.
+///
+/// WHY written anew each run: the guide is of this version of the reader,
+/// and one left by a run before may tell of another.
+fn put_guide(out: &Path) -> Result<()> {
+    let path = out.join(GUIDE_FILE);
+    std::fs::write(&path, GUIDE).with_context(|| format!("{}", path.display()))?;
+    let folder = std::fs::canonicalize(out).unwrap_or_else(|_| out.to_path_buf());
+    eprintln!("{}", call_line(&folder.display().to_string()));
+    Ok(())
+}
+
 async fn read(args: &Args) -> Result<()> {
     let stop = client::on_signals(Signals::VIEWER);
+    let out = Output::open(Path::new(&args.out))?;
+    put_guide(Path::new(&args.out))?;
     let mut reader = Reader {
-        out: Output::open(Path::new(&args.out))?,
+        out,
         lines: stdin::lines(Path::new(&args.out).join(xmoq_agent::inbox::INBOX_FILE)),
         stdin_open: true,
         stop,

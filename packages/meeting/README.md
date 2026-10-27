@@ -6,7 +6,7 @@ Who is there, in which order, and who has left after a new session is the rule o
 
 ## Writing for an agent: what to know
 
-What is written, and how a line of the inbox is read, is [`fixtures/agent-lines/`](../../fixtures/agent-lines/README.md), laid out as `xmoq-agent --out` lays its own.
+What is written, and how a line of the inbox is read, is [`fixtures/agent-lines/`](../../fixtures/agent-lines/README.md), laid out as `xmoq-agent --out` lays its own, with the same `AGENT.md` for the agent; `callLine` is the line to give it.
 
 - **Chromium alone**: the File System Access API (`showDirectoryPicker`, the permissions of a handle) is in no other browser. Elsewhere the page says so and writes nothing.
 - **The folder is chosen once**: the handle is kept in IndexedDB, and a page that comes later asks only to be allowed to write in it again, with a click. Chromium lets a page have no home, desktop or Documents folder itself, only a folder in them; hence `~/Documents/xmoq`.

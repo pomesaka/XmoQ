@@ -4,6 +4,7 @@ export {
 	type AgentCallState,
 	createAgentCall,
 } from "./core/agent-call.ts";
+export { callLine } from "./core/agent-guide.ts";
 export {
 	type InboxLine,
 	MAX_INBOX_LINE_BYTES,
