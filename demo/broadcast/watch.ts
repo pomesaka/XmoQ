@@ -2,6 +2,10 @@
 // together, by the times their Objects carry, and shows how long a frame
 // and a piece of audio took from the publisher's clock to this page.
 //
+// The bar under the picture (`../lib/controls.ts`) has the sound, the
+// buffer, which change at once, and `video`, a list that loads the page
+// again.
+//
 // Its flags, each a query of its address; "a trial" is something tried
 // behind the flag and not the demo's way. Those every page of the
 // broadcast takes (`room`, `token`, `via`, `uni`, `diag`, `timer`,
@@ -80,6 +84,7 @@ import {
 import { type CatalogTrack, followCatalog, trackNamespaceOf } from "@xmoq/msf";
 import { keepTrackOnSession } from "@xmoq/tracks";
 import { showCaptions, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
+import { controlBar, flagList } from "../lib/controls.ts";
 import { AGAIN, every, perSecond, say } from "../lib/page.ts";
 import { connectToRelay, firstBytes, through, why } from "../lib/relay.ts";
 import { namespace, SAMPLE_RATE } from "../lib/tracks.ts";
@@ -508,6 +513,16 @@ async function main(): Promise<void> {
 	controls.append(autoButton, " ", slider);
 	document.getElementById("sound")?.after(controls);
 	slider.value = String(clock.bufferMs());
+	// The sound alone or with the video, by loading the page again: the
+	// video's subscription is made where the session begins.
+	flagList(controlBar(), {
+		name: "video",
+		values: [
+			{ value: "yes", label: "video and sound" },
+			{ value: "no", label: "sound only" },
+		],
+		fallback: "yes",
+	});
 
 	// `?abr=1` (**a trial**): where the catalog has the video in several
 	// versions, the page plays a lower one when the picture comes late and

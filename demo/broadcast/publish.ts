@@ -1,9 +1,15 @@
 // The publishing page of the demo: a camera, or a picture it paints, is
 // encoded and published as one video track.
 //
-// `?source=camera` takes the camera; without it the page paints a clock.
-// The sound is a tone that goes up and down, made by the page;
+// `?source=camera` takes the camera; without it the page paints a clock. The sound is a tone that goes up and down, made by the page;
 // `?audio=mic` takes the microphone, `?audio=none` sends no audio track.
+//
+// The bar under the picture (`../lib/controls.ts`) turns the camera off and
+// on, mutes the sound, and changes the camera and the microphone, while the
+// page sends: off or muted, nothing of it is sent until it is on again. The
+// source, the sound, the size and the frames a second are lists of the
+// flags below, which load the page again: each decides the catalog or an
+// encoder.
 //
 // Its other flags, each a query of its address and each described where it
 // is read; "a trial" is something tried behind the flag and not the demo's
@@ -12,6 +18,7 @@
 // `../lib/relay.ts`, `../lib/page.ts` and `../lib/chat.ts`.
 //
 //   ?size=360|720|1080      the picture's size (360 when left out)
+//   ?fps=15|30              frames a second (30 when left out)
 //   ?bitrate=N              bits a second of the video (the size's own)
 //   ?keyint=MS              a key frame every so many milliseconds (1000)
 //   ?picture=busy           a picture that fills the bitrate it asks for
@@ -33,6 +40,19 @@ import {
 	keepPublishing,
 } from "@xmoq/media";
 import { createCatalogPublisher } from "@xmoq/msf";
+import {
+	controlBar,
+	deviceList,
+	flagList,
+	toggleButton,
+} from "../lib/controls.ts";
+import {
+	type Camera,
+	createCamera,
+	createRetimer,
+	type Microphone,
+	openMicrophone,
+} from "../lib/devices.ts";
 import { AGAIN, every, perSecond, say } from "../lib/page.ts";
 import { connectToRelay, through, why } from "../lib/relay.ts";
 import {
@@ -48,16 +68,12 @@ import {
 import { HEIGHT, MARK, marked, SIZES, WIDTH } from "./picture.ts";
 import { joinRoom } from "./room.ts";
 
-const FRAMES_A_SECOND = 30;
+/** `?fps=15|30`: frames a second; 30 when left out, or for one that is none. */
+const FRAMES_A_SECOND =
+	new URLSearchParams(location.search).get("fps") === "15" ? 15 : 30;
 /** `?size=360|720|1080`: the size the picture is sent at; 360 when left out, or for a size that is none. */
 const asked = new URLSearchParams(location.search).get("size");
 const SIZE = asked === "720" || asked === "1080" ? SIZES[asked] : SIZES["360"];
-
-/** Not in the DOM library of TypeScript yet: a track of a `MediaStream` as a stream of frames (Chromium has it). */
-declare class MediaStreamTrackProcessor {
-	constructor(init: { track: MediaStreamTrack });
-	readonly readable: ReadableStream<VideoFrame | AudioData>;
-}
 
 /**
  * A tone whose pitch goes up and down, and a louder beep while the mark
@@ -78,6 +94,9 @@ const TONE_PACE =
 	1 +
 	Number(new URLSearchParams(location.search).get("toneSkewPpm") ?? 0) /
 		1_000_000;
+
+/** Whether the tone is sent (`true`) or nothing is (muted): its pieces go on being counted, so that its times go on. */
+let toneOn = true;
 
 function tone(onData: (data: AudioData) => void): void {
 	const frames = SAMPLE_RATE / 50;
@@ -107,6 +126,10 @@ function tone(onData: (data: AudioData) => void): void {
 				level += ((loud ? 0.6 : 0.25) - level) * 0.02;
 				samples[index] = level * Math.sin(phase);
 			}
+			if (!toneOn) {
+				piece += 1;
+				continue;
+			}
 			onData(
 				new AudioData({
 					format: "f32",
@@ -120,24 +143,6 @@ function tone(onData: (data: AudioData) => void): void {
 			piece += 1;
 		}
 	});
-}
-
-/** Calls `onData` with the audio of the microphone. */
-async function fromMicrophone(
-	onData: (data: AudioData) => void,
-): Promise<void> {
-	const media = await navigator.mediaDevices.getUserMedia({
-		audio: { sampleRate: SAMPLE_RATE, channelCount: 1 },
-	});
-	const [track] = media.getAudioTracks();
-	if (track === undefined) throw new Error("the microphone gave no track");
-	const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
-	for (;;) {
-		const next = await reader.read();
-		if (next.done) return;
-		if (next.value instanceof AudioData) onData(next.value);
-		else next.value.close();
-	}
 }
 
 /** The page's canvas and its context, which the page cannot be without. */
@@ -160,52 +165,45 @@ preview.height = SIZE.height;
 // It is shown at one size whatever it is sent at.
 preview.style.width = `${WIDTH}px`;
 
-/** Calls `onFrame` with the frames of the camera, each of which the callee closes. */
 /** How long the last 200 frames of the camera took from the camera to here, in milliseconds. */
 const cameraToEncoderMs: number[] = [];
 /** The size of the frames the camera gives, which need not be the size it was asked for. */
 let cameraGave: string | undefined;
 
-async function fromCamera(onFrame: (frame: VideoFrame) => void): Promise<void> {
-	const media = await navigator.mediaDevices.getUserMedia({
-		video: {
-			width: SIZE.width,
-			height: SIZE.height,
-			frameRate: FRAMES_A_SECOND,
-		},
-	});
-	const [track] = media.getVideoTracks();
-	if (track === undefined) throw new Error("the camera gave no video track");
-	const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
-	for (;;) {
-		const next = await reader.read();
-		if (next.done) return;
-		if (next.value instanceof AudioData) {
-			next.value.close();
-			continue;
-		}
-		// The preview shows what is sent; the encoder is fixed to one size,
-		// so the frame is drawn to that size and taken from the canvas.
-		cameraGave = `${next.value.displayWidth}x${next.value.displayHeight}`;
-		context?.drawImage(next.value, 0, 0, SIZE.width, SIZE.height);
-		const { timestamp } = next.value;
-		// When the camera took the frame, on this page's clock, where the
-		// browser says (Chromium does, `captureTime`): how long the frame
-		// took to get to the encoder. The viewer cannot see this part.
-		// WHY through Reflect: `VideoFrame.metadata()` is not in the DOM
-		// library of TypeScript 6.0.3.
-		const metadata: unknown = Reflect.get(next.value, "metadata");
-		const taken: unknown =
-			typeof metadata === "function"
-				? Reflect.get(Reflect.apply(metadata, next.value, []), "captureTime")
-				: undefined;
-		if (typeof taken === "number") {
-			cameraToEncoderMs.push(performance.now() - taken);
-			if (cameraToEncoderMs.length > 200) cameraToEncoderMs.shift();
-		}
-		next.value.close();
-		onFrame(new VideoFrame(preview, { timestamp }));
+/** The times of the frames of the cameras, one after another and after a while off. */
+const videoTimes = createRetimer();
+
+/** Draws a frame of the camera to the size sent, and gives the picture to `onFrame`. */
+function fromCamera(
+	frame: VideoFrame,
+	from: MediaStreamTrack,
+	onFrame: (frame: VideoFrame) => void,
+): void {
+	// The preview shows what is sent; the encoder is fixed to one size,
+	// so the frame is drawn to that size and taken from the canvas.
+	cameraGave = `${frame.displayWidth}x${frame.displayHeight}`;
+	context.drawImage(frame, 0, 0, SIZE.width, SIZE.height);
+	const { timestamp } = frame;
+	// When the camera took the frame, on this page's clock, where the
+	// browser says (Chromium does, `captureTime`): how long the frame
+	// took to get to the encoder. The viewer cannot see this part.
+	// WHY through Reflect: `VideoFrame.metadata()` is not in the DOM
+	// library of TypeScript 6.0.3.
+	const metadata: unknown = Reflect.get(frame, "metadata");
+	const taken: unknown =
+		typeof metadata === "function"
+			? Reflect.get(Reflect.apply(metadata, frame, []), "captureTime")
+			: undefined;
+	if (typeof taken === "number") {
+		cameraToEncoderMs.push(performance.now() - taken);
+		if (cameraToEncoderMs.length > 200) cameraToEncoderMs.shift();
 	}
+	frame.close();
+	onFrame(
+		new VideoFrame(preview, {
+			timestamp: videoTimes.at(from, timestamp, Date.now()),
+		}),
+	);
 }
 
 /** Paints a clock and a bar that moves, and calls `onFrame` with each picture. */
@@ -241,6 +239,7 @@ const CLOCK_SKEW =
 	Number(new URLSearchParams(location.search).get("clockSkewPpm") ?? 0) /
 		1_000_000;
 
+/** Paints a clock and a bar that moves, and calls `onFrame` with each picture. */
 function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	// WHY `Date.now()` and not `performance.now()`: the tone counts its
 	// pieces by `Date.now()`, and the two clocks move against each other
@@ -249,7 +248,6 @@ function fromACanvas(onFrame: (frame: VideoFrame) => void): void {
 	const began = canvasNow();
 	let painted = 0;
 	every(1000 / FRAMES_A_SECOND, () => {
-		if (context === null || context === undefined) return;
 		const elapsed = canvasNow() - began;
 		// Painted in the units of the smallest size, and scaled to the one
 		// that is sent.
@@ -309,6 +307,106 @@ const BITRATE = Number(
 const LADDER = new URLSearchParams(location.search).has("ladder");
 const LOW = { name: "video-low", width: 320, height: 180, bitrate: 500_000 };
 
+/**
+ * The bar under the picture: the sound muted (the microphone's or the
+ * tone's) and its microphone, and the camera off and its device, at once:
+ * muted or off, nothing is sent, and the encoder ends what it was sending
+ * (`pause` of @xmoq/media). The source, the sound, the size and the frames
+ * a second by loading the page again: each decides the catalog or an
+ * encoder.
+ */
+function showControls(options: {
+	microphone: Microphone | undefined;
+	camera: Camera | undefined;
+	pauseVideo(): void;
+	pauseSound?(): void;
+}): void {
+	const { microphone, camera, pauseVideo, pauseSound } = options;
+	const bar = controlBar();
+	if (pauseSound !== undefined) {
+		toggleButton(bar, {
+			id: "mute",
+			labels: ["mute", "unmute"],
+			on: true,
+			async turn(on) {
+				if (microphone === undefined) toneOn = on;
+				else microphone.setOn(on);
+				if (!on) pauseSound();
+				return on;
+			},
+		});
+	}
+	if (microphone !== undefined) {
+		deviceList(bar, {
+			id: "microphones",
+			kind: "audioinput",
+			chosen: () => microphone.deviceId(),
+			choose: (id) =>
+				microphone.use(id).catch((error: unknown) => {
+					say(`the microphone failed: ${String(error)}`);
+				}),
+		});
+	}
+	if (camera !== undefined) {
+		const cameras = deviceList(bar, {
+			id: "cameras",
+			kind: "videoinput",
+			chosen: () => camera.deviceId(),
+			choose: (id) =>
+				camera.use(id).catch((error: unknown) => {
+					say(`the camera failed: ${String(error)}`);
+				}),
+		});
+		toggleButton(bar, {
+			id: "camera",
+			labels: ["stop camera", "start camera"],
+			on: camera.on(),
+			async turn(on) {
+				await camera.turn(on).catch((error: unknown) => {
+					say(`the camera failed: ${String(error)}`);
+				});
+				if (!camera.on()) pauseVideo();
+				cameras.refresh();
+				return camera.on();
+			},
+		});
+	}
+	flagList(bar, {
+		name: "source",
+		values: [
+			{ value: "clock", label: "a clock" },
+			{ value: "camera", label: "camera" },
+		],
+		fallback: "clock",
+	});
+	flagList(bar, {
+		name: "audio",
+		values: [
+			{ value: "tone", label: "tone" },
+			{ value: "mic", label: "microphone" },
+			{ value: "none", label: "no sound" },
+		],
+		fallback: "tone",
+	});
+	flagList(bar, {
+		name: "size",
+		values: [
+			{ value: "360", label: "360p" },
+			{ value: "720", label: "720p" },
+			{ value: "1080", label: "1080p" },
+		],
+		fallback: "360",
+	});
+	flagList(bar, {
+		name: "fps",
+		values: [
+			{ value: "30", label: "30 fps" },
+			{ value: "15", label: "15 fps" },
+		],
+		fallback: "30",
+	});
+}
+
 async function main(): Promise<void> {
 	// The room names where this page publishes: its one broadcast's
 	// namespace, whether anybody watches yet or not.
@@ -361,6 +459,7 @@ async function main(): Promise<void> {
 	});
 	const audioSource = new URLSearchParams(location.search).get("audio");
 	let audio: AudioTrackEncoder | undefined;
+	let microphone: Microphone | undefined;
 	if (audioSource !== "none") {
 		audio = await createAudioTrackEncoder({
 			trackNamespace: namespace(fields),
@@ -391,9 +490,12 @@ async function main(): Promise<void> {
 		});
 		const sound = audio;
 		if (audioSource === "mic") {
-			void fromMicrophone((data) => sound.encode(data)).catch(
-				(error: unknown) => say(`the microphone failed: ${String(error)}`),
-			);
+			microphone = await openMicrophone(SAMPLE_RATE, (data) =>
+				sound.encode(data),
+			).catch((error: unknown) => {
+				say(`the microphone failed: ${String(error)}`);
+				return undefined;
+			});
 		} else {
 			tone((data) => sound.encode(data));
 		}
@@ -507,13 +609,31 @@ async function main(): Promise<void> {
 		encoder.encode(frame, { keyFrame });
 		low.encode(smaller, { keyFrame });
 	};
-	if (new URLSearchParams(location.search).get("source") === "camera") {
-		void fromCamera(onFrame).catch((error: unknown) => {
+	const camera = createCamera({
+		width: SIZE.width,
+		height: SIZE.height,
+		frameRate: FRAMES_A_SECOND,
+		onFrame: (frame, from) => fromCamera(frame, from, onFrame),
+	});
+	const fromTheCamera =
+		new URLSearchParams(location.search).get("source") === "camera";
+	if (fromTheCamera) {
+		await camera.turn(true).catch((error: unknown) => {
 			say(`the camera failed: ${String(error)}`);
 		});
 	} else {
 		fromACanvas(onFrame);
 	}
+	const sound = audio;
+	showControls({
+		microphone,
+		camera: fromTheCamera ? camera : undefined,
+		pauseVideo() {
+			encoder.pause();
+			low?.pause();
+		},
+		...(sound === undefined ? {} : { pauseSound: () => sound.pause() }),
+	});
 	every(500, () => {
 		const stats = encoder.stats();
 		const sent = encoder.publisher.stats();
@@ -529,7 +649,7 @@ async function main(): Promise<void> {
 		});
 		say(
 			`${link} · ${framesIn.rate()} frames a second${document.visibilityState === "hidden" ? " (this tab is in the background)" : ""}${
-				new URLSearchParams(location.search).get("source") !== "camera"
+				!fromTheCamera || !camera.on()
 					? ""
 					: cameraToEncoderMs.length === 0
 						? " · from the camera to the encoder: the browser does not say"

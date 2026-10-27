@@ -9,8 +9,7 @@ import { chatHtml, type Page, pageHtml, type Served } from "../lib/shell.ts";
 const REACTIONS = ["👍", "❤️", "😂", "👏"];
 
 const LINKS = [
-	{ href: "/publish", text: "publish (a clock)" },
-	{ href: "/publish?source=camera", text: "publish (camera)" },
+	{ href: "/publish", text: "publish" },
 	{ href: "/watch", text: "watch" },
 ];
 
@@ -34,6 +33,7 @@ export const BROADCAST_PAGES: Record<string, Page> = {
 				"publish",
 				LINKS,
 				`<canvas width="640" height="360"></canvas>
+		<p id="controls"></p>
 		<pre id="status">loading</pre>
 		${roomHtml(served)}`,
 				"/publish.js",
@@ -46,7 +46,7 @@ export const BROADCAST_PAGES: Record<string, Page> = {
 				"watch",
 				LINKS,
 				`<canvas width="640" height="360"></canvas>
-		<p id="caption" style="min-height: 1.5em; font-size: 1.2em; color: #fff;">${served.noCaptions ?? ""}</p><p><button id="sound">sound</button></p>
+		<p id="caption" style="min-height: 1.5em; font-size: 1.2em; color: #fff;">${served.noCaptions ?? ""}</p><p id="controls"><button id="sound">sound</button></p>
 		<pre id="status">loading</pre>
 		${roomHtml(served)}`,
 				"/watch.js",
