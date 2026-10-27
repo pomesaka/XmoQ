@@ -2804,33 +2804,12 @@ impl<C: Connection> Hub<C> {
             ),
             _ => return,
         };
-        let limit = self.timer_limit(&event);
+        let limit = timer_limit(&event, self.config.max_timers_per_session);
         if let Some(event) = self.timers.start(session, limit, wait, event) {
             // WHY at once: see `Action::StartUpstreamTimer`. Whatever the
             // timer guarded is let go of now instead of never.
             self.log(|| format!("TIMER_NOT_STARTED session={} too many timers", session.0));
             pending.push_back(event);
-        }
-    }
-
-    /// How many timers the session of `event` may have running for it to
-    /// be started.
-    fn timer_limit(&self, event: &Event) -> usize {
-        // WHY the timer that gives a session an announcement back is
-        // started whatever the session has running: one that is not started
-        // counts as run out at once, which is right for a wait (what it
-        // guarded is let go of) and wrong for this one, whose running out
-        // gives the session something. A session with as many timers as it
-        // may would have every announcement back at once, and the limit on
-        // announcements would not hold for it. There is one such timer for
-        // a session at most.
-        // The same for the one after which an announcement to the parent is
-        // sent again: one that ran out at once would send it again at once.
-        match event {
-            Event::AnnouncementTimeout { .. } | Event::ParentAnnouncementTimeout { .. } => {
-                usize::MAX
-            }
-            _ => self.config.max_timers_per_session,
         }
     }
 
@@ -4279,6 +4258,26 @@ fn name(message: &ControlMessage) -> String {
     }
 }
 
+/// How many timers the session of `event` may have running for it to be
+/// started, where it may have `max_timers_per_session` (`HubConfig`). A timer
+/// that is not started is reported as run out at once (`Hub::set_timer`).
+fn timer_limit(event: &Event, max_timers_per_session: usize) -> usize {
+    // WHY the timer that gives a session an announcement back is
+    // started whatever the session has running: one that is not started
+    // counts as run out at once, which is right for a wait (what it
+    // guarded is let go of) and wrong for this one, whose running out
+    // gives the session something. A session with as many timers as it
+    // may would have every announcement back at once, and the limit on
+    // announcements would not hold for it. There is one such timer for
+    // a session at most.
+    // The same for the one after which an announcement to the parent is
+    // sent again: one that ran out at once would send it again at once.
+    match event {
+        Event::AnnouncementTimeout { .. } | Event::ParentAnnouncementTimeout { .. } => usize::MAX,
+        _ => max_timers_per_session,
+    }
+}
+
 #[cfg(test)]
 mod line_tests {
     use xmoq_moqt::data::{SubgroupHeader, SubgroupId};
@@ -4880,6 +4879,46 @@ mod timer_tests {
         timers.stop_joining(SessionKey(1), StreamKey(8));
         assert_eq!(timers.len(), 1);
         assert!(timers.start(SessionKey(1), 1, wait, early(10)).is_some());
+    }
+
+    #[test]
+    fn every_timer_counts_against_the_limit_but_the_two_that_give_something_back() {
+        let session = SessionKey(1);
+        // (the event of the timer; the limit for a session that may have 8)
+        let cases = [
+            // A wait for the last streams after PUBLISH_DONE: it ends at once
+            // where it is not started.
+            (
+                Event::DrainTimeout {
+                    session,
+                    track_alias: 2,
+                    wait: 0,
+                },
+                8,
+            ),
+            // An early stream: it is dropped at once.
+            (
+                Event::EarlyStreamTimeout {
+                    session,
+                    stream: StreamKey(3),
+                },
+                8,
+            ),
+            // A request the relay sent: it counts as unanswered at once.
+            (
+                Event::UpstreamTimeout {
+                    session,
+                    request: OwnRequestKey(0),
+                },
+                8,
+            ),
+            (timeout(1, 4), 8),
+            (Event::AnnouncementTimeout { session }, usize::MAX),
+            (Event::ParentAnnouncementTimeout { session }, usize::MAX),
+        ];
+        for (event, limit) in cases {
+            assert_eq!(timer_limit(&event, 8), limit, "{event:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

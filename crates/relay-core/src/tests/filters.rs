@@ -523,3 +523,78 @@ fn reset(out_stream: u64, code: u32) -> Action {
         code,
     }
 }
+
+#[test]
+fn known_gap_a_subscribe_whose_end_group_is_over_or_whose_filter_has_no_start_is_accepted() {
+    let last = u64::MAX;
+    // (Bob's filter; the Largest Object the publisher's PUBLISH names). §5.1.2
+    // has REQUEST_ERROR with INVALID_RANGE as a SHOULD for both.
+    let cases = [
+        // The End Group 1 is behind {3, 1}.
+        (
+            Some(SubscriptionFilter::AbsoluteRange {
+                start: at(0, 0),
+                end_group_delta: 1,
+            }),
+            at(3, 1),
+        ),
+        // No Location follows the Largest Object.
+        (LARGEST, at(last, last)),
+        (NEXT_GROUP, at(last, 0)),
+    ];
+    for (filter, largest) in cases {
+        let mut relay = Relay::new("test/0");
+        for session in [PUBLISHER, BOB] {
+            relay.step(Event::SessionOpened {
+                session,
+                role: Role::Server,
+            });
+        }
+        relay.step(Event::RequestOpened {
+            session: PUBLISHER,
+            stream: StreamKey(0),
+            first: ControlMessage::Publish(Publish {
+                request_id: 0,
+                full_track_name: track(b"a"),
+                track_alias: UPSTREAM_ALIAS,
+                parameters: vec![Parameter::LargestObject(largest)],
+                track_properties: vec![KeyValuePair::varint(2, 5).unwrap()],
+            }),
+        });
+        assert_eq!(
+            subscribe_with(&mut relay, filter),
+            [subscribe_ok(BOB, Some(largest))],
+            "{filter:?} {largest:?}"
+        );
+    }
+}
+
+#[test]
+fn a_subscription_is_not_ended_when_the_end_group_of_its_filter_has_passed() {
+    let mut relay = relay_with_track();
+    // Bob's End Group is 3.
+    subscribe_with(
+        &mut relay,
+        Some(SubscriptionFilter::AbsoluteRange {
+            start: at(3, 0),
+            end_group_delta: 0,
+        }),
+    );
+    data_stream_opened(&mut relay, 7);
+    object_arrived(&mut relay, 7, 0);
+    assert_eq!(
+        data_stream_closed(&mut relay, 7, StreamEnd::Fin),
+        [finish(0)]
+    );
+    // Group 4 is past it: Bob gets nothing of it, and no PUBLISH_DONE with
+    // SUBSCRIPTION_ENDED (0x3). §9.4: "Relays are not required or expected
+    // to" track that all Objects matching a filter have been delivered.
+    assert_eq!(data_stream_opened(&mut relay, 4), []);
+    assert_eq!(object_arrived(&mut relay, 4, 0), []);
+    assert_eq!(relay.counts().subscriptions, 1);
+    // The subscription lasts until the track ends.
+    assert_eq!(
+        relay.step(Event::SessionClosed { session: PUBLISHER }),
+        done_actions(BOB, 0x2, 1)
+    );
+}

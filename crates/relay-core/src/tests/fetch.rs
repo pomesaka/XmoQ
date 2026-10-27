@@ -1421,6 +1421,65 @@ fn a_fetch_ok_whose_track_cannot_be_processed_is_refused() {
 }
 
 #[test]
+fn known_gap_a_fetch_ok_with_a_mandatory_track_property_after_the_whole_fetch_stream_resets_nothing()
+ {
+    // §2.5.1: "If the relay has already forwarded data on a fetch stream, it
+    // MUST reset the stream." (whether the publisher's fetch stream has ended
+    // with a FIN before its FETCH_OK came; what the relay does then)
+    let cases = [
+        (
+            false,
+            vec![
+                STOP_TIMER,
+                Action::CancelOwnRequest {
+                    session: PUBLISHER,
+                    request: OWN,
+                    code: 0x1,
+                },
+                // UNKNOWN_OBJECT_STATUS (0x6) on the stream that is passed on.
+                abort_pipe(0x6),
+                refuse(0x33),
+                FINISH,
+            ],
+        ),
+        // The FIN has gone to Alice: nothing is left to reset, and she gets
+        // UNSUPPORTED_EXTENSION (0x33) after a fetch stream that looked
+        // complete.
+        (
+            true,
+            vec![
+                STOP_TIMER,
+                Action::CancelOwnRequest {
+                    session: PUBLISHER,
+                    request: OWN,
+                    code: 0x1,
+                },
+                refuse(0x33),
+                FINISH,
+            ],
+        ),
+    ];
+    for (whole, expected) in cases {
+        let mut relay = fetching();
+        happen(&mut relay, &Happens::Stream);
+        if whole {
+            happen(&mut relay, &Happens::PipeEnded(FetchPipeEnd::Finished));
+        }
+        let actions = relay.step(Event::OwnRequestMessage {
+            session: PUBLISHER,
+            request: OWN,
+            message: ControlMessage::FetchOk(FetchOk {
+                end_of_track: false,
+                end_location: at(2, 0),
+                parameters: vec![],
+                track_properties: vec![KeyValuePair::varint(0x4000, 1).unwrap()],
+            }),
+        });
+        assert_eq!(actions, expected, "whole: {whole}");
+    }
+}
+
+#[test]
 fn a_joining_fetch_of_a_track_found_malformed_is_refused_as_that() {
     // Alice's Joining FETCH for the track "b" is asked of the publisher.
     let mut relay = relay_with_a_subscription(true);
@@ -3110,8 +3169,9 @@ fn a_joining_fetch_asks_the_first_source_for_a_range_counted_from_the_largest_of
         )]
     );
     // The FETCH for {9, 0} to {9, 1} goes to the publisher, which said that
-    // it has nothing after {5, 2}. What it answers is what Alice gets
-    // (known gaps).
+    // it has nothing after {5, 2}. What it answers is what Alice gets: where
+    // it answers with what it has, Alice misses what lies between {5, 2} and
+    // {9, 0}.
     assert_eq!(
         relay.step(joining(true, 0, vec![])),
         asks_for(at(9, 0), at(9, 1))

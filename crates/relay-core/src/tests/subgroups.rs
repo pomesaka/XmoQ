@@ -739,10 +739,8 @@ fn a_subscriber_that_comes_between_the_header_and_the_first_object() {
 
 #[test]
 fn a_subscriber_whose_stream_is_closed_gets_another_for_the_same_subgroup() {
-    // Known gap (implementation notes): the I/O side reports a stream closed
-    // also when the subscriber stopped it, and §11.4.3 has "SHOULD NOT
-    // attempt to open a new stream to deliver additional Objects in that
-    // Subgroup".
+    // Closed without a STOP_SENDING of the subscriber; one it stopped is
+    // `a_stream_the_subscriber_stopped_is_not_opened_again`.
     let mut relay = relay_with_track();
     subscribe_to_track(&mut relay, ALICE);
     data_stream_opened(&mut relay, 7);
@@ -765,6 +763,61 @@ fn a_subscriber_whose_stream_is_closed_gets_another_for_the_same_subgroup() {
             send_object(1, 1),
         ]
     );
+}
+
+#[test]
+fn known_gap_a_subgroup_a_subscriber_stopped_reaches_it_again_on_another_stream_of_its_source() {
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    data_stream_opened(&mut relay, 7);
+    object_arrived(&mut relay, 7, 0);
+    relay.step(Event::OutStreamStopped {
+        out_stream: OutStreamKey(0),
+    });
+    relay.step(Event::OutStreamClosed {
+        out_stream: OutStreamKey(0),
+    });
+    // The publisher sends the Subgroup again on stream 8, which takes the
+    // place of stream 7: Alice gets the Subgroup again, where §11.4.3 has
+    // "SHOULD NOT attempt to open a new stream to deliver additional
+    // Objects in that Subgroup".
+    assert_eq!(
+        stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS)),
+        [stopped(7), open_data_stream(ALICE, 1, header(0))]
+    );
+}
+
+#[test]
+fn known_gap_the_stream_whose_header_is_read_later_is_kept_though_it_was_reset_first() {
+    // The publisher reset stream 7 and sent the Subgroup again on stream 8,
+    // and the relay reads the header of 8 first: QUIC keeps no order
+    // between streams.
+    let mut relay = relay_with_track();
+    subscribe_to_track(&mut relay, ALICE);
+    assert_eq!(
+        stream_opened(&mut relay, 8, header(UPSTREAM_ALIAS)),
+        [open_data_stream(ALICE, 0, header(0))]
+    );
+    object_arrived(&mut relay, 8, 0);
+    // Stream 7 takes the place of stream 8, which the publisher goes on with.
+    assert_eq!(
+        stream_opened(&mut relay, 7, header(UPSTREAM_ALIAS)),
+        [
+            reset(0, 0x1),
+            stopped(8),
+            open_data_stream(ALICE, 1, header(0))
+        ]
+    );
+    // Stream 7 ends with its reset, and so does Alice's. A publisher that
+    // was sent STOP_SENDING for stream 8 "SHOULD NOT attempt to open a new
+    // stream" for the Subgroup (§11.4.3): it is lost for every subscriber.
+    assert_eq!(
+        data_stream_closed(&mut relay, 7, StreamEnd::Aborted(Some(0x2))),
+        [reset(1, 0x2)]
+    );
+    // What still comes on stream 8 is dropped: no subscriber gets an Object
+    // it should not.
+    assert_eq!(object_arrived(&mut relay, 8, 1), []);
 }
 
 /// What a second stream of the publisher carries for Subgroup 0 of Group 3,

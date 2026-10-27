@@ -1788,7 +1788,11 @@ fn known_gap_a_late_stream_of_the_subscription_before_is_counted_for_the_new_one
     // and nothing tells it from a stream of the new subscription.
     let mut relay = relay_with_a_draining_publisher();
     publishes_a_anew(&mut relay, UPSTREAM_ALIAS);
-    stream_under(&mut relay, 8, UPSTREAM_ALIAS, 2);
+    // Its Objects reach Alice under the new subscription.
+    assert_eq!(
+        stream_under(&mut relay, 8, UPSTREAM_ALIAS, 2),
+        [open_data_stream(ALICE, 1, header_of_group(0, 2))]
+    );
     stream_under(&mut relay, 9, UPSTREAM_ALIAS, 3);
     assert_eq!(done_anew(&mut relay, 1), [drain_timer(1)]);
     // Its end is taken for the one stream the new PUBLISH_DONE counts, and
@@ -2693,6 +2697,135 @@ fn a_stream_without_a_priority_under_an_alias_that_drains_is_not_compared() {
     );
     publishes_anew_with_a_default_of_200(&mut relay);
     assert_eq!(relay.counts().tracks, 1);
+}
+
+#[test]
+fn known_gap_a_priority_is_compared_again_only_once_a_stream_with_a_known_one_brings_the_subgroup()
+{
+    // As in the test above: the Subgroup is taken from stream 9, whose
+    // priority the relay cannot tell, and what it remembered of the
+    // priority (200) is gone.
+    let mut relay = relay_with_default_priorities(Some(10), None);
+    subscribe_to_track(&mut relay, ALICE);
+    opens(
+        &mut relay,
+        PUBLISHER,
+        7,
+        with_priority(UPSTREAM_ALIAS, 1, Some(200)),
+    );
+    closed_from(&mut relay, PUBLISHER, 7, StreamEnd::Aborted(Some(0x2)));
+    relay.step(Event::RequestMessage {
+        session: PUBLISHER,
+        stream: StreamKey(0),
+        message: publish_done(0x2, 3),
+    });
+    opens(
+        &mut relay,
+        PUBLISHER,
+        9,
+        with_priority(UPSTREAM_ALIAS, 1, None),
+    );
+    // Bob, the other source, sends the Subgroup with 8: left like any
+    // Subgroup another source sent first, and not compared.
+    assert_eq!(
+        opens(&mut relay, BOB, 8, with_priority(BOBS_ALIAS, 1, Some(8))),
+        [stopped(BOB, 8)]
+    );
+    assert_eq!(relay.counts().tracks, 1);
+    // The publisher's next stream for it has 200 in its header: the
+    // Subgroup is taken from it, with a priority the relay knows again.
+    closed_from(&mut relay, PUBLISHER, 9, StreamEnd::Aborted(Some(0x2)));
+    opens(
+        &mut relay,
+        PUBLISHER,
+        10,
+        with_priority(UPSTREAM_ALIAS, 1, Some(200)),
+    );
+    // Now Bob's 8 is compared, and the track is malformed.
+    let actions = opens(&mut relay, BOB, 11, with_priority(BOBS_ALIAS, 1, Some(8)));
+    assert_eq!(actions.first(), Some(&malformed_stop(BOB, 11)));
+    assert_eq!(relay.counts().tracks, 0);
+}
+
+#[test]
+fn known_gap_two_default_publisher_priorities_in_one_publish_are_not_refused() {
+    // §12.4 gives a track one DEFAULT PUBLISHER PRIORITY and has no rule
+    // for a message with two. The relay takes the first, 10, where it
+    // compares priorities, and passes both on.
+    let two = vec![
+        KeyValuePair::varint(track_property::DEFAULT_PUBLISHER_PRIORITY, 10).unwrap(),
+        KeyValuePair::varint(track_property::DEFAULT_PUBLISHER_PRIORITY, 200).unwrap(),
+    ];
+    // (the priority in the header of Bob's stream for the Subgroup the
+    //  publisher sent without one; whether the track is malformed)
+    for (bobs, malformed) in [(10, false), (200, true)] {
+        let mut relay = Relay::new("test/0");
+        for session in [PUBLISHER, ALICE, BOB] {
+            relay.step(Event::SessionOpened {
+                session,
+                role: Role::Server,
+            });
+        }
+        relay.step(Event::RequestOpened {
+            session: PUBLISHER,
+            stream: StreamKey(0),
+            first: publish_of_a(UPSTREAM_ALIAS, vec![], two.clone()),
+        });
+        assert_eq!(
+            subscribe_to_track(&mut relay, ALICE),
+            [Action::SendRequest {
+                session: ALICE,
+                stream: StreamKey(0),
+                message: ControlMessage::SubscribeOk(SubscribeOk {
+                    track_alias: 0,
+                    parameters: vec![],
+                    track_properties: two.clone(),
+                }),
+            }],
+            "{bobs}"
+        );
+        publishes_a(&mut relay, BOB, BOBS_ALIAS);
+        opens(
+            &mut relay,
+            PUBLISHER,
+            7,
+            with_priority(UPSTREAM_ALIAS, 1, None),
+        );
+        let actions = opens(&mut relay, BOB, 8, with_priority(BOBS_ALIAS, 1, Some(bobs)));
+        if malformed {
+            assert_eq!(actions.first(), Some(&malformed_stop(BOB, 8)), "{bobs}");
+        } else {
+            assert_eq!(actions, [stopped(BOB, 8)], "{bobs}");
+        }
+    }
+}
+
+#[test]
+fn known_gap_a_subgroup_forgotten_past_the_limit_passes_from_another_source() {
+    // The expectation below is spelled out for 256 Subgroups.
+    assert_eq!(crate::MAX_REMEMBERED_SUBGROUPS, 256);
+    let subgroup = |track_alias, subgroup| SubgroupHeader {
+        subgroup_id: SubgroupId::Explicit(subgroup),
+        ..header_of_group(track_alias, 3)
+    };
+    let mut relay = relay_with_two_publishers();
+    subscribe_to_track(&mut relay, ALICE);
+    // The publisher opens Subgroups 0 to 256 of Group 3: Subgroup 0 is
+    // forgotten, though the Group is among those the relay remembers.
+    for id in 0..=256 {
+        opens(
+            &mut relay,
+            PUBLISHER,
+            1000 + id,
+            subgroup(UPSTREAM_ALIAS, id),
+        );
+    }
+    // Bob's stream for Subgroup 0 passes, and Alice has a second stream for
+    // it of which neither was reset (§2.2: "MUST NOT").
+    assert_eq!(
+        opens(&mut relay, BOB, 8, subgroup(BOBS_ALIAS, 0)),
+        [open_data_stream(ALICE, 257, subgroup(0, 0))]
+    );
 }
 
 #[test]

@@ -1290,7 +1290,8 @@ impl Relay {
         // WHY not ask again now: §10.6.2 leaves that to the
         // publisher's Retry Interval ("If the value is 0, the request
         // SHOULD NOT be retried"), which needs a timer of its own,
-        // and the own session always sends 0.
+        // and the own session always sends 0. Pinned by
+        // `a_publisher_that_answers_duplicate_subscription_is_waited_for`.
         //
         // WHY not for NOT_SUPPORTED as well, which the own clients
         // send in this place: it says nothing about a PUBLISH, and a
@@ -1703,6 +1704,22 @@ impl Relay {
         // and a subscription without a filter, which passes from {0, 0}, does
         // not get the Objects it was receiving then (`Receiving`).
         let joining = track.largest;
+        // §5.1.2: "If the publisher cannot satisfy the requested
+        // Subscription Filter ... or if the entire End Group has already
+        // been published it SHOULD send a REQUEST_ERROR with code
+        // INVALID_RANGE." Both are accepted here. WHY for the End Group: the
+        // relay does not know that a Group was published whole, and a Group
+        // at or before the End Group that comes late is still sent, so such
+        // a subscription can get Objects.
+        // FIXME: refuse with INVALID_RANGE a filter that has no Location to
+        // start at (`filter_start` is `None`).
+        // Pinned by
+        // `known_gap_a_subscribe_whose_end_group_is_over_or_whose_filter_has_no_start_is_accepted`.
+        //
+        // Nor does a subscription end when its End Group has passed: no
+        // PUBLISH_DONE with SUBSCRIPTION_ENDED is sent. §9.4: "Relays are not
+        // required or expected to do so"
+        // (`a_subscription_is_not_ended_when_the_end_group_of_its_filter_has_passed`).
         let start = filter_start(filter, joining);
         let end_group = filter_end_group(filter);
         let parameters = joining.map(Parameter::LargestObject).into_iter().collect();

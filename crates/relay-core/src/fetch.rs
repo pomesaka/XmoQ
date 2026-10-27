@@ -245,9 +245,10 @@ enum Awaited {
 /// pause subsequent delivery until it has confirmed the object's status
 /// upstream" (§10.12.3), and it puts nothing of its own and of a publisher's
 /// on one stream. WHY NOT pass the Object on as it arrives: the relay sends
-/// whole Objects (the known gap on §5.1 "SHOULD begin sending incomplete
-/// objects", in `docs/moqt-implementation-notes.md`); a relay that does is
-/// what would take the place of this hold.
+/// whole Objects, where §5.1 has "A publisher SHOULD begin sending
+/// incomplete objects when available"; a relay that does is what would take
+/// the place of this hold
+/// (`a_joining_fetch_for_an_object_that_is_received_is_held_until_it_is_whole`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReceiptWait {
     /// It may, and the time it is held for starts.
@@ -973,6 +974,13 @@ impl Relay {
         // What is looked at for the second is the subscription: its
         // `SUBSCRIBE_OK` had no `LARGEST_OBJECT`, so it has no Joining
         // Location (§5.1), whatever was published since.
+        //
+        // A Joining FETCH for a SUBSCRIBE that is not answered yet is held
+        // and reaches this only when the SUBSCRIBE is accepted, also with
+        // Forward State 0, which the SUBSCRIBE says from the start: the
+        // INVALID_RANGE could be said at once, and is said where the range
+        // is worked out
+        // (`a_joining_fetch_for_a_pending_subscribe_waits_for_its_answer`).
         let range = joining
             .filter(|_| forward)
             .and_then(|joining| joining_range(&fetch.range, joining));
@@ -1637,6 +1645,16 @@ impl Relay {
     /// out, then the first publisher that announced a matching namespace;
     /// neither the subscriber nor one in `asked`.
     ///
+    /// For a Joining FETCH the range is counted from the largest Location
+    /// the relay knows of the track, from any source (§10.12.2.1), and the
+    /// first source may be behind it: what lies between its largest Object
+    /// and the Joining Location is then on neither the fetch stream nor the
+    /// subscription, unless it answers `INVALID_RANGE` and the next one is
+    /// asked
+    /// (`a_joining_fetch_asks_the_first_source_for_a_range_counted_from_the_largest_of_all`).
+    /// Which publisher a FETCH should go to where several publish a track
+    /// is not decided.
+    ///
     /// WHY the next one after a refusal, where the draft has only the first
     /// ask: the sources of one track can differ in what they keep and in
     /// whether they serve a FETCH at all (the own Rust client serves none),
@@ -1674,7 +1692,11 @@ impl Relay {
     /// after them: the stream would have Objects of several Groups, whose
     /// Group ID Deltas depend on the Group Order (§11.4.4.1), and
     /// [`Action::WriteFetchStream`] writes Ascending; and §11.4.4.2 does not
-    /// say where an indicator in a Descending stream begins.
+    /// say where an indicator in a Descending stream begins. So a Descending
+    /// FETCH whose range reaches beyond that Group gets no Object, where
+    /// §10.2.5 has "the relay ... MUST report any unavailable Objects as
+    /// Unknown gaps" and the cache's Objects are available
+    /// (`a_fetch_that_waits_for_nothing_gets_what_the_cache_has_of_its_range`).
     ///
     /// The `FETCH_OK` needs an End Location, which the relay knows only for
     /// a track it has a source of, from the largest Location it has seen.
@@ -2448,6 +2470,14 @@ impl Relay {
                 stream_reset_code::UNKNOWN_OBJECT_STATUS,
             ),
         };
+        // §2.5.1: "If the relay has already forwarded data on a fetch
+        // stream, it MUST reset the stream." A fetch stream that was passed
+        // on whole, with its FIN, before the FETCH_OK came is gone, and the
+        // subscriber gets REQUEST_ERROR after a fetch stream that looked
+        // complete
+        // (`known_gap_a_fetch_ok_with_a_mandatory_track_property_after_the_whole_fetch_stream_resets_nothing`).
+        // FIXME: meet §2.5.1 also for a fetch stream that was passed on
+        // whole before its FETCH_OK came.
         self.close_own_request(session, own, OwnEnd::Reset { code: cancel }, actions);
         self.fail_fetch(subscriber, &Refusal::code(refused), reset, actions);
     }
