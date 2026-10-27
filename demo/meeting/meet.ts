@@ -5,7 +5,8 @@
 // shows the others it receives with `createMeeting` of `@xmoq/meeting`: the
 // sound of all of them, and the small video of the first 8 who came.
 //
-// The sound is the microphone; `?audio=none` sends none. The picture is
+// The sound is the microphone; `?audio=none` sends none, and `mute` sends
+// silence in its place until it is pressed again (`muteWith`). The picture is
 // one the page paints, small (320x180), with its id on it. `?uni=N`,
 // `?diag=1` and `?timer=` are as for the pages of the broadcast
 // (`../lib/relay.ts`, `../lib/page.ts`).
@@ -238,14 +239,30 @@ declare class MediaStreamTrackProcessor {
 	readonly readable: ReadableStream<VideoFrame | AudioData>;
 }
 
-async function fromMicrophone(
-	onData: (data: AudioData) => void,
-): Promise<void> {
+/** The microphone. */
+async function openMicrophone(): Promise<MediaStreamTrack> {
 	const media = await navigator.mediaDevices.getUserMedia({
-		audio: { sampleRate: SAMPLE_RATE, channelCount: 1 },
+		audio: {
+			sampleRate: SAMPLE_RATE,
+			channelCount: 1,
+			// WHY said: Chromium of Playwright 1.64.0 turned the three on
+			// without them too (its fake microphone, 2026-10-27), but what a
+			// browser does when a page says nothing is the browser's.
+			noiseSuppression: true,
+			echoCancellation: true,
+			autoGainControl: true,
+		},
 	});
 	const [track] = media.getAudioTracks();
 	if (track === undefined) throw new Error("the microphone gave no track");
+	return track;
+}
+
+/** Gives each piece of sound of `track` to `onData`, until it ends. */
+async function fromMicrophone(
+	track: MediaStreamTrack,
+	onData: (data: AudioData) => void,
+): Promise<void> {
 	const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
 	for (;;) {
 		const next = await reader.read();
@@ -305,6 +322,38 @@ function play(id: string, data: AudioData): void {
 	audio.next.set(id, at + buffer.duration);
 }
 
+/**
+ * Lets the button `mute` turn `microphone` off and on again; it says
+ * `unmute`, pressed, while the voice is not sent.
+ *
+ * WHY `enabled = false`: the track goes on giving pieces of sound at the
+ * same pace, all of them silent (Chromium of Playwright 1.64.0, its fake
+ * microphone, 2026-10-27), so the encoder goes on and the audio track goes
+ * on having Objects. Those who play it go on from piece to piece without a
+ * gap (`play`), the transcriber hears silence, which it cuts no piece of,
+ * and nothing is sent that is not wanted: the silence is made by the
+ * browser before the page has the sound. WHY NOT stop giving the pieces to
+ * the encoder: the Group under way would stay open with no Object for as
+ * long as the person keeps still, and a peer stops a subgroup stream that
+ * sends nothing for `idle-subgroup-stream-ms` (`fixtures/limits/`) with
+ * `INTERNAL_ERROR`, which a relay passes on as a reset. The cost of the
+ * silence is the bytes of the encoder's silent pieces.
+ */
+function muteWith(microphone: MediaStreamTrack): void {
+	const button = document.getElementById("mute");
+	if (button === null) return;
+	const label = (): void => {
+		button.textContent = microphone.enabled ? "mute" : "unmute";
+		button.setAttribute("aria-pressed", String(!microphone.enabled));
+	};
+	button.addEventListener("click", () => {
+		microphone.enabled = !microphone.enabled;
+		label();
+	});
+	button.removeAttribute("disabled");
+	label();
+}
+
 const others = (id: string): { frames: number; audio: number } => {
 	state.others[id] ??= { frames: 0, audio: 0 };
 	return state.others[id];
@@ -337,12 +386,14 @@ async function main(): Promise<void> {
 			})
 		: undefined;
 	if (sound !== undefined) {
-		void fromMicrophone((data) => sound.encode(data)).catch(
-			(error: unknown) => {
-				state.publishing = `the microphone failed: ${String(error)}`;
-				show();
-			},
-		);
+		void (async () => {
+			const microphone = await openMicrophone();
+			muteWith(microphone);
+			await fromMicrophone(microphone, (data) => sound.encode(data));
+		})().catch((error: unknown) => {
+			state.publishing = `the microphone failed: ${String(error)}`;
+			show();
+		});
 	}
 	const catalog = createCatalogPublisher({
 		namespace: fields(mine),
