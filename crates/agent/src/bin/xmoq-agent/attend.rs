@@ -31,9 +31,7 @@ use xmoq_msf::CatalogTrack;
 use xmoq_subscriber::catalog::{Became, FollowedCatalog};
 use xmoq_subscriber::follow::{Asking, FollowOutcome, Follower, RENDEZVOUS_MS, Track};
 use xmoq_subscriber::namespaces::{KeptNamespace, NamespaceOutcome};
-use xmoq_subscriber::session::{
-    self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of,
-};
+use xmoq_subscriber::session::{self, Events, GoingAway, GoneAway, new_url, timestamp_of};
 use xmoq_transcript_tracks::names::{SPEECH, transcript_namespace};
 use xmoq_transcript_tracks::payloads::{Speech, read_speech};
 use xmoq_viewer_io::chat_tracks::{ChatOutcome, ChatTracks};
@@ -608,18 +606,14 @@ pub async fn attend(
     let room_namespace = room_namespace(&args.room)?;
     let person = person_of(args);
     let begun = ChatTracks::begin(
-        Requests {
+        &mut session,
+        asking_with(
+            args,
             connection,
-            session: &mut session,
-            namespace: &room_namespace,
-            token: place.chat_tokens.subscribe.as_deref(),
-            answer_wait_ms: args.answer_wait_ms,
-            open_wait_ms: args.open_wait_ms,
-            rendezvous_ms: None,
-        },
+            &stops,
+            place.chat_tokens.subscribe.clone(),
+        ),
         place.chat_tokens.publish.as_deref(),
-        connection,
-        &stops,
         &person,
         args.catch_up,
         reader.had,

@@ -873,21 +873,18 @@ async fn play(
     let mut chat = match &args.chat {
         Some(chat) => {
             let begun = async {
-                let requests = Requests {
-                    connection: connection.as_ref(),
-                    session: &mut session,
-                    namespace: &namespace,
-                    token: place.chat_tokens.subscribe.as_deref(),
+                let asking = Asking {
+                    connection: Arc::clone(connection),
+                    stops: stops.clone(),
+                    token: place.chat_tokens.subscribe.clone(),
                     answer_wait_ms: args.answer_wait_ms,
                     open_wait_ms: args.open_wait_ms,
-                    rendezvous_ms: None,
                 };
                 let publish = place.chat_tokens.publish.as_deref();
                 ChatTracks::begin(
-                    requests,
+                    &mut session,
+                    asking,
                     publish,
-                    connection,
-                    &stops,
                     &person_of(chat),
                     chat.catch_up,
                     ui.chat_had,

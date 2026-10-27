@@ -23,14 +23,13 @@ use xmoq_moqt::session::{
 };
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream, StreamStops,
-    Trace, send_message,
+    Connection, PeerRequestStreamEvent, RequestReader, RequestStreamEvent, SendStream, Trace,
+    send_message,
 };
 use xmoq_subscriber::followed::Gap;
 use xmoq_viewer::chat_track::{Say, Saying};
 
 use xmoq_subscriber::follow::{self, Asking, Follower, Track, send_request};
-use xmoq_subscriber::session::Requests;
 
 pub use xmoq_subscriber::follow::FollowerInput;
 
@@ -98,8 +97,8 @@ impl ChatTracks {
     /// loop ([`Self::next`]), where the broadcast plays meanwhile. `had` is
     /// the newest line shown on the sessions before, so that what was
     /// missed between them is fetched (`past_to_fetch`), `catch_up` of
-    /// them at the most. `requests` carries the `sub` token of the room's
-    /// namespace.
+    /// them at the most. `asking` carries the `sub` token of the room's
+    /// namespace, which `lines` is asked for with.
     ///
     /// # Errors
     ///
@@ -107,21 +106,13 @@ impl ChatTracks {
     /// allow in time, and a `PUBLISH_NAMESPACE` that is refused or not
     /// answered in time.
     pub async fn begin(
-        requests: Requests<'_>,
+        session: &mut Session,
+        asking: Asking,
         publish_token: Option<&[u8]>,
-        connection: &Arc<WtConnection>,
-        stops: &StreamStops,
         person: &Person,
         catch_up: u64,
         had: Option<u64>,
     ) -> Result<Self> {
-        let Requests {
-            session,
-            token,
-            answer_wait_ms,
-            open_wait_ms,
-            ..
-        } = requests;
         let tokens: Vec<Parameter> = publish_token
             .map(|token| Parameter::AuthorizationToken(token.to_vec()))
             .into_iter()
@@ -131,12 +122,13 @@ impl ChatTracks {
         let said = FullTrackName::new(mine.clone(), SAID.as_bytes().to_vec())?;
         let (announce, message) = session.publish_namespace(mine, tokens)?;
         let (announce_send, mut answers) = send_request(
-            connection.as_ref(),
-            open_wait_ms,
+            asking.connection.as_ref(),
+            asking.open_wait_ms,
             &message,
             "publish-namespace",
         )
         .await?;
+        let answer_wait_ms = asking.answer_wait_ms;
         let answer =
             tokio::time::timeout(Duration::from_millis(answer_wait_ms), answers.next_event())
                 .await
@@ -167,13 +159,7 @@ impl ChatTracks {
                 fetch_note: "CHAT_TRACKS",
                 read: |number, payload| read_line(number, payload).ok(),
             },
-            Asking {
-                connection: Arc::clone(connection),
-                stops: stops.clone(),
-                token: token.map(<[u8]>::to_vec),
-                answer_wait_ms,
-                open_wait_ms,
-            },
+            asking,
             had,
         );
         Ok(Self {
