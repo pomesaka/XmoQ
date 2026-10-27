@@ -16,7 +16,7 @@ The time runs from when the request is written to its answer: SUBSCRIBE_OK, PUBL
 | 2 | The request, by the name of its message. For the reader: the rule does not go by it |
 | 3 | The one Message Parameter the request carries, by its name in §10.2; `-` for none |
 | 4 | The value of that parameter, in milliseconds; `-` for none |
-| 5 | How long the answer is waited for, in milliseconds, where the time without a parameter is 10,000 |
+| 5 | How long the answer is waited for, in milliseconds, where the time without a parameter is that of `answer-wait-ms` |
 
 ## `publish-done-of-an-unanswered-publish.hex`
 

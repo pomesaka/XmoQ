@@ -31,13 +31,12 @@ The buffer (`--buffer-ms`, and `--buffer-ms auto`) goes by the rule and the valu
 | | The page | The viewer | Why |
 |---|---|---|---|
 | The unit | milliseconds, with fractions | whole microseconds | The page's clock counts milliseconds; LOC's Timestamps are microseconds. The shared rows are whole milliseconds, where both give the same |
-| Which of the Objects "99 of 100" is | the one at `floor(count * 0.99)` in order, counted in floating point | the one at `count * 99 / 100`, in whole numbers | The same for every count the tests have; a floating product just under a whole number would be one Object apart |
+| Which Object the rule of `auto-buffer.tsv` takes | counted in floating point, rounded down | counted in whole numbers | The same for every count the tests have; a floating product just under a whole number would be one Object apart |
 | The lead of the sound output | none: the page's sound is timed by the `AudioContext` | added to the buffer, for picture and sound alike | The output here asks for samples ahead of time. `AV_PLAYED` has the buffer without it (`buffer_ms`, `buffer_ms_least/most`) |
-| When a frame's time is fixed | when it is drawn: a buffer that moves moves the frames that wait | when it comes | The thread that draws has the frame's moment and not the clock; a step is 10 ms, a third of a frame |
+| When a frame's time is fixed | when it is drawn: a buffer that moves moves the frames that wait | when it comes | The thread that draws has the frame's moment and not the clock; a step of the buffer (`AUTO_STEP_US` of `src/clock.rs`) is a third of a frame |
 | A packet whose beginning is over at the output | not sounded | played from the sample that is due (`audio_cut_late`) | The output asks for samples ahead of time, so a packet that was placed in time can still be late there; cut, the sound does not stay behind |
-| Slower or faster | the browser's `playbackRate` | samples on the lines between the packet's samples | No resampler is among the crates; a twentieth for one packet |
+| Slower or faster | the browser's `playbackRate` | samples on the lines between the packet's samples | No resampler is among the crates; how much slower or faster is the rule of `seam.tsv` |
 | Packets out of order | held until the ones before them came (`holdForOrderMs`) | played as they come | Not built. A stream keeps the order within a Group; between Groups nothing does |
-| The sound's least buffer | 30 ms | 30 ms, where `--buffer-ms` is less | The same rule (`AUDIO_MIN_US`) |
 
 The viewer does not change the version of the video by itself: `--video-version` chooses one where the catalog has several ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-chooses-a-version-of-the-video.md)). Behind a link with less room than the video, `--video-timeout-ms` keeps the picture from falling behind ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)).
 
@@ -53,5 +52,5 @@ Every limit on what the relay, the publisher behind it and the room can have it 
 - Read a catalog that changes while it watches; choose between several video or audio tracks by anything but the first; follow a track into another namespace than the catalog's.
 - Conceal a packet of sound that did not come; resample (an output that does not take 48 kHz ends it); play more than one channel (two are mixed into one by the decoder).
 - Join the video before its next key frame: it sends neither a Joining FETCH nor a NEW_GROUP_REQUEST for it.
-- Serve a request the relay opens towards it: each is refused with `NOT_SUPPORTED`, once the broadcast plays (until then up to 16 wait), and its Request ID is checked (§10.1), as the Rust client does in its modes that serve none.
+- Serve a request the relay opens towards it: each is refused with `NOT_SUPPORTED`, once the broadcast plays (until then they wait, as many as `read_peer_streams` of `xmoq-subscriber` holds), and its Request ID is checked (§10.1), as the Rust client does in its modes that serve none.
 - Run on Windows.

@@ -8,4 +8,4 @@ The relay of XmoQ: MoQ Transport draft 18 over WebTransport, on one machine. Wha
 
 ## Flags
 
-The flags and what each is without it are `USAGE` in `src/main.rs`, which the relay prints when a flag is wrong. The limits are there to be fitted to the machine it runs on: at worst a session holds about 23.4 MiB besides what waits to be written to it, so the relay holds `max-sessions × 23.4 MiB + min(max-sessions × session-send-bytes, relay-send-bytes)`, about 25 GiB with the defaults (the table of `HubConfig` in `src/hub.rs` has each part). What one edge with 500 viewers took is in [a record](../../docs/experiments/2026-10-25-one-video-track-through-two-edges.md).
+The flags and what each is without it are `USAGE` in `src/main.rs`, which the relay prints when a flag is wrong. The limits are there to be fitted to the machine it runs on: what a session holds at worst, and what the relay holds with `--max-sessions`, `--session-send-bytes` and `--relay-send-bytes`, are worked out with each part in the table of `HubConfig` in `src/hub.rs`. What one edge with 500 viewers took is in [a record](../../docs/experiments/2026-10-25-one-video-track-through-two-edges.md).
