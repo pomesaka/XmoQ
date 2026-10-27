@@ -21,10 +21,19 @@ import type { AgentFolder } from "./agent-folder.ts";
  */
 export const INBOX_EVERY_MS = 1000;
 
+/**
+ * How many lines the agent said are kept to be known when they come back
+ * from the gatherer, the oldest going first. **Provisional.** WHY a limit:
+ * a line the gatherer drops never comes back, and would be kept for ever.
+ */
+export const SAID_KEPT = 64;
+
 export interface AgentBridgeOptions {
 	folder: AgentFolder;
-	/** Says a line in the chat as the page; resolves with why it was not sent, or undefined where it was. */
-	say(text: string): Promise<string | undefined>;
+	/** The page's name in the chat, under which the agent's lines come back. */
+	name: string;
+	/** Says a line in the chat as the page; resolves with the `sentAt` it was sent with, or why it was not sent. */
+	say(text: string): Promise<{ sentAt: number } | { why: string }>;
 	/** `INBOX_EVERY_MS` when left out. */
 	inboxEveryMs?: number;
 	/** How the page waits between two reads: a timer when left out. For a test that moves the reads on by itself. */
@@ -76,6 +85,13 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
 	const latest = new Map<string, Latest>();
 	/** The participant whose words came last, for `/frame` alone. */
 	let spokeLast: string | undefined;
+	/**
+	 * The lines the agent said that have not come back, as `sentAt` and
+	 * text. WHY these: they are what the line that comes back has of the
+	 * saying, and the person, under the same name, sends another `sentAt`
+	 * or another text.
+	 */
+	const said: { sentAt: number; text: string }[] = [];
 	let taken = 0;
 	let offset = 0;
 	let head: Uint8Array = new Uint8Array();
@@ -139,9 +155,13 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
 			case "nothing":
 				return;
 			case "say": {
-				const why = await options.say(read.text);
-				if (why !== undefined)
-					write({ type: "error", message: `not said: ${why}` });
+				const outcome = await options.say(read.text);
+				if ("why" in outcome) {
+					write({ type: "error", message: `not said: ${outcome.why}` });
+					return;
+				}
+				said.push({ sentAt: outcome.sentAt, text: read.text });
+				if (said.length > SAID_KEPT) said.shift();
 				return;
 			}
 			case "frame":
@@ -193,7 +213,14 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
 			if (state === "left") latest.delete(id);
 			write({ type: "participant", state, id });
 		},
-		chat: (line) =>
+		chat(line) {
+			const ours =
+				line.name === options.name
+					? said.findIndex(
+							(one) => one.sentAt === line.sentAt && one.text === line.text,
+						)
+					: -1;
+			if (ours >= 0) said.splice(ours, 1);
 			write({
 				type: "chat",
 				number: line.number,
@@ -201,7 +228,9 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
 				text: line.text,
 				sentAt: line.sentAt,
 				gatheredAt: line.at,
-			}),
+				byAgent: ours >= 0,
+			});
+		},
 		speech(piece) {
 			spokeLast = piece.from.at(-1);
 			write({

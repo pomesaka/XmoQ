@@ -36,6 +36,10 @@
 //     `not said: this page has no chat` for `hello` (the page here has no
 //     chat); and an `error` `/frame p3: no picture of p3 came`, since p1
 //     receives the video of one alone.
+//
+// Changed when a page came to write a file of `events/` a second in place
+// of `events.jsonl` (2026-10-27): the lines above are those of the files of
+// p1's `events/`, in the order of their names.
 
 import { parseArgs } from "node:util";
 import type { Page } from "playwright-core";

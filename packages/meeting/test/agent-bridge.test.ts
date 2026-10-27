@@ -94,9 +94,10 @@ test.each<{
 	let waited: (() => void) | undefined;
 	const bridge = createAgentBridge({
 		folder,
+		name: "me",
 		async say(text) {
 			sayings.push(text);
-			return text === "too fast" ? "kept back" : undefined;
+			return text === "too fast" ? { why: "kept back" } : { sentAt: 1 };
 		},
 		sleep: () =>
 			new Promise((resolve) => {
@@ -127,7 +128,8 @@ test("an inbox that cannot be read is written of once while it goes on", async (
 				return new Uint8Array();
 			},
 		},
-		say: async () => undefined,
+		name: "me",
+		say: async () => ({ sentAt: 1 }),
 		sleep: () =>
 			new Promise((resolve) => {
 				waited = resolve;
@@ -143,4 +145,69 @@ test("an inbox that cannot be read is written of once while it goes on", async (
 		reads: true,
 		written: ["error"],
 	});
+});
+
+test.each<{
+	name: string;
+	/** The lines that come back from the gatherer, after the agent said `hello` at 5. */
+	back: { name: string; text: string; sentAt: number }[];
+	/** Which of them were written as the agent's. */
+	byAgent: boolean[];
+}>([
+	{
+		name: "the agent's line comes back as the agent's",
+		back: [{ name: "me", text: "hello", sentAt: 5 }],
+		byAgent: [true],
+	},
+	{
+		name: "the person's line under the same name, with another sentAt, is not",
+		back: [
+			{ name: "me", text: "hello", sentAt: 6 },
+			{ name: "me", text: "hello", sentAt: 5 },
+		],
+		byAgent: [false, true],
+	},
+	{
+		name: "another's line with the same sentAt and text is not",
+		back: [{ name: "you", text: "hello", sentAt: 5 }],
+		byAgent: [false],
+	},
+	{
+		name: "a line that comes back twice is the agent's once",
+		back: [
+			{ name: "me", text: "hello", sentAt: 5 },
+			{ name: "me", text: "hello", sentAt: 5 },
+		],
+		byAgent: [true, false],
+	},
+])("$name", async ({ back, byAgent }) => {
+	const inbox = { now: "" };
+	const marked: boolean[] = [];
+	let waited: (() => void) | undefined;
+	const bridge = createAgentBridge({
+		folder: {
+			path: "demo/me",
+			began: 0,
+			write(event) {
+				if (event.type === "chat") marked.push(event.byAgent === true);
+			},
+			async writeFile() {},
+			readInbox: async () => utf8(inbox.now),
+		},
+		name: "me",
+		say: async () => ({ sentAt: 5 }),
+		sleep: () =>
+			new Promise((resolve) => {
+				waited = resolve;
+			}),
+	});
+	await settle();
+	inbox.now = "hello\n";
+	waited?.();
+	await settle();
+	for (const [number, line] of back.entries()) {
+		bridge.chat({ number: BigInt(number), at: 9, ...line });
+	}
+	bridge.stop();
+	expect(marked).toEqual(byAgent);
 });

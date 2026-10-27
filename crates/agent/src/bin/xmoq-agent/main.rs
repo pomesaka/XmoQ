@@ -1,7 +1,8 @@
 //! A reader of a room for an agent: asks the room where its broadcast or
 //! its meeting is (and in a meeting takes a seat), connects there, and
-//! writes what happens in its chat as lines of JSON on stdout and in
-//! `<DIR>/events.jsonl`; a line of stdin is said in the chat. It follows a
+//! writes what happens in its chat as lines of JSON on stdout and in the
+//! files of `<DIR>/events/`; a line of stdin or of `<DIR>/inbox.txt` is
+//! said in the chat. It follows a
 //! broadcast that ends and begins again.
 //! `xmoq_agent::args::USAGE` has the flags.
 //!
@@ -65,7 +66,7 @@ use crate::stdin::Line;
 pub struct Reader {
     out: Output,
     lines: mpsc::Receiver<Line>,
-    /// Whether stdin may still bring lines.
+    /// Whether stdin or `inbox.txt` may still bring lines.
     stdin_open: bool,
     stop: watch::Receiver<bool>,
     deadline: Option<tokio::time::Instant>,
@@ -207,6 +208,7 @@ impl Reader {
     fn line_without_chat(&mut self, line: Line, why: &str) {
         match line {
             Line::TooLong(length) => self.too_long(length),
+            Line::InboxFailed(why) => self.error(why),
             Line::Read(text) => match input::read(&text) {
                 Input::Nothing => {}
                 Input::Say(_) => self.error(format!("said nothing: {why}")),
@@ -227,7 +229,7 @@ impl Reader {
     fn too_long(&mut self, length: usize) {
         self.error(format!(
             "said nothing: a line of {length} bytes, more than {}",
-            stdin::MOST_A_LINE
+            xmoq_agent::input::MOST_A_LINE
         ));
     }
 
@@ -383,7 +385,7 @@ async fn place(
 /// may be back (a Worker restarted, a room that answers late or answers
 /// what it should again). WHY not at once: a failure other than a refusal
 /// (a 404, an answer the reader does not take) comes back as fast as it is
-/// asked. WHY the same failure told once: an agent reads `events.jsonl` to
+/// asked. WHY the same failure told once: an agent reads `events/` to
 /// its end, and a room that is wrong for hours would fill it with one line.
 async fn place_in_room(
     args: &Args,
@@ -764,7 +766,7 @@ async fn read(args: &Args) -> Result<()> {
     let stop = client::on_signals(Signals::VIEWER);
     let mut reader = Reader {
         out: Output::open(Path::new(&args.out))?,
-        lines: stdin::lines(),
+        lines: stdin::lines(Path::new(&args.out).join(xmoq_agent::inbox::INBOX_FILE)),
         stdin_open: true,
         stop,
         deadline: args

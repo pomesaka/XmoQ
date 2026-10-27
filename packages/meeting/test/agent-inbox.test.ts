@@ -53,83 +53,56 @@ test.each(inboxRows)("%s", (_name, line, asks) => {
 
 const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
 
-test.each<{
-	name: string;
-	file: string;
-	offset: number;
-	/** The first bytes of the file at the read before. */
-	head: string;
-	lines: (string | undefined)[];
-	next: number;
-}>([
-	{
-		name: "the whole lines from the beginning",
-		file: "a\nbc\n",
-		offset: 0,
-		head: "",
-		lines: ["a", "bc"],
-		next: 5,
-	},
-	{
-		name: "only what came after the last read",
-		file: "a\nbc\nd\n",
-		offset: 5,
-		head: "",
-		lines: ["d"],
-		next: 7,
-	},
-	{
-		name: "a last line without its line feed is left for the next read",
-		file: "a\nb",
-		offset: 0,
-		head: "",
-		lines: ["a"],
-		next: 2,
-	},
-	{
-		name: "a file shorter than the last read was written anew, and is read from its beginning",
-		file: "x\n",
-		offset: 5,
-		head: "",
-		lines: ["x"],
-		next: 2,
-	},
-	{
-		name: "a character of more than one byte is read whole",
-		file: "こんにちは\n",
-		offset: 0,
-		head: "",
-		lines: ["こんにちは"],
-		next: 16,
-	},
-	{
-		name: "a line over 4,096 bytes is not read",
-		file: `${"x".repeat(4097)}\nok\n`,
-		offset: 0,
-		head: "",
-		lines: [undefined, "ok"],
-		next: 4101,
-	},
-	{
-		name: "a file written anew, longer than before, is read from its beginning",
-		file: "new\nlonger line\n",
-		offset: 4,
-		head: "old\n",
-		lines: ["new", "longer line"],
-		next: 16,
-	},
-	{
-		name: "a file added to, that begins as it did, is read from where the last read ended",
-		file: "old\nnew\n",
-		offset: 4,
-		head: "old\n",
-		lines: ["new"],
-		next: 8,
-	},
-])("$name", ({ file, offset, head, lines, next }) => {
+/** `fixtures/agent-lines/inbox-reads.tsv`, which `crates/agent/src/inbox.rs` reads too: a name, the file, the offset and the head of the read before, the lines read (`null` for one too long), and the next offset. */
+const readRows: [string, string, number, string, (string | null)[], number][] =
+	readFileSync(
+		join(
+			import.meta.dir,
+			"..",
+			"..",
+			"..",
+			"fixtures",
+			"agent-lines",
+			"inbox-reads.tsv",
+		),
+		"utf8",
+	)
+		.split("\n")
+		.filter((row) => row !== "")
+		.map((row) => {
+			const [
+				name = "",
+				file = "",
+				offset = "",
+				head = "",
+				lines = "",
+				next = "",
+			] = row.split("\t");
+			const text = (json: string): string => {
+				const value: unknown = JSON.parse(json);
+				if (typeof value !== "string") throw new Error(`no string: ${json}`);
+				return value;
+			};
+			const read: unknown = JSON.parse(lines);
+			if (!Array.isArray(read)) throw new Error(`no list: ${lines}`);
+			return [
+				name,
+				text(file),
+				Number(offset),
+				text(head),
+				read.map((line: unknown) => (typeof line === "string" ? line : null)),
+				Number(next),
+			];
+		});
+
+test("the shared table of the reads of the inbox is read", () => {
+	expect(readRows.length > 0).toBe(true);
+});
+
+test.each(readRows)("%s", (_name, file, offset, head, lines, next) => {
 	const read = newInboxLines(utf8(file), offset, utf8(head));
-	expect({ lines: read.lines, offset: read.offset }).toEqual({
-		lines,
-		offset: next,
-	});
+	expect({
+		lines: read.lines.map((line) => line ?? null),
+		offset: read.offset,
+	}).toEqual({ lines, offset: next });
 });

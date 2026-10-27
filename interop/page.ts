@@ -21,6 +21,8 @@ import {
 	type AgentFolder,
 	createAgentBridge,
 	createMeeting,
+	EVENTS_DIR,
+	eventFileNumber,
 	keepAttending,
 	type MeetingEvent,
 	openAgentFolder,
@@ -1011,7 +1013,8 @@ window.xmoqOwn = {
 			);
 			const bridge = createAgentBridge({
 				folder,
-				say: async () => "this page has no chat",
+				name: self,
+				say: async () => ({ why: "this page has no chat" }),
 			});
 			agentFolder = folder;
 			const meeting = createMeeting({
@@ -1073,11 +1076,21 @@ window.xmoqOwn = {
 			const folder = await (
 				await root.getDirectoryHandle(room ?? "")
 			).getDirectoryHandle(self ?? "");
-			// `readWhole`: the bridge writes `events.jsonl` anew every second.
-			const events = new TextDecoder().decode(
-				await readWhole(await folder.getFileHandle("events.jsonl")),
-			);
-			const lines = events.split("\n").filter((line) => line !== "");
+			// The files of `events/` in the order of their names, as an agent
+			// reads them.
+			const events = await folder.getDirectoryHandle(EVENTS_DIR);
+			const names: string[] = [];
+			for await (const name of events.keys()) {
+				if (eventFileNumber(name) !== undefined) names.push(name);
+			}
+			names.sort();
+			const lines: string[] = [];
+			for (const name of names) {
+				const text = new TextDecoder().decode(
+					await readWhole(await events.getFileHandle(name)),
+				);
+				lines.push(...text.split("\n").filter((line) => line !== ""));
+			}
 			// The first bytes of each picture a `frame` line names: a PNG begins
 			// with 0x89 "PNG".
 			const pictures: Record<string, string> = {};

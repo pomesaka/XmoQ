@@ -1,7 +1,9 @@
 // The lines a page of a meeting writes for an agent, one event a line of
-// JSON, as `xmoq-agent` writes them (`crates/agent/src/events.rs`): an agent
-// reads the folder of the page and the `--out` of the CLI in the same way.
-// Both are tested with `fixtures/agent-lines/lines.tsv`.
+// JSON, as `xmoq-agent` writes them (`crates/agent/src/events.rs`), in files
+// of `events/` named as it names them (`crates/agent/src/event_files.rs`):
+// an agent reads the folder of the page and the `--out` of the CLI in the
+// same way. Both are tested with `fixtures/agent-lines/lines.tsv` and
+// `event-files.tsv`.
 
 /** One thing that happened, as the page writes it. */
 export type AgentEvent =
@@ -17,6 +19,12 @@ export type AgentEvent =
 			sentAt: number | bigint;
 			/** The gatherer's clock, ms. */
 			gatheredAt: number | bigint;
+			/**
+			 * Said by the agent, through the page: written as `"by":"agent"`,
+			 * and left out otherwise. WHY: the agent says its lines under the
+			 * person's name, and `from` cannot tell them from the person's.
+			 */
+			byAgent?: boolean;
 	  }
 	/** Something said, as the transcriber read it. */
 	| {
@@ -85,6 +93,7 @@ function fieldsOf(event: AgentEvent): Record<string, Field> {
 				text: event.text,
 				sent_at: event.sentAt,
 				gathered_at: event.gatheredAt,
+				...(event.byAgent === true ? { by: "agent" } : {}),
 			};
 		case "speech":
 			return {
@@ -142,4 +151,40 @@ export function framePath(
 	object: bigint,
 ): string {
 	return `frames/${began}/${String(taken).padStart(6, "0")}-g${group}-o${object}.png`;
+}
+
+/** The directory of the files of events, in the folder. */
+export const EVENTS_DIR = "events";
+
+/**
+ * The digits of the name of a file of `events/`, at the least: the Unix
+ * time in milliseconds has 13 until the year 2286, so that the names sort
+ * as their numbers.
+ */
+const EVENT_FILE_DIGITS = 13;
+
+/** The number of a file of `events/` by its name, `<13 or more digits>.jsonl`; undefined for any other name. */
+export function eventFileNumber(name: string): number | undefined {
+	const match = /^(\d+)\.jsonl$/.exec(name);
+	const digits = match?.[1];
+	if (digits === undefined || digits.length < EVENT_FILE_DIGITS)
+		return undefined;
+	return Number(digits);
+}
+
+/**
+ * The number of the next file of `events/`: the clock `now` (ms since the
+ * Unix epoch), or one after `newest`, the number of the newest file there,
+ * where that is not before it. WHY not the clock alone: two writes in the
+ * same millisecond, a clock that went back, or a page that writes again in
+ * the same folder would put a file before one a reader already read, which
+ * a reader that reads the names after the last it read would never read.
+ */
+export function nextEventFile(now: number, newest: number | undefined): number {
+	return newest === undefined ? now : Math.max(now, newest + 1);
+}
+
+/** The name of the file of `number` in `events/`. */
+export function eventFileName(number: number): string {
+	return `${String(number).padStart(EVENT_FILE_DIGITS, "0")}.jsonl`;
 }

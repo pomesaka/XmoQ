@@ -59,8 +59,8 @@ export interface ShowChatOptions {
 
 /** Says a line in the chat from elsewhere than its form (an agent's inbox). */
 export interface ChatSaying {
-	/** Why it was not sent (without a "not sent"), or undefined where it was. */
-	say(text: string): Promise<string | undefined>;
+	/** The `sentAt` it was sent with, which the line has when it comes back, or why it was not sent (without a "not sent"). */
+	say(text: string): Promise<{ sentAt: number } | { why: string }>;
 	/** Says a reaction: why it was not sent, or undefined where it was. */
 	react(emoji: string): Promise<string | undefined>;
 }
@@ -188,13 +188,20 @@ export function showChat(
 		},
 	});
 
-	/** Says `text`; why it was not sent (without a "not sent"), or undefined where it was. */
-	const sayLine = async (text: string): Promise<string | undefined> => {
-		if (participant === undefined) return "not in the room's chat yet";
+	/** Says `text`: the `sentAt` it was sent with, or why it was not sent (without a "not sent"). */
+	const sayLine = async (
+		text: string,
+	): Promise<{ sentAt: number } | { why: string }> => {
+		if (participant === undefined) return { why: "not in the room's chat yet" };
 		const outcome: SayOutcome = await participant.say(text);
-		if (outcome.type === "kept-back") return KEPT_BACK[outcome.why](limits);
-		if (outcome.type === "not-sent") return outcome.why;
-		return undefined;
+		switch (outcome.type) {
+			case "kept-back":
+				return { why: KEPT_BACK[outcome.why](limits) };
+			case "not-sent":
+				return { why: outcome.why };
+			case "sent":
+				return { sentAt: outcome.sentAt };
+		}
 	};
 	form?.addEventListener("submit", (event) => {
 		event.preventDefault();
@@ -203,9 +210,9 @@ export function showChat(
 		const text = input.value;
 		void (async () => {
 			// The text stays in the field where it was not sent, to be sent again.
-			const why = await sayLine(text);
-			if (why !== undefined) {
-				say(`not sent: ${why}`);
+			const outcome = await sayLine(text);
+			if ("why" in outcome) {
+				say(`not sent: ${outcome.why}`);
 				return;
 			}
 			input.value = "";

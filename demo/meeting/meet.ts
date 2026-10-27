@@ -413,7 +413,7 @@ async function main(): Promise<void> {
 	/**
 	 * Claude Code on this machine, while it is called: what the meeting
 	 * holds is written into `~/Documents/xmoq/<room>/<id>/` (`AGENT_ROOT`),
-	 * as `xmoq-agent --out` writes, and the lines it writes into `inbox.txt`
+	 * as `xmoq-agent --out` writes, and the lines it adds to `inbox.txt`
 	 * there are said in the chat, as this page.
 	 */
 	const agent: { bridge: AgentBridge | undefined } = { bridge: undefined };
@@ -502,8 +502,9 @@ async function main(): Promise<void> {
 		});
 		const bridge = createAgentBridge({
 			folder,
+			name: self,
 			say: (text) =>
-				chat?.say(text) ?? Promise.resolve("this page has no chat"),
+				chat?.say(text) ?? Promise.resolve({ why: "this page has no chat" }),
 		});
 		for (const id of meeting.ids()) bridge.participant("joined", id);
 		const stop = new AbortController();

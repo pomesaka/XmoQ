@@ -1,7 +1,7 @@
 // The reader of a room for an agent (`crates/agent`, `xmoq-agent`) through
 // the own relay and the gatherer (`xmoq-chat`): a page takes part in the chat
 // of room r as `p`, and `xmoq-agent --chat-room broadcast/r --name claude` writes what
-// happens as lines of JSON on stdout and in `<dir>/events.jsonl`.
+// happens as lines of JSON on stdout and in the files of `<dir>/events/`.
 //
 // Usage: bun agent.ts [--relay own] [--port N] [--verbose]
 //
@@ -26,13 +26,21 @@
 // Changed when a `broadcast` line came to say that the broadcast's catalog
 // came (2026-10-26): nobody publishes `xmoq/broadcast/r` here, and none is
 // written.
+//
+// Changed when the reader came to write a file of `events/` a second in
+// place of `events.jsonl`, to read `<dir>/inbox.txt` beside stdin, and to
+// mark its own lines (2026-10-27): a line added to `inbox.txt`, `hello from
+// the inbox`, reaches the page as a line of `claude` (3); the lines of
+// `claude` have `"by":"agent"` and that of p has none; the files of
+// `events/`, in the order of their names, have the same lines as stdout.
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { Page } from "playwright-core";
 import {
+	agentEventFiles,
 	type LoggedProcess,
 	log,
 	openConnectedPage,
@@ -159,6 +167,13 @@ async function main(): Promise<void> {
 		expect("the page's line 2", await pageLine(page, 2), "2 claude /slash");
 		// Written once the line came back, so that the errors come after it.
 		await waitForEvent(agent, '"text":"/slash"');
+		appendFileSync(join(out, "inbox.txt"), "hello from the inbox\n");
+		expect(
+			"the page's line 3",
+			await pageLine(page, 3),
+			"3 claude hello from the inbox",
+		);
+		await waitForEvent(agent, '"text":"hello from the inbox"');
 		agent.child.stdin.write("/frame\n/nothing\n");
 		await waitForEvent(agent, '"message":"no command /nothing');
 
@@ -177,32 +192,45 @@ async function main(): Promise<void> {
 				throw new Error(`the chat line of p: ${ofP}, without ${fragment}`);
 			}
 		}
+		if (ofP.includes('"by"')) {
+			throw new Error(`the chat line of p is marked: ${ofP}`);
+		}
+		const ofClaude = written.filter((line) => line.includes('"from":"claude"'));
+		if (
+			ofClaude.length !== 3 ||
+			!ofClaude.every((line) => line.includes('"by":"agent"'))
+		) {
+			throw new Error(
+				`the chat lines of claude, each marked: ${JSON.stringify(ofClaude)}`,
+			);
+		}
 		const kinds = written
 			.map((line) => /"type":"([a-z_]+)"/.exec(line)?.[1] ?? "?")
 			.join(",");
 		expect(
 			"the kinds of lines written",
 			kinds,
-			"joined,chat,chat,chat,error,error,left",
+			"joined,chat,chat,chat,chat,error,error,left",
 		);
 		expect(
 			"the error of /frame",
-			written[4] ?? "none",
+			written[5] ?? "none",
 			'{"message":"frame: --frames off","type":"error"}',
 		);
 		if (written.some((line) => line.includes('"name":"claude"'))) {
 			throw new Error("the reader wrote its own coming or leaving");
 		}
-		const inFile = readFileSync(join(out, "events.jsonl"), "utf8")
-			.trim()
-			.split("\n")
-			.map((line) => line.replace(/"at":\d+,?/, ""));
+		// The lines of the last second are in a file a second later.
+		const inFiles = await pollFor(() => {
+			const lines = agentEventFiles(out);
+			return lines.length >= written.length ? lines : undefined;
+		}, "the files of events/ to have every line of stdout");
 		expect(
-			"events.jsonl, set against stdout",
-			JSON.stringify(inFile),
+			"the files of events/, set against stdout",
+			JSON.stringify(inFiles),
 			JSON.stringify(written),
 		);
-		summary = `through the own relay and the gatherer, xmoq-agent wrote ${written.length} lines of JSON (${kinds}): p, who had joined before it came, as joined; p's line as chat 0; its own stdin lines as chat 1 and 2 (//slash said as /slash), which the page had; /frame and an unknown command as errors; p's leaving as left; events.jsonl had the same lines`;
+		summary = `through the own relay and the gatherer, xmoq-agent wrote ${written.length} lines of JSON (${kinds}): p, who had joined before it came, as joined; p's line as chat 0; its own stdin lines as chat 1 and 2 (//slash said as /slash) and a line of its inbox.txt as chat 3, which the page had, its own marked as the agent's; /frame and an unknown command as errors; p's leaving as left; the files of events/ had the same lines`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

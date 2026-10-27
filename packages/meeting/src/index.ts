@@ -10,7 +10,13 @@ export {
 	newInboxLines,
 	readInboxLine,
 } from "./core/agent-inbox.ts";
-export { type AgentEvent, agentLine, framePath } from "./core/agent-lines.ts";
+export {
+	type AgentEvent,
+	agentLine,
+	EVENTS_DIR,
+	eventFileNumber,
+	framePath,
+} from "./core/agent-lines.ts";
 export {
 	MEET,
 	meetingPrefix,
