@@ -132,7 +132,8 @@ pub const MAX_HELD_TRACKS: usize = 1_024;
 /// [`LimitsOfASession`] does not say otherwise: its SUBSCRIBE, FETCH and
 /// `TRACK_STATUS` requests to a publisher together (§13.1, §13.5); a
 /// `PUBLISH_NAMESPACE` passed to the parent does not count
-/// (`own::Counted::No`). A publisher that has as many is passed over, and a
+/// (`own::Counted::No`; decided): the parent bounds those with its own
+/// `--namespaces-per-session`. A publisher that has as many is passed over, and a
 /// subscriber for whose SUBSCRIBE nobody else could be asked is refused
 /// with `EXCESSIVE_LOAD`. Provisional.
 ///

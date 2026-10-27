@@ -60,6 +60,8 @@ The peer has the same time, `peerStreamEndTimeoutMs`, to end its direction after
 
 - **In Chromium, a STOP_SENDING for a stream the peer opened that arrives before the page has taken the stream is not always reported** (13 of 120, [record](../../docs/experiments/2026-10-11-write-abort-in-chromium.md)). A peer that cancels a request that way, without resetting its own direction, can leave the library with a request, or an accepted subscription, it believes open. The own relay and the `moqtail` relay reset their direction as well when they cancel (the latter by its source, not run), and the reset is seen.
 - **A failure of a handler is reported with the global `reportError`, unguarded.** In a runtime without it the call throws, and the failure is an unhandled rejection. Not run in such a runtime.
+- **A subscription a page accepted holds a place for as long as it lasts** (no requirement of the draft). Details at `maxPeerBidiStreams` (`src/webtransport/connection.ts`).
+- **`PublishedTrack.ended` after a PUBLISH_DONE that could not be written.** Not a requirement of the draft; details at `PublishedTrack.done` (`src/webtransport/connection.ts`).
 
 ## Layout
 

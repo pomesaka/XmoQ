@@ -124,6 +124,8 @@ interface LocalStream {
  * How long after a refusal a request stream is asked for again
  * (**provisional**): short against the seconds a request waits, and no
  * load: one call that the browser refuses without sending anything.
+ * Chromium 156 refuses the call at once where the peer allows no further
+ * stream (`refusedForNow`), and does not wait for one.
  */
 const OPEN_AGAIN_AFTER_MS = 50;
 
