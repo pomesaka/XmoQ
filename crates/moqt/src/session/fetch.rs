@@ -308,6 +308,79 @@ mod tests {
         (session, request)
     }
 
+    /// The rows of `fixtures/own-requests/events.tsv`, which `@xmoq/moqt`
+    /// reads as well: what comes from the peer for a request of this end,
+    /// a client, on the request's stream or as a fetch stream, and what the
+    /// session makes of it. §10.13: "If End Location is smaller than the
+    /// Start Location in the corresponding FETCH the receiver MUST close the
+    /// session with a `PROTOCOL_VIOLATION`", an End Location naming the last
+    /// Object plus one, and {Group, 0} the whole Group. §2.5.1 and §2.4.2: a
+    /// Mandatory Track Property in `FETCH_OK` ends the FETCH, as one in
+    /// `SUBSCRIBE_OK` ends the subscription. The draft has no case of a fetch
+    /// stream for no open FETCH (§5.2, §10.12.3): one for a request that is
+    /// over is stopped, as §5.2 has Objects come for a FETCH that ended; any
+    /// other is a violation, as is a `FETCH_OK` on a stream that carries no
+    /// FETCH.
+    #[test]
+    fn what_comes_for_a_request_of_this_end_is_taken_as_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<5>("own-requests/events.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 11);
+        for [name, request, at_where, hex, verdict] in rows {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect();
+            let mut session = client();
+            // Request ID 0, the client's first.
+            let handle = match request.as_str() {
+                "fetch" | "cancelled-fetch" => {
+                    session
+                        .fetch(standalone(at(4, 2), at(9, 0)), vec![])
+                        .unwrap()
+                        .0
+                }
+                "subscribe" => session.subscribe(track(), vec![]).unwrap().0,
+                other => panic!("{name}: {other}"),
+            };
+            if request == "cancelled-fetch" {
+                session.cancel(handle);
+            }
+            let closed = |error: &Error| {
+                let code = error.termination_code().expect("it closes the session");
+                format!("closed:{:#x}", code.code())
+            };
+            let got = match at_where.as_str() {
+                "request-stream" => {
+                    let message = match ControlMessage::decode(&bytes) {
+                        Ok(Some((message, _))) => message,
+                        other => panic!("{name}: {other:?}"),
+                    };
+                    match session.on_request_message(handle, message) {
+                        Ok(RequestEvent::FetchNotProcessed { .. }) => "over".to_string(),
+                        Ok(_) => "taken".to_string(),
+                        Err(RequestFault::Peer(error)) => closed(&error),
+                        Err(RequestFault::Usage(error)) => panic!("{name}: {error}"),
+                    }
+                }
+                "fetch-stream" | "two-fetch-streams" => {
+                    // FETCH_HEADER: the type 0x05 and a Request ID of one byte.
+                    let request_id = u64::from(bytes[1]);
+                    if at_where == "two-fetch-streams" {
+                        session.on_fetch_stream(request_id).unwrap();
+                    }
+                    match session.on_fetch_stream(request_id) {
+                        Ok(FetchStreamOpened::Fetch(_)) => "taken".to_string(),
+                        Ok(FetchStreamOpened::Ended) => "stopped".to_string(),
+                        Err(error) => closed(&error),
+                    }
+                }
+                other => panic!("{name}: {other}"),
+            };
+            assert_eq!(got, verdict, "{name}");
+        }
+    }
+
     #[test]
     fn a_fetch_carries_what_it_was_opened_with() {
         let mut session = client();

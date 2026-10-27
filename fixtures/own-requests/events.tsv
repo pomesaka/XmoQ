@@ -1,0 +1,11 @@
+fetch-ok-that-ends-where-the-fetch-starts	fetch	request-stream	18000400040200	taken
+fetch-ok-that-ends-with-the-group-of-the-start	fetch	request-stream	18000400040000	taken
+fetch-ok-that-ends-before-the-start	fetch	request-stream	18000400040100	closed:0x3
+fetch-ok-with-a-mandatory-track-property	fetch	request-stream	18000800040200c0400001	over
+fetch-ok-on-the-stream-of-a-subscribe	subscribe	request-stream	18000400040200	closed:0x3
+a-fetch-stream-of-an-open-fetch	fetch	fetch-stream	0500	taken
+a-second-fetch-stream-of-an-open-fetch	fetch	two-fetch-streams	0500	closed:0x3
+a-fetch-stream-of-an-id-this-end-has-not-used	fetch	fetch-stream	0502	closed:0x3
+a-fetch-stream-of-an-id-of-the-peers-parity	fetch	fetch-stream	0501	closed:0x3
+a-fetch-stream-of-a-subscribe	subscribe	fetch-stream	0500	closed:0x3
+a-fetch-stream-of-a-fetch-that-was-cancelled	cancelled-fetch	fetch-stream	0500	stopped
