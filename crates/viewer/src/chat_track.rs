@@ -115,6 +115,29 @@ impl Saying {
 mod tests {
     use super::*;
 
+    /// The rows of `fixtures/shared-values/values.tsv` that name xmoq-viewer, by
+    /// name.
+    fn shared_values() -> std::collections::HashMap<&'static str, u64> {
+        include_str!("../../../fixtures/shared-values/values.tsv")
+            .lines()
+            .filter_map(|row| match row.split('\t').collect::<Vec<_>>()[..] {
+                [name, value, holders] => holders
+                    .split(',')
+                    .any(|holder| holder == "xmoq-viewer")
+                    .then(|| (name, value.parse().expect("a number"))),
+                _ => panic!("a row of three columns: {row}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_values_held_alike_with_other_parts_are_as_the_shared_table_says() {
+        assert_eq!(
+            shared_values(),
+            std::collections::HashMap::from([("chat-recent-lines", RECENT_LINES)])
+        );
+    }
+
     #[test]
     fn a_gap_says_which_lines_were_not_fetched() {
         assert_eq!(shown_gap(50, 52), "1 lines not fetched (51 to 51)");

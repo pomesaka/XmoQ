@@ -4,7 +4,7 @@ A participant of a room subscribes to the track `lines` of `xmoq/chat/<room>` (`
 
 The rule, with `catchUp` the most lines a participant catches up (its own default, from 1 to `CATCH_UP_LINES_MOST`):
 
-- Nothing had: the newest lines, as many as a participant that comes asks for (`HISTORY_LINES` of `@xmoq/chat`, `RECENT_LINES` of `xmoq-viewer`).
+- Nothing had: the newest lines, as many as a participant that comes asks for (`HISTORY_LINES` of `@xmoq/chat`, `RECENT_LINES` of `xmoq-viewer`; `chat-recent-lines` of [`fixtures/shared-values/`](../shared-values/README.md), which the tests take from there).
 - Lines had up to `had`: from the line after it to the Group of the LARGEST_OBJECT; where they are more than `catchUp`, the newest `catchUp` and a gap before them. Nothing where `had` is that Group already.
 - That Group below `had`, or no LARGEST_OBJECT where lines were had: the room was numbered anew; what was had is forgotten, and the newest are fetched as where nothing was had.
 

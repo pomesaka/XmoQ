@@ -2991,6 +2991,32 @@ pub fn fetch_reset_passed_on(code: Option<u32>) -> u32 {
 mod tests {
     use super::{Location, end_location};
 
+    /// The rows of `fixtures/shared-values/values.tsv` that name xmoq-relay-core, by
+    /// name.
+    fn shared_values() -> std::collections::HashMap<&'static str, u64> {
+        include_str!("../../../fixtures/shared-values/values.tsv")
+            .lines()
+            .filter_map(|row| match row.split('\t').collect::<Vec<_>>()[..] {
+                [name, value, holders] => holders
+                    .split(',')
+                    .any(|holder| holder == "xmoq-relay-core")
+                    .then(|| (name, value.parse().expect("a number"))),
+                _ => panic!("a row of three columns: {row}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_values_held_alike_with_other_parts_are_as_the_shared_table_says() {
+        assert_eq!(
+            shared_values(),
+            std::collections::HashMap::from([(
+                "served-fetch-peer-end-wait-ms",
+                super::FETCH_PEER_END_WAIT_MS
+            )])
+        );
+    }
+
     fn at(group: u64, object: u64) -> Location {
         Location { group, object }
     }

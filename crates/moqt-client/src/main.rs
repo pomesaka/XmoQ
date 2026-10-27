@@ -3509,6 +3509,36 @@ mod tests {
         Publish, PublishDone, PublishNamespace, Subscribe, SubscribeNamespace,
     };
 
+    /// The rows of `fixtures/shared-values/values.tsv` that name xmoq-moqt-client, by
+    /// name.
+    fn shared_values() -> std::collections::HashMap<&'static str, u64> {
+        include_str!("../../../fixtures/shared-values/values.tsv")
+            .lines()
+            .filter_map(|row| match row.split('\t').collect::<Vec<_>>()[..] {
+                [name, value, holders] => holders
+                    .split(',')
+                    .any(|holder| holder == "xmoq-moqt-client")
+                    .then(|| (name, value.parse().expect("a number"))),
+                _ => panic!("a row of three columns: {row}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_values_held_alike_with_other_parts_are_as_the_shared_table_says() {
+        let ms = |time: std::time::Duration| u64::try_from(time.as_millis()).unwrap();
+        assert_eq!(
+            shared_values(),
+            std::collections::HashMap::from([
+                ("request-stream-open-wait-ms", STREAM_OPEN_WAIT_MS),
+                (
+                    "publish-done-peer-end-wait-ms",
+                    ms(PUBLISH_DONE_ANSWER_WAIT)
+                )
+            ])
+        );
+    }
+
     #[test]
     fn the_first_group_is_a_number_or_the_time() {
         assert_eq!(first_group_of("0").unwrap(), 0);

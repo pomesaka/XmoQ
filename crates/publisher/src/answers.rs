@@ -843,6 +843,30 @@ mod tests {
 
     use super::*;
 
+    /// The rows of `fixtures/shared-values/values.tsv` that name xmoq-publisher, by
+    /// name.
+    fn shared_values() -> std::collections::HashMap<&'static str, u64> {
+        include_str!("../../../fixtures/shared-values/values.tsv")
+            .lines()
+            .filter_map(|row| match row.split('\t').collect::<Vec<_>>()[..] {
+                [name, value, holders] => holders
+                    .split(',')
+                    .any(|holder| holder == "xmoq-publisher")
+                    .then(|| (name, value.parse().expect("a number"))),
+                _ => panic!("a row of three columns: {row}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_values_held_alike_with_other_parts_are_as_the_shared_table_says() {
+        let ms = |time: std::time::Duration| u64::try_from(time.as_millis()).unwrap();
+        assert_eq!(
+            shared_values(),
+            std::collections::HashMap::from([("served-fetch-peer-end-wait-ms", ms(PEER_END_WAIT))])
+        );
+    }
+
     /// The bytes the Rust client's answers hold.
     const MAX_BYTES_HELD: usize = 32 * 1024 * 1024;
 

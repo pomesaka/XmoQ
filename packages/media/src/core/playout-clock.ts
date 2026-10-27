@@ -28,24 +28,25 @@ export const DEFAULT_AUDIO_MIN_MS = 30;
 /** What the buffer keeps for itself when a piece of audio waits for the ones before it (**provisional**). */
 export const ORDER_MARGIN_MS = 20;
 /**
- * The automatic buffer (**a trial, not the default**) follows how late
- * things come. It is what `autoShare` of the last AUTO_WINDOW_MS came
+ * The automatic buffer (**a trial, not the default**; its values are
+ * **provisional**) follows how late things come. It is what `autoShare` of the last AUTO_WINDOW_MS came
  * within, after the fastest, and AUTO_MARGIN_MS more. It grows at once and
  * shrinks AUTO_STEP_MS at a `tick`, which the caller gives twice a second.
  */
 export const AUTO_WINDOW_MS = 10_000;
 export const AUTO_MARGIN_MS = 10;
 export const AUTO_STEP_MS = 10;
-/** How few frames and pieces of the window the automatic buffer does not go by. */
+/** How few frames and pieces of the window the automatic buffer does not go by (**provisional**). */
 export const AUTO_MIN_SAMPLES = 50;
 /**
  * How far the automatic buffer goes. WHY a limit: with loss, a few of 100
  * come seconds late (measured: 0.8 s at 1 %, 5 s at 5 %), and a buffer that
- * waits for those is not live any more.
+ * waits for those is not live any more. **Provisional.**
  */
 export const DEFAULT_AUTO_MAX_MS = 400;
 /** How many arrivals of the window the automatic buffer keeps at most, the newest: 10 seconds of 30 frames and 50 pieces of sound, twice over. */
 export const MAX_LATENESS_SAMPLES = 1600;
+/** The share of the arrivals of the window the automatic buffer waits for (**provisional**). */
 export const DEFAULT_AUTO_SHARE = 0.99;
 
 export interface PlayoutClockOptions {

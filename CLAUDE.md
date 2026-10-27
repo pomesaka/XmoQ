@@ -113,7 +113,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | エージェントの進め方を変えた | CLAUDE.md |
 | 既知の不足を直した（draftの要件を満たした、上限を足した） | docs/moqt-implementation-notes.md の既知の不足の項目と、それを指す`FIXME:`を消す。その挙動を表の行に書く。部品のREADMEの既知の不足とStatus |
 | draftの解釈や、本文に無い挙動を決めた・変えた | docs/moqt-implementation-notes.md。RustとTypeScriptの両方を同じPRで直す。状態の移り方が変わるならdocs/moqt-state-models.mdも |
-| 受信の上限やタイムアウトの値を決めた・変えた | 値を置くコードの定数のコメント（provisionalの印を含む）。2つの実装で共有する値は`fixtures/limits/limits.tsv`か`fixtures/followed-track/limits.tsv`。docs/moqt-implementation-notes.mdは規則が変わったときだけ |
+| 受信の上限やタイムアウトの値を決めた・変えた | 値を置くコードの定数のコメント（provisionalの印を含む）。2つの実装で共有する値は`fixtures/limits/limits.tsv`、`fixtures/followed-track/limits.tsv`、`fixtures/shared-values/values.tsv`のどれか。docs/moqt-implementation-notes.mdは規則が変わったときだけ |
 | 頼み直し、追いつき、次のセッションの挙動を変えた | 規則を持つコードのコメント（Rustは`xmoq-again`と`xmoq-subscriber`、TypeScriptは`@xmoq/moqt`と`@xmoq/tracks`）と、2つの実装が読む表とそのREADME（`fixtures/ask-again/`、`fixtures/kept-track/`、`fixtures/followed-track/`、`fixtures/chat-history/`）。セッションと要求の状態の移り方（GOAWAYを含む）が変わるならdocs/moqt-state-models.mdも |
 | moqtailから固定値を採った・採り直した | fixtures/moqt-18/README.md |
 | ブラウザやライブラリから固定値を採った・採り直した | その固定値のディレクトリのREADME（fixtures/webtransport-close/README.md など） |

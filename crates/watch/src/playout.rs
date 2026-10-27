@@ -15,7 +15,8 @@ pub const RATE: u32 = 48_000;
 const JOINS_US: u64 = 10_000;
 
 /// How far from its own time a packet may begin so as to follow the one
-/// before it without a seam: less than half a packet of 20 ms. As
+/// before it without a seam: less than half a packet of 20 ms.
+/// **Provisional.** As
 /// `SEAM_SECONDS` of `@xmoq/media` (`packages/media/src/core/audio-seam.ts`),
 /// from where the three values are; `fixtures/playout/seam.tsv` has what
 /// both go by.
