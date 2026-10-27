@@ -318,6 +318,27 @@ type PeerUniStream =
  */
 const STREAM_TYPE_PADDING = 0x132b3e28n;
 
+/** What a unidirectional stream of the peer is, by its Stream Type (§3.4, Table 3). */
+export type UniStreamKind =
+	| "control"
+	| "subgroup"
+	| "padding"
+	| "fetch"
+	| "unknown";
+
+/**
+ * The kind of a unidirectional stream whose Stream Type is `streamType`.
+ * `fixtures/moqt-18-verdicts/streams.tsv` has what both implementations take
+ * each for.
+ */
+export function uniStreamKind(streamType: bigint): UniStreamKind {
+	if (streamType === SETUP_MESSAGE_TYPE) return "control";
+	if (isSubgroupHeaderType(streamType)) return "subgroup";
+	if (streamType === STREAM_TYPE_PADDING) return "padding";
+	if (streamType === FETCH_HEADER_STREAM_TYPE) return "fetch";
+	return "unknown";
+}
+
 const EMPTY = new Uint8Array(0);
 
 export function createSession(options: SessionOptions = {}): Session {
@@ -379,28 +400,30 @@ export function createSession(options: SessionOptions = {}): Session {
 			return { kind: "unknown", buffer };
 		}
 
-		if (streamType === SETUP_MESSAGE_TYPE) {
-			if (peerControlStream !== undefined) {
-				throw protocolViolation("the peer opened a second control stream");
-			}
-			peerControlStream = peerStream;
-			out.push(identifiedUni(peerStream));
-			return { kind: "control" };
+		switch (uniStreamKind(streamType)) {
+			case "control":
+				if (peerControlStream !== undefined) {
+					throw protocolViolation("the peer opened a second control stream");
+				}
+				peerControlStream = peerStream;
+				out.push(identifiedUni(peerStream));
+				return { kind: "control" };
+			case "subgroup":
+				requests.incoming.open(peerStream);
+				return { kind: "subgroup" };
+			case "padding":
+				out.push(identifiedUni(peerStream));
+				return { kind: "discard" };
+			case "fetch":
+				return { kind: "fetch-header", buffer };
+			case "unknown":
+				// §3.4: "An endpoint that receives an unknown stream type MUST
+				// close the session." The draft names no code; PROTOCOL_VIOLATION
+				// is used.
+				throw protocolViolation(
+					`unknown stream type 0x${streamType.toString(16)}`,
+				);
 		}
-		if (isSubgroupHeaderType(streamType)) {
-			requests.incoming.open(peerStream);
-			return { kind: "subgroup" };
-		}
-		if (streamType === STREAM_TYPE_PADDING) {
-			out.push(identifiedUni(peerStream));
-			return { kind: "discard" };
-		}
-		if (streamType === FETCH_HEADER_STREAM_TYPE) {
-			return { kind: "fetch-header", buffer };
-		}
-		// §3.4: "An endpoint that receives an unknown stream type MUST close the
-		// session." The draft names no code; PROTOCOL_VIOLATION is used.
-		throw protocolViolation(`unknown stream type 0x${streamType.toString(16)}`);
 	};
 
 	/**

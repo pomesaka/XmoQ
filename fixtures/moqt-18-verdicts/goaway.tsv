@@ -1,0 +1,11 @@
+a-uri-and-request-id-0	client	control	10000805683a2f2f610000	taken
+no-uri-and-request-id-4	client	control	100003000004	taken
+no-request-id	client	control	1000020000	closed:0x3
+a-request-id-of-the-senders-parity	client	control	100003000001	closed:0x4
+a-second-goaway	client	control	100003000002100003000002	closed:0x3
+no-uri-and-request-id-1	server	control	100003000001	taken
+a-uri-sent-to-a-server	server	control	10000805683a2f2f610001	closed:0x3
+a-request-id-of-the-senders-parity-at-a-server	server	control	100003000002	closed:0x4
+a-uri-on-a-request-stream	client	own-request	10000705683a2f2f6100	taken
+a-request-id-on-a-request-stream	client	own-request	100003000000	closed:0x3
+a-second-goaway-on-one-request-stream	client	own-request	10000200001000020000	closed:0x3

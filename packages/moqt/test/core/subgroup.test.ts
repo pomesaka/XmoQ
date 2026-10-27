@@ -4,11 +4,12 @@ import {
 	createSubgroupStreamDecoder,
 	encodeSubgroupHeader,
 	encodeSubgroupObject,
+	type ObjectStreamFailure,
 	type SubgroupHeader,
 	type SubgroupObject,
 	type SubgroupStreamItem,
 } from "../../src/core/subgroup.ts";
-import { hex, toHex, utf8 } from "../helpers.ts";
+import { fixtureTable, hex, toHex, utf8 } from "../helpers.ts";
 
 const LIMITS = { maxObjectPayloadLength: 1024, maxObjectPropertiesLength: 64 };
 
@@ -120,6 +121,52 @@ function expectedItems(
 	];
 }
 
+// fixtures/moqt-18-verdicts/subgroup-stream.tsv, which the Rust
+// implementation reads as well: a subgroup stream, whole and a byte at a
+// time, ended with a FIN, and whether it is read, closes the session, makes
+// the track malformed, or ends that stream alone (a limit of this end). §11.4:
+// a FIN inside a serialized Object, or inside the header, is a
+// PROTOCOL_VIOLATION. §2.4.2 and §11.4.3: an Object after End of Group or End
+// of Track makes the track malformed as soon as its first byte is there.
+// §2.5.1, §12.8 and §12.9: a Mandatory Track Property on an Object, and a
+// Prior Group ID Gap or Prior Object ID Gap that is larger than its ID or
+// comes twice, make it malformed, decided when the properties are read, before
+// the status that would close the session (an Object is judged field by field
+// as it arrives). More than MAX_KEY_VALUE_PAIRS properties are this end's
+// limit.
+describe("fixtures/moqt-18-verdicts/subgroup-stream.tsv", () => {
+	const rows = fixtureTable("moqt-18-verdicts", "subgroup-stream.tsv");
+	test("the table has its 23 rows of 3 columns", () => {
+		expect(rows.map((row) => row.length)).toEqual(Array(23).fill(3));
+	});
+	test.each(rows)("%s: %s is %s", (_name, bytes, verdict) => {
+		const input = hex((bytes ?? "").match(/../g)?.join(" ") ?? "");
+		for (const chunk of [Math.max(input.length, 1), 1]) {
+			const decoder = createSubgroupStreamDecoder(LIMITS);
+			let failure: ObjectStreamFailure | undefined;
+			for (
+				let at = 0;
+				at < input.length && failure === undefined;
+				at += chunk
+			) {
+				failure = decoder.push(input.subarray(at, at + chunk)).failure;
+			}
+			const violation = failure === undefined ? decoder.finish() : undefined;
+			const got =
+				failure === undefined
+					? violation === undefined
+						? "ok"
+						: `closed:0x${violation.code.toString(16)}`
+					: failure.scope === "session"
+						? `closed:0x${failure.error.code.toString(16)}`
+						: failure.scope === "track"
+							? "malformed"
+							: "stopped";
+			expect(got).toBe(verdict ?? "");
+		}
+	});
+});
+
 describe("subgroup streams (§11.4.2)", () => {
 	test.each(STREAMS)(
 		"decodes in one chunk: $name",
@@ -157,28 +204,6 @@ describe("subgroup streams (§11.4.2)", () => {
 		expect(parts.map(toHex).join(" ")).toBe(bytes);
 	});
 
-	// A broken rule of the draft ends the session.
-	test.each([
-		{ name: "SUBGROUP_ID_MODE 0b11 (Type 0x16)", bytes: "16 00 00" },
-		{ name: "a Type without bit 4 (0x04)", bytes: "04 00 00" },
-		{ name: "Object Status 1", bytes: "14 02 00 00 00 00 00 01" },
-		{
-			name: "properties on an End of Group Object",
-			bytes: "15 02 00 00 00 00 02 04 01 00 03",
-		},
-		{
-			name: "an Object ID above 2^64 - 1",
-			bytes: "34 00 00 00 ff ff ff ff ff ff ff ff ff 01 61 00 01 61",
-		},
-		{
-			name: "Object Properties that end inside a pair",
-			bytes: "15 02 00 00 00 00 01 05",
-		},
-	])("reports a PROTOCOL_VIOLATION for $name", ({ bytes }) => {
-		const { failure } = createSubgroupStreamDecoder(LIMITS).push(hex(bytes));
-		expect(failure).toMatchObject({ scope: "session", error: { code: 3 } });
-	});
-
 	test.each([
 		{ name: "Object Payload Length 1025", bytes: "14 02 00 00 00 00 84 01" },
 		{
@@ -209,86 +234,6 @@ describe("subgroup streams (§11.4.2)", () => {
 			scope: "stream",
 			reason: "more than 64 Key-Value-Pairs in one sequence",
 		});
-	});
-
-	// A malformed Track (§2.4.2) ends its subscription, not the session.
-	// Object Properties in these rows: 0x4000 is a Mandatory Track Property,
-	// 0x3C is Prior Group ID Gap, 0x3E is Prior Object ID Gap.
-	test.each([
-		{
-			name: "a Mandatory Track Property on an Object (§2.5.1)",
-			bytes: "15 02 00 00 00 00 04 c0 40 00 01 01 61",
-			reason: "Mandatory Track Property 0x4000 on an Object",
-		},
-		{
-			// Fields are judged in the order they arrive: the properties come
-			// before the status that makes them a PROTOCOL_VIOLATION.
-			name: "a Mandatory Track Property on an End of Group Object",
-			bytes: "15 02 00 00 00 00 04 c0 40 00 01 00 03",
-			reason: "Mandatory Track Property 0x4000 on an Object",
-		},
-		{
-			name: "the first byte of an Object after End of Group, before its Object ID Delta is whole",
-			bytes: "14 02 00 00 00 00 00 03 80",
-			reason: "an Object follows the end of its Group or Track",
-		},
-		{
-			name: "an Object after End of Group (§2.4.2)",
-			bytes: "14 02 00 00 00 00 00 03 00 01 61",
-			reason: "an Object follows the end of its Group or Track",
-		},
-		{
-			name: "two Prior Object ID Gap properties (§12.9)",
-			bytes: "15 02 05 00 00 03 04 3e 00 00 00 01 61",
-			reason: "more than one Prior Object ID Gap on an Object",
-		},
-		{
-			name: "Prior Object ID Gap 4 on Object 3 (§12.9)",
-			bytes: "15 02 05 00 00 03 02 3e 04 01 61",
-			reason: "Prior Object ID Gap 4 is larger than Object ID 3",
-		},
-		{
-			name: "Prior Group ID Gap 6 in Group 5 (§12.8)",
-			bytes: "15 02 05 00 00 03 02 3c 06 01 61",
-			reason: "Prior Group ID Gap 6 is larger than Group ID 5",
-		},
-	])("reports a malformed Track for $name", ({ bytes, reason }) => {
-		const { failure } = createSubgroupStreamDecoder(LIMITS).push(hex(bytes));
-		expect(failure).toEqual({ scope: "track", reason });
-	});
-
-	test("accepts gap properties that fit their Group and Object (§12.8, §12.9)", () => {
-		// Group 5, Object 3, Prior Group ID Gap 5 and Prior Object ID Gap 3.
-		const result = createSubgroupStreamDecoder(LIMITS).push(
-			hex("15 02 05 00 00 03 04 3c 05 02 03 01 61"),
-		);
-		expect(result.failure).toBeUndefined();
-		expect(result.items).toHaveLength(2);
-	});
-
-	// §11.4: a FIN in the middle of a serialized Object is a PROTOCOL_VIOLATION.
-	test.each([
-		{ name: "after the header", bytes: "14 02 00 00 00", violation: false },
-		{
-			name: "after a whole Object",
-			bytes: "14 02 00 00 00 00 01 61",
-			violation: false,
-		},
-		{ name: "inside the header", bytes: "14 02", violation: true },
-		{
-			name: "inside the Object fields",
-			bytes: "14 02 00 00 00 00",
-			violation: true,
-		},
-		{
-			name: "inside the Object Payload",
-			bytes: "14 02 00 00 00 00 02 61",
-			violation: true,
-		},
-	])("FIN $name", ({ bytes, violation }) => {
-		const decoder = createSubgroupStreamDecoder(LIMITS);
-		decoder.push(hex(bytes));
-		expect(decoder.finish() !== undefined).toBe(violation);
 	});
 
 	test.each([

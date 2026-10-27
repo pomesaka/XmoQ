@@ -315,6 +315,33 @@ impl std::error::Error for RequestFault {
 mod tests {
     use super::*;
 
+    /// The rows of `fixtures/moqt-18-verdicts/reset-codes.tsv`, which
+    /// `@xmoq/moqt` reads as well: the Stream Reset Error Code (§3.3.3) a
+    /// stream is reset or stopped with, by why. A malformed track
+    /// (`MALFORMED_TRACK`, §2.4.2), a limit of this end on one Object, and a
+    /// subscription that ended or was cancelled, which the caller of the
+    /// session resets and stops its streams with.
+    #[test]
+    fn a_stream_is_ended_with_the_code_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<2>("moqt-18-verdicts/reset-codes.tsv");
+        assert_eq!(rows.len(), 3);
+        for [why, code] in rows {
+            let ours = match why.as_str() {
+                "malformed-track" => match Error::MalformedTrack("x").scope() {
+                    ErrorScope::Subscription { reset_code } => reset_code,
+                    other => panic!("{other:?}"),
+                },
+                "local-limit" => match (Error::TooManyObjectProperties { limit: 64 }).scope() {
+                    ErrorScope::Stream { reset_code } => reset_code,
+                    other => panic!("{other:?}"),
+                },
+                "cancelled" => stream_reset_code::CANCELLED,
+                other => panic!("{other}"),
+            };
+            assert_eq!(format!("{ours:#x}"), code, "{why}");
+        }
+    }
+
     #[test]
     fn every_error_ends_a_stream_a_subscription_or_the_session() {
         let cases = [
