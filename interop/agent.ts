@@ -35,6 +35,11 @@
 // `events/`, in the order of their names, have the same lines as stdout.
 // The reader puts `AGENT.md`, the text of `fixtures/agent-lines/AGENT.md`,
 // in `--out`, and says on stderr the line to paste, with the folder in full.
+//
+// Changed when the reader came to write a first and a last line
+// (2026-10-27): its first line is `{"room":"broadcast/r","state":"began",
+// "type":"reader"}`, without an id, and on SIGTERM its last,
+// `{"state":"ended","type":"reader"}`, is in the last file of `events/`.
 
 import {
 	appendFileSync,
@@ -202,8 +207,13 @@ async function main(): Promise<void> {
 
 		const written = events(agent);
 		expect(
-			"the joined line",
+			"the first line",
 			written[0] ?? "none",
+			'{"room":"broadcast/r","state":"began","type":"reader"}',
+		);
+		expect(
+			"the joined line",
+			written[1] ?? "none",
 			'{"name":"p","type":"joined"}',
 		);
 		const ofP = written.find((line) => line.includes('"from":"p"')) ?? "none";
@@ -230,11 +240,11 @@ async function main(): Promise<void> {
 		expect(
 			"the kinds of lines written",
 			kinds,
-			"joined,chat,chat,chat,chat,error,error,left",
+			"reader,joined,chat,chat,chat,chat,error,error,left",
 		);
 		expect(
 			"the error of /frame",
-			written[5] ?? "none",
+			written[6] ?? "none",
 			'{"message":"frame: --frames off","type":"error"}',
 		);
 		if (written.some((line) => line.includes('"name":"claude"'))) {
@@ -250,7 +260,15 @@ async function main(): Promise<void> {
 			JSON.stringify(inFiles),
 			JSON.stringify(written),
 		);
-		summary = `through the own relay and the gatherer, xmoq-agent wrote ${written.length} lines of JSON (${kinds}): p, who had joined before it came, as joined; p's line as chat 0; its own stdin lines as chat 1 and 2 (//slash said as /slash) and a line of its inbox.txt as chat 3, which the page had, its own marked as the agent's; /frame and an unknown command as errors; p's leaving as left; the files of events/ had the same lines; AGENT.md was in --out, and the line to paste on stderr`;
+		// Its last line, on a signal, is in the last file.
+		agent.child.kill("SIGTERM");
+		await waitForEvent(agent, '"state":"ended","type":"reader"');
+		const last = await pollFor(() => {
+			const lines = agentEventFiles(out);
+			return lines.length > written.length ? lines.at(-1) : undefined;
+		}, "the last line in the files of events/");
+		expect("the last line", last, '{"state":"ended","type":"reader"}');
+		summary = `through the own relay and the gatherer, xmoq-agent wrote ${written.length} lines of JSON (${kinds}): p, who had joined before it came, as joined; p's line as chat 0; its own stdin lines as chat 1 and 2 (//slash said as /slash) and a line of its inbox.txt as chat 3, which the page had, its own marked as the agent's; /frame and an unknown command as errors; p's leaving as left; the files of events/ had the same lines; AGENT.md was in --out, and the line to paste on stderr; the first line said the room, and the last, on SIGTERM, that it ended`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

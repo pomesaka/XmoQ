@@ -39,6 +39,7 @@ With \`last=0\` it gives everything since the reader began. To begin from now, s
 
 What the lines are, by their \`type\`:
 
+- \`reader\`: the first line, \`"state":"began"\`, names the chat's \`room\`, and on the page of a meeting your \`id\` there, which the \`from\` of the voice of the person who called you ends with. The last line, \`"state":"ended"\`, says the writing stopped. None comes where the page was closed or the reader was killed: no line for a long while may mean that, too.
 - \`chat\`: a line of the chat, \`from\` who, \`text\` what. A line with \`"by":"agent"\` is one you said.
 - \`speech\`: something said aloud, as the transcriber read it. \`from\` is whose voice, \`text\` what.
 - \`participant\` (\`state\`, \`id\`), \`joined\` and \`left\` (\`name\`): who came and who left.

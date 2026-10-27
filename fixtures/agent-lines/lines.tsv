@@ -6,3 +6,6 @@ a piece of speech	{"at":1000,"end_us":20,"from":["xmoq","meet","demo","p1"],"num
 a picture of a participant, at a path from the folder	{"asked":"command","at":1000,"group":12,"height":180,"id":"p1","object":7,"path":"frames/1700000000000/000001-g12-o7.png","timestamp_us":1700000000000000,"type":"frame","width":320}
 an error	{"at":1000,"message":"no command /nothing: /frame is one, and // begins a line that is said","type":"error"}
 a line the agent said	{"at":1000,"by":"agent","from":"alice","gathered_at":995,"number":9,"sent_at":991,"text":"hi","type":"chat"}
+the reader began, in a meeting	{"at":1000,"id":"p1","room":"meeting/demo","state":"began","type":"reader"}
+the reader began, with no id	{"at":1000,"room":"broadcast/demo","state":"began","type":"reader"}
+the reader ended	{"at":1000,"state":"ended","type":"reader"}

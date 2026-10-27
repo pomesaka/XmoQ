@@ -38,6 +38,21 @@ pub enum FrameReason {
 /// One thing that happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// The reader began to write: the first line of a run, written as
+    /// `"type":"reader","state":"began"`.
+    Began {
+        /// The chat's room (`broadcast/<name>`, `meeting/<name>`).
+        room: String,
+        /// The reader's id in a meeting, which the `from` of its own voice
+        /// ends with: written as `id`, and left out where it has none.
+        /// `xmoq-agent` has none: it sends no voice and no picture, and is
+        /// no participant of a meeting.
+        id: Option<String>,
+    },
+    /// The reader ends: the last line of a run, written as
+    /// `"type":"reader","state":"ended"`. None comes where the process is
+    /// killed.
+    Ended,
     /// A line of the room's chat.
     Chat {
         /// Its number in the room (the Group of `lines`).
@@ -134,12 +149,27 @@ pub enum Event {
     },
 }
 
+/// `value` with the field `name` of `field`, where there is one: a field
+/// that is left out of a line where it has nothing to say.
+fn with(mut value: Value, name: &str, field: Option<&str>) -> Value {
+    if let (Some(field), Value::Object(fields)) = (field, &mut value) {
+        fields.insert(name.to_string(), json!(field));
+    }
+    value
+}
+
 impl Event {
     /// The event as one line of JSON, without its newline, written at `at`
     /// (ms since the Unix epoch).
     #[must_use]
     pub fn line(&self, at: u64) -> String {
         let value = match self {
+            Self::Began { room, id } => with(
+                json!({"type": "reader", "state": "began", "room": room}),
+                "id",
+                id.as_deref(),
+            ),
+            Self::Ended => json!({"type": "reader", "state": "ended"}),
             Self::Chat {
                 number,
                 from,
@@ -147,20 +177,18 @@ impl Event {
                 sent_at,
                 gathered_at,
                 by_agent,
-            } => {
-                let mut chat = json!({
+            } => with(
+                json!({
                     "type": "chat",
                     "number": number,
                     "from": from,
                     "text": text,
                     "sent_at": sent_at,
                     "gathered_at": gathered_at,
-                });
-                if let (true, Value::Object(fields)) = (by_agent, &mut chat) {
-                    fields.insert("by".to_string(), json!("agent"));
-                }
-                chat
-            }
+                }),
+                "by",
+                by_agent.then_some("agent"),
+            ),
             Self::ChatGap { after, before } => {
                 json!({"type": "chat_gap", "after": after, "before": before})
             }
@@ -191,25 +219,23 @@ impl Event {
                 height,
                 asked,
                 of,
-            } => {
-                let mut frame = json!({
-                "type": "frame",
-                "path": path,
-                "group": group,
-                "object": object,
-                "timestamp_us": timestamp_us,
-                "width": width,
-                "height": height,
-                "asked": match asked {
-                    FrameReason::Command => "command",
-                    FrameReason::Every => "every",
-                },
-                });
-                if let (Some(of), Value::Object(fields)) = (of, &mut frame) {
-                    fields.insert("id".to_string(), json!(of));
-                }
-                frame
-            }
+            } => with(
+                json!({
+                    "type": "frame",
+                    "path": path,
+                    "group": group,
+                    "object": object,
+                    "timestamp_us": timestamp_us,
+                    "width": width,
+                    "height": height,
+                    "asked": match asked {
+                        FrameReason::Command => "command",
+                        FrameReason::Every => "every",
+                    },
+                }),
+                "id",
+                of.as_deref(),
+            ),
             Self::Speech {
                 number,
                 from,
@@ -242,8 +268,23 @@ mod tests {
 
     /// The event of each row of `fixtures/agent-lines/lines.tsv`, by its
     /// name.
-    fn shared_events() -> [(&'static str, Event); 8] {
+    fn shared_events() -> [(&'static str, Event); 11] {
         [
+            (
+                "the reader began, in a meeting",
+                Event::Began {
+                    room: "meeting/demo".to_string(),
+                    id: Some("p1".to_string()),
+                },
+            ),
+            (
+                "the reader began, with no id",
+                Event::Began {
+                    room: "broadcast/demo".to_string(),
+                    id: None,
+                },
+            ),
+            ("the reader ended", Event::Ended),
             (
                 "a participant came",
                 Event::Participant {

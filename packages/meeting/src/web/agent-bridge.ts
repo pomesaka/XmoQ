@@ -32,6 +32,10 @@ export interface AgentBridgeOptions {
 	folder: AgentFolder;
 	/** The page's name in the chat, under which the agent's lines come back. */
 	name: string;
+	/** The chat's room, `meeting/<room>`, which the first line names. */
+	room: string;
+	/** The page's id in the meeting, which the first line names. */
+	id: string;
 	/** Says a line in the chat as the page; resolves with the `sentAt` it was sent with, or why it was not sent. */
 	say(text: string): Promise<{ sentAt: number } | { why: string }>;
 	/** `INBOX_EVERY_MS` when left out. */
@@ -62,7 +66,7 @@ export interface AgentBridge {
 	}): void;
 	/** A frame of `id`, which the caller still closes: the latest of each is kept for `/frame`. */
 	frame(id: string, frame: VideoFrame, at: FrameOrigin | undefined): void;
-	/** Stops reading the inbox; what was written stays. */
+	/** Stops reading the inbox, and writes the last line; what was written stays. */
 	stop(): void;
 }
 
@@ -82,6 +86,7 @@ interface Latest {
 export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
 	const { folder } = options;
 	const write = (event: AgentEvent): void => folder.write(event);
+	write({ type: "reader", state: "began", room: options.room, id: options.id });
 	const latest = new Map<string, Latest>();
 	/** The participant whose words came last, for `/frame` alone. */
 	let spokeLast: string | undefined;
@@ -262,7 +267,9 @@ export function createAgentBridge(options: AgentBridgeOptions): AgentBridge {
 			kept.at = at;
 		},
 		stop() {
+			if (stopped) return;
 			stopped = true;
+			write({ type: "reader", state: "ended" });
 		},
 	};
 }

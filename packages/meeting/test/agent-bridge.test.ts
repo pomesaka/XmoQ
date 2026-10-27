@@ -26,6 +26,8 @@ function folderOf(inbox: { now: string }): {
 			path: "demo/me",
 			began: 0,
 			write(event) {
+				// The first and the last line are the test below's.
+				if (event.type === "reader") return;
 				// The line as the page writes it, without its clock.
 				written.push(agentLine(event, 0).replace(/"at":0,?/, ""));
 			},
@@ -95,6 +97,8 @@ test.each<{
 	const bridge = createAgentBridge({
 		folder,
 		name: "me",
+		room: "meeting/demo",
+		id: "me",
 		async say(text) {
 			sayings.push(text);
 			return text === "too fast" ? { why: "kept back" } : { sentAt: 1 };
@@ -120,7 +124,9 @@ test("an inbox that cannot be read is written of once while it goes on", async (
 		folder: {
 			path: "demo/me",
 			began: 0,
-			write: (event) => written.push(event.type),
+			write: (event) => {
+				if (event.type !== "reader") written.push(event.type);
+			},
 			async writeFile() {},
 			async readInbox() {
 				reads += 1;
@@ -129,6 +135,8 @@ test("an inbox that cannot be read is written of once while it goes on", async (
 			},
 		},
 		name: "me",
+		room: "meeting/demo",
+		id: "me",
 		say: async () => ({ sentAt: 1 }),
 		sleep: () =>
 			new Promise((resolve) => {
@@ -195,6 +203,8 @@ test.each<{
 			readInbox: async () => utf8(inbox.now),
 		},
 		name: "me",
+		room: "meeting/demo",
+		id: "me",
 		say: async () => ({ sentAt: 5 }),
 		sleep: () =>
 			new Promise((resolve) => {
@@ -210,4 +220,33 @@ test.each<{
 	}
 	bridge.stop();
 	expect(marked).toEqual(byAgent);
+});
+
+test("the first line names the room and the page's id, and the last is written once, at stop", async () => {
+	const written: string[] = [];
+	const bridge = createAgentBridge({
+		folder: {
+			path: "demo/me",
+			began: 0,
+			write: (event) => {
+				written.push(agentLine(event, 0).replace(/"at":0,?/, ""));
+			},
+			async writeFile() {},
+			readInbox: async () => new Uint8Array(),
+		},
+		name: "me",
+		room: "meeting/demo",
+		id: "me",
+		say: async () => ({ sentAt: 1 }),
+		sleep: () => new Promise(() => {}),
+	});
+	bridge.participant("joined", "p1");
+	bridge.stop();
+	bridge.stop();
+	await settle();
+	expect(written).toEqual([
+		'{"id":"me","room":"meeting/demo","state":"began","type":"reader"}',
+		'{"id":"p1","state":"joined","type":"participant"}',
+		'{"state":"ended","type":"reader"}',
+	]);
 });
