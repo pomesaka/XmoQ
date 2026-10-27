@@ -51,6 +51,7 @@ function word(step: VideoSenderStep): string {
 			return [
 				`${step.groupId},${step.objectId}`,
 				`s${step.subgroupId}`,
+				...(step.status === undefined ? [] : [step.status]),
 				...(step.opensStream ? ["open"] : []),
 				...(step.closesStream ? ["close"] : []),
 			].join(" ");
@@ -63,7 +64,7 @@ function word(step: VideoSenderStep): string {
 	}
 }
 
-/** What each chunk gives, the steps of one chunk joined by "; ". "end" in place of a chunk ends the Group as the track ends, "fail" as an Object could not be written. */
+/** What each chunk gives, the steps of one chunk joined by "; ". "end" in place of a chunk ends the Group as the track ends, "fail" as an Object could not be written, "pause" as the source stopped. */
 function after(chunks: string[], mapping?: VideoStreamMapping): string[] {
 	const sender = createVideoSender(
 		mapping === undefined ? OPTIONS : { ...OPTIONS, mapping },
@@ -73,7 +74,9 @@ function after(chunks: string[], mapping?: VideoStreamMapping): string[] {
 			? sender.endGroup("track-ended")
 			: token === "fail"
 				? sender.endGroup("write-failed")
-				: sender.push(chunkOf(token))
+				: token === "pause"
+					? sender.endGroup("paused")
+					: sender.push(chunkOf(token))
 		)
 			.map(word)
 			.join("; "),
@@ -121,6 +124,33 @@ describe("createVideoSender: which Object a chunk is, and on which stream", () =
 				"close5; 6,0 s0 open",
 				"6,1 s0",
 			],
+		},
+		{
+			name: "a pause ends the Group with an Object of End of Group on its stream, which is finished; delta chunks after it are not sent, and a key chunk begins the next Group",
+			chunks: ["k", "d", "pause", "d", "k"],
+			steps: [
+				"5,0 s0 open",
+				"5,1 s0",
+				"5,2 s0 EndOfGroup; close5",
+				"skip:no-key-frame",
+				"6,0 s0 open",
+			],
+		},
+		{
+			name: "with a stream for every Object, the Object of End of Group has a stream of its own",
+			mapping: "stream-per-object",
+			chunks: ["k", "d", "pause", "k"],
+			steps: [
+				"5,0 s0 open close",
+				"5,1 s1 open close",
+				"5,2 s2 EndOfGroup open close",
+				"6,0 s0 open close",
+			],
+		},
+		{
+			name: "a pause where no Group is being sent does nothing, a second pause as well",
+			chunks: ["pause", "k", "pause", "pause"],
+			steps: ["", "5,0 s0 open", "5,1 s0 EndOfGroup; close5", ""],
 		},
 		{
 			name: "a delta chunk before the first key chunk is not sent, and takes no Group ID",

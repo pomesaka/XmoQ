@@ -8,13 +8,14 @@ What stands between a LOC video or audio track and the codecs of a browser: from
 - **The Timestamp of LOC is wall-clock time in microseconds, without a Timescale**, so **the catalog of a track this package sends has no `timescale`** (MSF §5.2.21): a receiver given one reads these Timestamps in that unit. The catalog is the caller's to write.
 - **The catalog of a video track says `avc3.…`** with the profile and level the encoder was configured with. Why, at `codec` of `createVideoTrackEncoder`.
 - The rules of the playout that the terminal viewer (`crates/watch`) shares are the rows of [`fixtures/playout/`](../../fixtures/playout/README.md).
+- **A source that stops sends nothing** (`pause` of `createVideoTrackEncoder` and `createAudioTrackEncoder`): the video Group under way ends with an End of Group, and the next begins with a key frame; the times after a pause are later by the time it lasted, so a viewer plays what comes after a silence when it is due.
 
 ## Not met
 
 - **An Object after an End of Group or an End of Track cancels nothing** (transport §2.4.2, MUST). The receiver cannot tell it from the case §2.1 has as no error, and only drops the Object; `@xmoq/moqt` finds one only on the same subgroup stream.
 - **Of what a publisher can say about Objects that do not exist, only the Object Status is read.** The END_OF_GROUP bit of a subgroup stream does not reach the receiver, and the Prior Group ID Gap and Prior Object ID Gap properties (transport §12.8, §12.9) are passed over: a Group with a gap its publisher announced is given up like one with a loss.
 - **After a restart the sender does not say which Groups it left out** (MSF §6.1, SHOULD: the Prior Group ID Gap).
-- **A Group that was cut short is not marked as ended**: the sender gives no End of Group.
+- **A Group that was cut short is not marked as ended**: the sender gives no End of Group. One that ends because its source stopped is (`pause` of the encoders).
 - **The end of the subscription is not told to the receiver** (PUBLISH_DONE with TRACK_ENDED, which MSF §11.3 ends a broadcast with). That is for what connects it.
 - No Audio Config or Audio Level of LOC, and no `description` is sent or given to an audio decoder (Chromium's encoder gives one of 19 bytes; whether it is to travel is undecided).
 

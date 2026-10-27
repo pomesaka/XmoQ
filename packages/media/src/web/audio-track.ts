@@ -18,6 +18,7 @@ import {
 } from "../core/delivery-timeout.ts";
 import { createFastestWay } from "../core/fastest-way.ts";
 import { createInOrder } from "../core/in-order.ts";
+import { createPauses } from "../core/pauses.ts";
 import { createStamp, type StampClock } from "../core/stamp.ts";
 import {
 	type AudioTrackPublisher,
@@ -70,6 +71,13 @@ export interface AudioTrackEncoder {
 	readonly publisher: AudioTrackPublisher;
 	/** Takes the next audio of the source and **closes it**. */
 	encode(data: AudioData): void;
+	/**
+	 * The source stopped (a microphone muted): nothing is handed until it
+	 * comes back, and the time it stood still, by its own times, is put into
+	 * the times of the chunks after (`createPauses`). With one chunk a Group
+	 * (the default), no stream stays open meanwhile.
+	 */
+	pause(): void;
 	/** Flushes and closes the encoder, and ends the track. Never rejects. */
 	end(): Promise<void>;
 	stats(): AudioTrackEncoderStats;
@@ -132,10 +140,14 @@ export async function createAudioTrackEncoder(
 	const stamp = createStamp(options.clock ?? "first", Number(epoch));
 	/** The time of the first `AudioData`, and how many frames of audio were handed to the encoder since. */
 	let handed: { firstUs: number; frames: number } | undefined;
+	/** The times the source stood still (`pause`), put back into the chunks' times. */
+	const pauses = createPauses();
+	/** `pause` was called, and no `AudioData` was handed since. */
+	let paused = false;
 	let closed = false;
 	const encoder = new AudioEncoder({
 		output: (chunk, metadata) => {
-			const wall = stamp.of(chunk.timestamp);
+			const wall = stamp.of(chunk.timestamp + pauses.shift(chunk.timestamp));
 			if (wall === undefined) return;
 			const description = metadata?.decoderConfig?.description;
 			if (stats.encoded === 0) {
@@ -165,16 +177,19 @@ export async function createAudioTrackEncoder(
 			try {
 				if (closed) return;
 				handed ??= { firstUs: data.timestamp, frames: 0 };
+				const counted =
+					handed.firstUs + (handed.frames * 1_000_000) / data.sampleRate;
+				if (paused) {
+					paused = false;
+					pauses.resumed(counted, data.timestamp);
+				}
 				// WHY counted and not `data.timestamp`: the encoder numbers
 				// its chunks from the first time by the samples it was given
 				// (Chromium 156, seen 2026-10-13: a source whose times ran
 				// 1,000 ppm fast had chunks whose times did not), and it is
 				// the chunks' times that are stamped. A microphone's times
 				// and its samples need not keep the same pace.
-				stamp.take(
-					handed.firstUs + (handed.frames * 1_000_000) / data.sampleRate,
-					Date.now(),
-				);
+				stamp.take(counted + pauses.shift(counted), Date.now());
 				handed.frames += data.numberOfFrames;
 				encoder.encode(data);
 				stats.submitted += 1;
@@ -185,6 +200,9 @@ export async function createAudioTrackEncoder(
 			} finally {
 				data.close();
 			}
+		},
+		pause() {
+			paused = true;
 		},
 		async end() {
 			const wasOpen = !closed;

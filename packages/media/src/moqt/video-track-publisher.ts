@@ -140,6 +140,19 @@ export interface VideoTrackPublisher {
 	/** Takes the next chunk of the encoder. Does not wait for the write, and does not throw. */
 	push(chunk: VideoChunk): VideoPushResult;
 	/**
+	 * The source stopped (a camera turned off): the Group that is being sent
+	 * ends now, with an Object of End of Group after what is queued of it,
+	 * and its stream is finished (`endGroup("paused")` of the sender). The
+	 * next chunk that is sent is a key chunk, which begins the next Group.
+	 *
+	 * WHY ended, and not left open until the source comes back: a subgroup
+	 * stream that sends nothing is stopped by its peer after
+	 * `idle-subgroup-stream-ms` (`fixtures/limits/`), and the relay passes
+	 * that on as a reset; and the receiver would hold the Group as one that
+	 * goes on.
+	 */
+	pause(): void;
+	/**
 	 * Ends the track: what is queued is written, and the subscription gets
 	 * PUBLISH_DONE (TRACK_ENDED). A SUBSCRIBE after it is refused with
 	 * DOES_NOT_EXIST, and a chunk is not sent. Never rejects.
@@ -365,6 +378,7 @@ export function createVideoTrackPublisher(
 				objectId: step.objectId,
 				payload: step.payload,
 				properties: step.properties,
+				...(step.status === undefined ? {} : { status: step.status }),
 			});
 			stats.written += 1;
 			if (step.closesStream) await writer.close();
@@ -547,6 +561,20 @@ export function createVideoTrackPublisher(
 			return skipped === undefined
 				? { askForKeyFrame }
 				: { skipped, askForKeyFrame };
+		},
+
+		pause() {
+			if (ended !== undefined) return;
+			const steps = sender.endGroup("paused");
+			// The sender is in no Group now.
+			needsKey = true;
+			const to = subscriber;
+			for (const step of steps) {
+				if (step.type === "object") {
+					largest = { group: step.groupId, object: step.objectId };
+				}
+				if (to !== undefined && !to.silent && to.started) queueStep(to, step);
+			}
 		},
 
 		end() {
