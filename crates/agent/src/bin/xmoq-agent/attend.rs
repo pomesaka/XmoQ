@@ -20,8 +20,8 @@ use xmoq_moqt::message::request_error_code;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::Parameter;
 use xmoq_moqt::session::{
-    ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequestId, RequestEvent, RequestId,
-    Role, Session, Transport,
+    ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequestId, RequestId, Role, Session,
+    Transport,
 };
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::client::{self, UntilClosed};
@@ -33,7 +33,7 @@ use xmoq_moqt_io::{
 use xmoq_msf::CatalogTrack;
 use xmoq_subscriber::catalog::{Became, FollowedCatalog};
 use xmoq_subscriber::follow::{Asking, FollowOutcome, Follower, RENDEZVOUS_MS, Track};
-use xmoq_subscriber::namespaces::KeptNamespace;
+use xmoq_subscriber::namespaces::{KeptNamespace, NamespaceOutcome};
 use xmoq_subscriber::session::{
     self, Events, GoingAway, GoneAway, Requests, new_url, timestamp_of,
 };
@@ -170,13 +170,6 @@ impl Chat {
         self.watch_again_in(reader, how, pause);
     }
 
-    /// The `SUBSCRIBE_NAMESPACE` was refused: asked for again after the wait
-    /// its Retry Interval names (`named_ms`).
-    fn watch_refused(&mut self, reader: &mut Reader, how: &str, named_ms: Option<u64>) {
-        let pause = self.kept.refused(named_ms, std::time::Instant::now());
-        self.watch_again_in(reader, how, pause);
-    }
-
     fn watch_again_in(&mut self, reader: &mut Reader, how: &str, pause: u64) {
         if let Some(watching) = self.watching.take() {
             watching.cancel();
@@ -186,71 +179,59 @@ impl Chat {
         ));
     }
 
-    /// What came on the stream of the `SUBSCRIBE_NAMESPACE`.
+    /// What came on the stream of the `SUBSCRIBE_NAMESPACE`. `Some` where
+    /// the session is to end for it.
     ///
-    /// FIXME: one reading of the stream of a `SUBSCRIBE_NAMESPACE` for this
-    /// and for the other (`meeting::InMeeting::on_watching`), where only more namespaces than the
-    /// session keeps ask again, and any other message that breaks the
-    /// protocol closes the session. When it is asked again is
-    /// `KeptNamespace` of `xmoq-subscriber` already.
+    /// # Errors
+    ///
+    /// A message that breaks the protocol: the session is to be closed with
+    /// its code.
     fn on_watching(
         &mut self,
         session: &mut Session,
         reader: &mut Reader,
         event: Result<RequestStreamEvent, xmoq_moqt_io::RequestReadError>,
-    ) -> Option<Ended> {
-        let request = self.watching.as_ref().map(|watching| watching.request)?;
-        let message = match event {
-            Ok(RequestStreamEvent::Message(message)) => message,
-            Ok(RequestStreamEvent::Closed(closed)) => {
-                session.cancel(request);
-                self.watch_failed(reader, &format!("the relay closed it ({closed:?})"));
-                return None;
-            }
-            // §10.18: a reset is as though each namespace got NAMESPACE_DONE;
-            // those not told of again are taken to have left when the next
-            // one settles.
-            Err(error) => {
-                session.cancel(request);
-                reader.presence.session_ended();
-                self.watch_failed(reader, &format!("{error}"));
-                return None;
-            }
+    ) -> Result<Option<Ended>, xmoq_moqt::Error> {
+        let Some(request) = self.watching.as_ref().map(|watching| watching.request) else {
+            return Ok(None);
         };
-        match session.on_request_message(request, message) {
-            Ok(RequestEvent::NamespacesSubscribed) => {
-                self.kept.subscribed();
+        match self
+            .kept
+            .on_stream(session, request, event, std::time::Instant::now())?
+        {
+            NamespaceOutcome::Subscribed => {
                 self.settle_at =
                     Some(tokio::time::Instant::now() + Duration::from_millis(SETTLE_MS));
             }
-            Ok(RequestEvent::Namespace(namespace)) => {
+            NamespaceOutcome::Namespace(namespace) => {
                 if let Some(event) = person_of_namespace(&namespace)
                     .and_then(|person| reader.presence.named(&person))
                 {
                     reader.tell(&event);
                 }
             }
-            Ok(RequestEvent::NamespaceDone(namespace)) => {
+            NamespaceOutcome::Done(namespace) => {
                 if let Some(event) =
                     person_of_namespace(&namespace).and_then(|person| reader.presence.done(&person))
                 {
                     reader.tell(&event);
                 }
             }
-            Ok(RequestEvent::Rejected(error)) => {
-                session.cancel(request);
-                let how = format!("refused with {:#x}", error.error_code);
-                self.watch_refused(reader, &how, error.retry_wait_ms());
+            // Those not told of again are taken to have left when the next
+            // one settles.
+            NamespaceOutcome::Ended { how, pause_ms } => {
+                reader.presence.session_ended();
+                self.watch_again_in(reader, &how, pause_ms);
             }
-            Ok(RequestEvent::GoAway(go_away)) => return Some(Ended::Moved(new_url(&go_away))),
-            Ok(other) => reader.error(format!("who is in the chat: {other:?}")),
-            // More namespaces than the session keeps end that request alone.
-            Err(error) => {
-                session.cancel(request);
-                self.watch_failed(reader, &format!("{error}"));
+            NamespaceOutcome::Refused { how, pause_ms } => {
+                self.watch_again_in(reader, &how, pause_ms);
+            }
+            NamespaceOutcome::Moved(go_away) => return Ok(Some(Ended::Moved(new_url(&go_away)))),
+            NamespaceOutcome::Other(other) => {
+                reader.error(format!("who is in the chat: {other:?}"));
             }
         }
-        None
+        Ok(None)
     }
 }
 
@@ -882,7 +863,7 @@ pub async fn attend(
                 reader.had = chat.tracks.last_shown();
             }
             event = on(watching.as_mut().map(|watching| watching.reader.next_event())) => {
-                if let Some(ended) = chat.on_watching(&mut session, reader, event) {
+                if let Some(ended) = chat.on_watching(&mut session, reader, event)? {
                     break ended;
                 }
             }
