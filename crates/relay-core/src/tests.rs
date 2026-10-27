@@ -9,10 +9,12 @@ use xmoq_moqt::message::{
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::Parameter;
 
+mod answers;
 mod cache;
 mod fetch;
 mod filters;
 mod going_away;
+mod malformed;
 mod new_group;
 mod parent;
 mod receipt;
@@ -1295,9 +1297,10 @@ fn a_malformed_track_is_cancelled_upstream_and_ended_downstream() {
 /// `END_OF_TRACK`.
 type Objects = &'static [(u64, u64, bool)];
 
-/// §2.4.2, the fifth example: an Object larger than the one with the status
-/// `END_OF_TRACK` makes the track malformed, whichever of the two the relay
-/// reads first; the relay cancels the source with `MALFORMED_TRACK` (0x12).
+/// An Object past the end of a track (relay). §2.4.2, the fifth example: an
+/// Object larger than the one with the status `END_OF_TRACK` makes the track
+/// malformed, whichever of the two the relay reads first; the relay cancels
+/// the source with `MALFORMED_TRACK` (0x12).
 #[test]
 fn an_object_past_the_end_of_the_track_makes_it_malformed() {
     let end_of_track = |object_id: u64| SubgroupObject {

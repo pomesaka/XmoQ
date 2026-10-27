@@ -51,6 +51,10 @@ pub(crate) const MAX_FETCHES_PER_SESSION: usize = 16;
 /// publisher may have open towards the relay (64). Slow subscribers with
 /// many FETCH requests would otherwise use up all of them, and the publisher could
 /// open no subgroup stream for anybody. Provisional.
+///
+/// §13.1 has a publisher "enforce limits to prevent resource exhaustion",
+/// and gives no number. Held by
+/// `the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`.
 pub(crate) const MAX_OWN_FETCHES_PER_SESSION: usize = 16;
 
 /// Of those, how many the relay has open on one publisher for the FETCH
@@ -198,6 +202,10 @@ pub(crate) const FETCH_PEER_END_WAIT_MS: u64 = 3_000;
 ///
 /// WHY a limit: the answers are sent in one go when the publisher's comes,
 /// and how many there are is the subscriber's to choose. Provisional.
+///
+/// §10.9 has "The receiver of a `REQUEST_UPDATE` MUST respond with exactly
+/// one `REQUEST_OK` or `REQUEST_ERROR` message", and no number. Held by
+/// `the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`.
 pub(crate) const MAX_HELD_FETCH_UPDATES: u32 = 64;
 
 /// How far the passing on of the publisher's fetch stream has come.
@@ -680,6 +688,8 @@ fn upstream_parameters(parameters: &[Parameter]) -> Vec<Parameter> {
 /// is for so many Groups before the live edge, and the Groups that exist are
 /// what can be had of that. Refusing it with `INVALID_RANGE` would be the
 /// other reading.
+///
+/// Held by `a_joining_fetch_becomes_a_range_counted_from_the_joining_location`.
 fn joining_range(range: &FetchRange, joining: Location) -> Option<(Location, Location)> {
     let start_group = match range {
         FetchRange::RelativeJoining { joining_start, .. } => {
@@ -3058,7 +3068,8 @@ fn acknowledge_updates(
 /// not the subscriber's business: that the publisher is going becomes
 /// `UNKNOWN_OBJECT_STATUS`, which is what it means for the rest of the
 /// range, and the others, with any code unknown here and a reset the
-/// transport gave no code for, become `INTERNAL_ERROR`.
+/// transport gave no code for, become `INTERNAL_ERROR`. Held by
+/// `the_reset_of_a_publishers_fetch_stream_is_passed_on_where_it_says_something`.
 #[must_use]
 pub fn fetch_reset_passed_on(code: Option<u32>) -> u32 {
     use stream_reset_code as reset;

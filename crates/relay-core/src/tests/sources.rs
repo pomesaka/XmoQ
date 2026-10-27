@@ -473,10 +473,8 @@ fn a_track_takes_only_so_many_sources() {
     );
     let counts = relay.counts();
     assert_eq!((counts.sources, counts.early_streams), (4, 0));
-    // Once a source is gone, there is room again: the fifth asks anew.
-    // (The relay's REQUEST_ERROR had Retry Interval 0, which reads as "do not
-    // retry"; that it says so here is a known gap, and a publisher that
-    // asks again all the same is what shows that the room is there.)
+    // Once a source is gone, there is room again: the fifth asks anew, as
+    // the Retry Interval of the relay's REQUEST_ERROR (1,001) lets it.
     relay.step(Event::SessionClosed { session: BOB });
     assert_eq!(
         relay.step(Event::RequestOpened {
@@ -2305,6 +2303,8 @@ fn a_subgroup_that_another_source_sends_with_another_priority_makes_the_track_ma
     );
 }
 
+/// A Subgroup that comes again with another Publisher Priority (relay), and a
+/// malformed track that has several sources.
 #[test]
 fn a_subgroup_that_comes_again_with_another_priority_makes_the_track_malformed() {
     #[derive(Debug, Clone, Copy)]
@@ -2372,6 +2372,7 @@ fn a_subgroup_that_comes_again_with_another_priority_makes_the_track_malformed()
     }
 }
 
+/// A Subgroup that comes again with another Publisher Priority (relay).
 #[test]
 fn the_priority_of_a_subgroup_is_the_one_in_its_header_or_the_default_of_its_source() {
     // (the DEFAULT PUBLISHER PRIORITY of the publisher's PUBLISH and the

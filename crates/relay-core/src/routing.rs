@@ -103,6 +103,12 @@ pub const ANNOUNCEMENT_EVERY_MS: u64 = 1_000;
 
 /// Subscribers that may wait for one upstream SUBSCRIBE to be answered. One
 /// more is refused with `EXCESSIVE_LOAD`. Provisional.
+///
+/// §9.4 lets them wait on one request: "Subscription aggregation allows
+/// relays to make only a single upstream subscription for the Track". WHY
+/// a limit, which the draft does not give: each one that waits is answered
+/// when the answer comes. Held by
+/// `the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`.
 pub const MAX_WAITING_SUBSCRIBERS: usize = 64;
 
 /// The longest the relay holds a SUBSCRIBE for a publisher to appear, in
@@ -599,6 +605,8 @@ impl Refusal {
     /// publisher that does not serve SUBSCRIBE or is going away would tell
     /// the subscriber never to ask the relay again for a track another
     /// publisher may bring.
+    ///
+    /// Held by `a_publishers_error_code_is_passed_on_or_replaced`.
     pub(crate) fn passed_on(error: &RequestError, asked: OwnRequestKind) -> Self {
         use request_error_code as code;
         let error_code = match error.error_code {
@@ -904,6 +912,12 @@ impl Relay {
             if asked.asks.len() >= room {
                 break;
             }
+            // §13.1: "Publishers SHOULD monitor the number of active
+            // subscriptions and enforce limits to prevent resource
+            // exhaustion from a single subscriber or session". Passed over;
+            // where nobody else is asked, the subscriber gets
+            // `EXCESSIVE_LOAD`, also with `RENDEZVOUS_TIMEOUT`
+            // (`the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`).
             if asked_for.get(&publisher).copied().unwrap_or(0) >= self.requests_for_one {
                 asked
                     .nobody_because
@@ -1247,7 +1261,8 @@ impl Relay {
         // response to a FETCH" alone. WHY it for a SUBSCRIBE too: as for a
         // PUBLISH that the session refuses, the subscriber is told why
         // (`xmoq_moqt::session`); no subscriber has the track yet, so there
-        // is no PUBLISH_DONE to send (§2.4.2).
+        // is no PUBLISH_DONE to send (§2.4.2). Held by
+        // `an_answer_whose_track_the_relay_cannot_take_is_cancelled_and_its_subscriber_refused`.
         let (code, refused) = match refusal {
             TrackRefusal::Malformed => (
                 stream_reset_code::MALFORMED_TRACK,

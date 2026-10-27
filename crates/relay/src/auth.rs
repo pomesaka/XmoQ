@@ -256,6 +256,7 @@ fn allows_under(named: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use ring::hmac;
+    use xmoq_moqt::message::ControlMessage;
 
     use super::*;
 
@@ -566,6 +567,186 @@ mod tests {
                 off,
                 closed.filter(|code| matches!(code, 0x3 | 0x6)),
                 "{tokens:?}"
+            );
+        }
+    }
+
+    /// What the relay does about a request of a session.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        /// Answered with `REQUEST_OK`.
+        Accepted,
+        /// Refused with this Error Code.
+        Refused(u64),
+        /// The session is closed with this code.
+        Closed(u32),
+        /// Not answered yet.
+        Held,
+    }
+
+    /// A relay with the room's key, and a client's session that sent no
+    /// SETUP; the session's first request, with these tokens.
+    fn the_relay_answers(first: ControlMessage) -> Outcome {
+        use xmoq_relay_core::{Action, Event, Relay, SessionKey, StreamKey};
+        let mut relay = Relay::new("test/0");
+        relay.set_authorizer(room(false));
+        relay.handle(Event::SessionOpened {
+            session: SessionKey(1),
+            role: xmoq_relay_core::Role::Server,
+        });
+        let actions = relay.handle(Event::RequestOpened {
+            session: SessionKey(1),
+            stream: StreamKey(0),
+            first,
+        });
+        let outcome = actions.iter().find_map(|action| match action {
+            Action::SendRequest {
+                message: ControlMessage::RequestOk(_),
+                ..
+            } => Some(Outcome::Accepted),
+            Action::SendRequest {
+                message: ControlMessage::RequestError(error),
+                ..
+            } => Some(Outcome::Refused(error.error_code)),
+            Action::CloseSession { code, .. } => Some(Outcome::Closed(*code)),
+            _ => None,
+        });
+        outcome.unwrap_or(Outcome::Held)
+    }
+
+    /// The relay's authorization, when it is given a key, and the Alias
+    /// Types of a token: which request needs which token, and what one that
+    /// does not have it gets. Which tokens allow which operation in which
+    /// namespace is in the tests above.
+    #[test]
+    fn each_request_needs_a_token_for_its_operation_and_its_namespace() {
+        use xmoq_moqt::message::{Fetch, FetchRange, Publish, PublishNamespace, Subscribe};
+        use xmoq_moqt::name::{FullTrackName, Location};
+        let blue = || TrackNamespace::new(vec![b"rooms".to_vec(), b"blue".to_vec()]).unwrap();
+        let in_blue = || FullTrackName::new(blue(), b"t".to_vec()).unwrap();
+        let with = |signed: Option<&str>| -> Vec<Parameter> {
+            signed
+                .map(|signed| Parameter::AuthorizationToken(token(KEY, signed)))
+                .into_iter()
+                .collect()
+        };
+        let at = |group| Location { group, object: 0 };
+        // Each kind of request, with the tokens it carries.
+        let publish = |signed| {
+            ControlMessage::Publish(Publish {
+                request_id: 0,
+                full_track_name: in_blue(),
+                track_alias: 1,
+                parameters: with(signed),
+                track_properties: vec![],
+            })
+        };
+        let publish_namespace = |signed| {
+            ControlMessage::PublishNamespace(PublishNamespace {
+                request_id: 0,
+                track_namespace: blue(),
+                parameters: with(signed),
+            })
+        };
+        let subscribe = |signed| {
+            ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: in_blue(),
+                parameters: with(signed),
+            })
+        };
+        let track_status = |signed| {
+            ControlMessage::TrackStatus(Subscribe {
+                request_id: 0,
+                full_track_name: in_blue(),
+                parameters: with(signed),
+            })
+        };
+        let subscribe_namespace = |signed| {
+            ControlMessage::SubscribeNamespace(xmoq_moqt::message::SubscribeNamespace {
+                request_id: 0,
+                track_namespace_prefix: blue(),
+                parameters: with(signed),
+            })
+        };
+        let fetch = |signed| {
+            ControlMessage::Fetch(Fetch {
+                request_id: 0,
+                range: FetchRange::Standalone {
+                    full_track_name: in_blue(),
+                    start: at(0),
+                    end: at(1),
+                },
+                parameters: with(signed),
+            })
+        };
+        // Of the SUBSCRIBE with the Request ID 0, which the session has not
+        // sent yet.
+        let joining_fetch = |signed| {
+            ControlMessage::Fetch(Fetch {
+                request_id: 2,
+                range: FetchRange::RelativeJoining {
+                    joining_request_id: 0,
+                    joining_start: 0,
+                },
+                parameters: with(signed),
+            })
+        };
+        let pub_blue = Some("v1|rooms/blue|pub|1800000060");
+        let sub_blue = Some("v1|rooms/blue|sub|1800000060");
+        let sub_under_blue = Some("v1|rooms/blue/*|sub|1800000060");
+        let sub_red = Some("v1|rooms/red|sub|1800000060");
+        // UNAUTHORIZED (0x1). Where the token allows the request, what
+        // follows is the relay's answer to it: there is no track rooms/blue/t
+        // (DOES_NOT_EXIST, 0x10), and the Joining FETCH waits for the
+        // SUBSCRIBE it names.
+        //
+        // (the request; the relay's answer)
+        let cases = [
+            (publish(pub_blue), Outcome::Accepted),
+            (publish(sub_blue), Outcome::Refused(0x1)),
+            (publish(None), Outcome::Refused(0x1)),
+            (publish_namespace(pub_blue), Outcome::Accepted),
+            (publish_namespace(sub_blue), Outcome::Refused(0x1)),
+            (subscribe(sub_blue), Outcome::Refused(0x10)),
+            (subscribe(pub_blue), Outcome::Refused(0x1)),
+            (subscribe(None), Outcome::Refused(0x1)),
+            (track_status(sub_blue), Outcome::Refused(0x10)),
+            (track_status(pub_blue), Outcome::Refused(0x1)),
+            (fetch(sub_blue), Outcome::Refused(0x10)),
+            (fetch(pub_blue), Outcome::Refused(0x1)),
+            (subscribe_namespace(sub_under_blue), Outcome::Accepted),
+            (subscribe_namespace(sub_blue), Outcome::Refused(0x1)),
+            // A Joining FETCH names no namespace: a token for subscribing in
+            // any.
+            (joining_fetch(sub_red), Outcome::Held),
+            (joining_fetch(pub_blue), Outcome::Refused(0x1)),
+            (joining_fetch(None), Outcome::Refused(0x1)),
+        ];
+        for (first, outcome) in cases {
+            assert_eq!(the_relay_answers(first.clone()), outcome, "{first:?}");
+        }
+        // §10.2.2 has a message rejected with a code that only ends
+        // sessions: the session is closed with UNKNOWN_AUTH_TOKEN_ALIAS
+        // (0x17), for a request of every kind.
+        let use_alias = vec![Parameter::AuthorizationToken(vec![0x02, 0x01])];
+        let with_alias = [
+            ControlMessage::Subscribe(Subscribe {
+                request_id: 0,
+                full_track_name: in_blue(),
+                parameters: use_alias.clone(),
+            }),
+            ControlMessage::PublishNamespace(PublishNamespace {
+                request_id: 0,
+                track_namespace: blue(),
+                parameters: use_alias,
+            }),
+        ];
+        for first in with_alias {
+            assert_eq!(
+                the_relay_answers(first.clone()),
+                Outcome::Closed(0x17),
+                "{first:?}"
             );
         }
     }

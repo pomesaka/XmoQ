@@ -17,6 +17,10 @@ use crate::{Action, Relay, RequestSlot, SessionKey, StreamKey};
 /// more is refused with `EXCESSIVE_LOAD`. Decided on 2026-10-24. WHY a limit: each
 /// is looked at with every announcement and every withdrawal, and keeps the
 /// namespaces it was told of.
+///
+/// §13.1 has relays "MAY reject excessive subscriptions with `REQUEST_ERROR`
+/// using the `EXCESSIVE_LOAD` error code", and gives no number. Held by
+/// `the_relay_refuses_a_request_with_the_code_and_retry_interval_of_its_situation`.
 pub const MAX_NAMESPACE_SUBSCRIPTIONS_PER_SESSION: usize = 8;
 
 /// Namespaces under the prefix of one `SUBSCRIBE_NAMESPACE` that the relay
@@ -24,7 +28,9 @@ pub const MAX_NAMESPACE_SUBSCRIPTIONS_PER_SESSION: usize = 8;
 /// `NAMESPACE_TOO_LARGE` (§10.6.2: "the namespace prefix matches more
 /// publishers than the relay is willing to enumerate"); one more later resets
 /// the request stream with `EXCESSIVE_LOAD` (§3.3.3), which the subscriber
-/// takes as a `NAMESPACE_DONE` for each (§10.18).
+/// takes as a `NAMESPACE_DONE` for each (§10.18). As many as a
+/// `SUBSCRIBE_NAMESPACE` of the Rust session keeps
+/// (`the_relay_tells_of_as_many_namespaces_as_a_session_keeps`).
 ///
 /// WHY 4,096: the gatherer of the chat asks for the namespaces of every room
 /// with one request, and the aim was 10 rooms of 100 people when this was set;

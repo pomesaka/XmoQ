@@ -1269,32 +1269,6 @@ fn the_relays_requests_to_a_publisher_are_counted_together() {
 }
 
 #[test]
-fn a_publishers_refusal_reaches_the_subscriber_with_its_retry_interval_and_reason() {
-    let mut relay = fetching();
-    let refusal = |error_code, retry_interval, reason: &[u8]| {
-        ControlMessage::RequestError(RequestError {
-            error_code,
-            retry_interval,
-            error_reason: ReasonPhrase::new(reason.to_vec()).unwrap(),
-            redirect: None,
-        })
-    };
-    // INVALID_RANGE (0x11) answers a FETCH and is passed on whole.
-    let actions = relay.step(Event::OwnRequestMessage {
-        session: PUBLISHER,
-        request: OWN,
-        message: refusal(0x11, 3000, b"nothing there yet"),
-    });
-    assert!(
-        actions.contains(&send(
-            FETCH_STREAM,
-            refusal(0x11, 3000, b"nothing there yet")
-        )),
-        "{actions:?}"
-    );
-}
-
-#[test]
 fn a_track_found_malformed_takes_its_fetches_with_it() {
     // Alice subscribes to the track "a" and has two FETCH requests for it,
     // one answered with its stream passed on, one not answered; and one for
@@ -1445,47 +1419,6 @@ fn a_fetch_ok_that_says_end_of_track_ends_the_track_where_it_agrees() {
     }
 }
 
-/// A publisher's `FETCH_OK` whose Track Properties keep the track from being
-/// processed: the relay's FETCH is cancelled, and Alice's refused, with
-/// `UNSUPPORTED_EXTENSION` (0x33) and `CANCELLED` (0x1) for a Mandatory Track
-/// Property (§2.5.1), with `MALFORMED_TRACK` (0x12) for Immutable Properties
-/// inside Immutable Properties (§12.7, §2.4.2, §10.6).
-#[test]
-fn a_fetch_ok_whose_track_cannot_be_processed_is_refused() {
-    let cases = [
-        (KeyValuePair::varint(0x4000, 1).unwrap(), 0x1, 0x33),
-        (
-            KeyValuePair::bytes(0x0b, vec![0x0b, 0x00]).unwrap(),
-            0x12,
-            0x12,
-        ),
-    ];
-    for (property, cancel, refused) in cases {
-        let mut relay = fetching();
-        let actions = relay.step(Event::OwnRequestMessage {
-            session: PUBLISHER,
-            request: OWN,
-            message: ControlMessage::FetchOk(FetchOk {
-                end_of_track: false,
-                end_location: at(2, 0),
-                parameters: vec![],
-                track_properties: vec![property.clone()],
-            }),
-        });
-        let expected = [
-            STOP_TIMER,
-            Action::CancelOwnRequest {
-                session: PUBLISHER,
-                request: OWN,
-                code: cancel,
-            },
-            refuse(refused),
-            FINISH,
-        ];
-        assert_eq!(actions, expected, "{property:?}");
-    }
-}
-
 #[test]
 fn known_gap_a_fetch_ok_with_a_mandatory_track_property_after_the_whole_fetch_stream_resets_nothing()
  {
@@ -1578,36 +1511,6 @@ fn a_joining_fetch_of_a_track_found_malformed_is_refused_as_that() {
 }
 
 #[test]
-fn the_reset_of_a_publishers_fetch_stream_is_passed_on_where_it_says_something() {
-    // (the publisher's Stream Reset Error Code; the subscriber's)
-    let cases = [
-        (Some(0x0), 0x0),
-        (Some(0x1), 0x1),
-        (Some(0x2), 0x2),
-        (Some(0x6), 0x6),
-        (Some(0x9), 0x9),
-        (Some(0x12), 0x12),
-        // SESSION_CLOSED and GOING_AWAY: the publisher is going, and what
-        // came next is not known. UNKNOWN_OBJECT_STATUS (0x6).
-        (Some(0x3), 0x6),
-        (Some(0x4), 0x6),
-        // TOO_FAR_BEHIND and EXPIRED_AUTH_TOKEN speak of the relay; a code
-        // draft 18 does not have, and none: INTERNAL_ERROR (0x0).
-        (Some(0x5), 0x0),
-        (Some(0x7), 0x0),
-        (Some(0x77), 0x0),
-        (None, 0x0),
-    ];
-    for (from_the_publisher, to_the_subscriber) in cases {
-        assert_eq!(
-            crate::fetch_reset_passed_on(from_the_publisher),
-            to_the_subscriber,
-            "{from_the_publisher:?}"
-        );
-    }
-}
-
-#[test]
 fn a_fetch_waits_for_only_so_many_updates() {
     assert_eq!(crate::fetch::MAX_HELD_FETCH_UPDATES, 64);
     let mut relay = fetching();
@@ -1659,6 +1562,12 @@ fn joining(relative: bool, joining_start: u64, parameters: Vec<Parameter>) -> Ev
 /// Location {5, 2}, and Alice has subscribed to it on her stream 0 with the
 /// Request ID 0 and this Forward State: her Joining Location is {5, 2}.
 fn relay_with_a_subscription(forward: bool) -> Relay {
+    relay_with_a_subscription_at(forward, at(5, 2))
+}
+
+/// The same with the largest Location `largest`, which is Alice's Joining
+/// Location.
+fn relay_with_a_subscription_at(forward: bool, largest: Location) -> Relay {
     let mut relay = relay_with_track();
     relay.step(Event::RequestOpened {
         session: PUBLISHER,
@@ -1667,7 +1576,7 @@ fn relay_with_a_subscription(forward: bool) -> Relay {
             request_id: 2,
             full_track_name: track(b"b"),
             track_alias: 41,
-            parameters: vec![Parameter::LargestObject(at(5, 2))],
+            parameters: vec![Parameter::LargestObject(largest)],
             track_properties: vec![],
         }),
     });
@@ -1686,7 +1595,7 @@ fn relay_with_a_subscription(forward: bool) -> Relay {
             StreamKey(0),
             ControlMessage::SubscribeOk(SubscribeOk {
                 track_alias: 0,
-                parameters: vec![Parameter::LargestObject(at(5, 2))],
+                parameters: vec![Parameter::LargestObject(largest)],
                 track_properties: vec![],
             })
         )]
@@ -1709,29 +1618,36 @@ fn asks_for(start: Location, end: Location) -> Vec<Action> {
 #[test]
 fn a_joining_fetch_becomes_a_range_counted_from_the_joining_location() {
     let refused = |error_code| vec![send(FETCH_STREAM, request_error(error_code)), FINISH];
-    // The Joining Location is {5, 2}: the range ends with it, End Location
-    // {5, 3} (§10.12.2.1).
+    let last = u64::MAX;
+    // A Joining FETCH in the relay: the range ends with the Joining
+    // Location, at the End Location after it (§10.12.2.1).
     //
-    // (Relative or Absolute; Joining Start; what the relay does)
+    // (the Joining Location; Relative or Absolute; Joining Start; what the
+    //  relay does)
     let cases = [
         // Relative: so many Groups before the one of the Joining Location.
-        (true, 0, asks_for(at(5, 0), at(5, 3))),
-        (true, 2, asks_for(at(3, 0), at(5, 3))),
-        (true, 5, asks_for(at(0, 0), at(5, 3))),
-        // More Groups back than there are: from Group 0.
-        (true, 9, asks_for(at(0, 0), at(5, 3))),
+        (at(5, 2), true, 0, asks_for(at(5, 0), at(5, 3))),
+        (at(5, 2), true, 2, asks_for(at(3, 0), at(5, 3))),
+        (at(5, 2), true, 5, asks_for(at(0, 0), at(5, 3))),
+        // More Groups back than there are: from Group 0, where the
+        // `moqtail` relay 0.15.0 refuses.
+        (at(5, 2), true, 9, asks_for(at(0, 0), at(5, 3))),
         // Absolute: from that Group.
-        (false, 1, asks_for(at(1, 0), at(5, 3))),
-        (false, 5, asks_for(at(5, 0), at(5, 3))),
+        (at(5, 2), false, 1, asks_for(at(1, 0), at(5, 3))),
+        (at(5, 2), false, 5, asks_for(at(5, 0), at(5, 3))),
         // A Group after the Joining Location: INVALID_RANGE (0x11).
-        (false, 6, refused(0x11)),
+        (at(5, 2), false, 6, refused(0x11)),
+        // A Joining Location at the last Object ID there is: the Object
+        // after it has no number, and End Location {5, 0} asks for the whole
+        // Group (§10.12.1), which ends with the same Object.
+        (at(5, last), true, 0, asks_for(at(5, 0), at(5, 0))),
     ];
-    for (relative, joining_start, expected) in cases {
-        let mut relay = relay_with_a_subscription(true);
+    for (largest, relative, joining_start, expected) in cases {
+        let mut relay = relay_with_a_subscription_at(true, largest);
         assert_eq!(
             relay.step(joining(relative, joining_start, vec![])),
             expected,
-            "relative: {relative}, Joining Start {joining_start}"
+            "{largest:?}, relative: {relative}, Joining Start {joining_start}"
         );
     }
 }
@@ -2880,7 +2796,8 @@ fn a_fetch_that_waits_for_nothing_is_answered_from_what_the_relay_knows() {
             (at(5, 2), at(5, 3)),
             answered(at(5, 3), unknown_through(5, 2)),
         ),
-        // Starts after the largest: INVALID_RANGE (0x11).
+        // Starts after the largest: INVALID_RANGE (0x11), as draft 18 has
+        // for a Start Location beyond the largest Object.
         (b"b", (at(5, 3), at(9, 0)), refused(0x11)),
         // A source that has published no Object: INVALID_RANGE (0x11).
         (b"a", (at(0, 0), at(9, 0)), refused(0x11)),
@@ -3241,35 +3158,6 @@ fn a_joining_fetch_asks_the_first_source_for_a_range_counted_from_the_largest_of
     assert_eq!(
         relay.step(joining(true, 0, vec![])),
         asks_for(at(9, 0), at(9, 1))
-    );
-}
-
-#[test]
-fn a_joining_location_at_the_last_object_id_ends_the_range_with_the_whole_group() {
-    // The track "b" with the largest Location {5, 2^64 - 1}: the Object after
-    // it has no number, and the End Location {5, 0} asks for the whole Group
-    // (§10.12.1), which ends with the same Object.
-    let last = at(5, u64::MAX);
-    let mut relay = relay_with_track();
-    relay.step(Event::RequestOpened {
-        session: PUBLISHER,
-        stream: StreamKey(1),
-        first: ControlMessage::Publish(Publish {
-            request_id: 2,
-            full_track_name: track(b"b"),
-            track_alias: 41,
-            parameters: vec![Parameter::LargestObject(last)],
-            track_properties: vec![],
-        }),
-    });
-    relay.step(Event::RequestOpened {
-        session: ALICE,
-        stream: StreamKey(0),
-        first: subscribe(0, b"b"),
-    });
-    assert_eq!(
-        relay.step(joining(true, 0, vec![])),
-        asks_for(at(5, 0), at(5, 0))
     );
 }
 
