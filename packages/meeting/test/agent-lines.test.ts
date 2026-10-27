@@ -4,7 +4,10 @@ import { join } from "node:path";
 import {
 	type AgentEvent,
 	agentLine,
+	eventFileName,
+	eventFileNumber,
 	framePath,
+	nextEventFile,
 } from "../src/core/agent-lines.ts";
 
 /** `fixtures/agent-lines/lines.tsv`: the name of a row, and its line. */
@@ -67,6 +70,15 @@ const EVENTS: Record<string, AgentEvent> = {
 		asked: "command",
 		id: "p1",
 	},
+	"a line the agent said": {
+		type: "chat",
+		number: 9n,
+		from: "alice",
+		text: "hi",
+		sentAt: 991n,
+		gatheredAt: 995n,
+		byAgent: true,
+	},
 	"an error": {
 		type: "error",
 		message:
@@ -82,4 +94,38 @@ test.each(rows)("%s", (name, line) => {
 	const event = EVENTS[name];
 	if (event === undefined) throw new Error(`no event for ${name}`);
 	expect(agentLine(event, 1000)).toBe(line);
+});
+
+/** `fixtures/agent-lines/event-files.tsv`, which `crates/agent/src/event_files.rs` reads too: a name, the files there before (`-` for none), the clock, and the file written. */
+const fileRows: [string, string, string, string][] = readFileSync(
+	join(
+		import.meta.dir,
+		"..",
+		"..",
+		"..",
+		"fixtures",
+		"agent-lines",
+		"event-files.tsv",
+	),
+	"utf8",
+)
+	.split("\n")
+	.filter((row) => row !== "")
+	.map((row) => {
+		const [name = "", before = "", now = "", written = ""] = row.split("\t");
+		return [name, before, now, written];
+	});
+
+test("the shared table of the files of events is read", () => {
+	expect(fileRows.length > 0).toBe(true);
+});
+
+test.each(fileRows)("%s", (_name, before, now, written) => {
+	const numbers = before
+		.split(",")
+		.filter((file) => file !== "-")
+		.map(eventFileNumber)
+		.filter((number) => number !== undefined);
+	const newest = numbers.length === 0 ? undefined : Math.max(...numbers);
+	expect(eventFileName(nextEventFile(Number(now), newest))).toBe(written);
 });

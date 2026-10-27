@@ -26,7 +26,10 @@
 //     `{"type":"participant","state":"left","id":"p2"}`, and `/frame p2`
 //     after it is answered with `frame: p2 is not in the meeting, and there
 //     are p1`.
-//   - events.jsonl has the same lines as stdout.
+//   - events.jsonl has the same lines as stdout. Changed when the reader
+//     came to write a file of `events/` a second in place of it
+//     (2026-10-27): the files of `events/`, in the order of their names,
+//     have the same lines as stdout.
 //
 // Over a GOAWAY, written before its first run (2026-10-25): the run's relay
 // names a second own relay (`--redirect-uri`), as in `agent-frames.ts`. p4
@@ -40,7 +43,7 @@
 //     of it again, and the reader kept it.
 //
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -52,6 +55,7 @@ import {
 	runDirectory,
 } from "./agent-pictures.ts";
 import {
+	agentEventFiles,
 	type LoggedProcess,
 	log,
 	MOQLIVEMOCK_SIDE_PORT_OFFSET,
@@ -245,14 +249,15 @@ async function main(): Promise<void> {
 			throw new Error(`the participant lines: ${JSON.stringify(participants)}`);
 		}
 		const written = events(agent);
-		const inFile = readFileSync(join(out, "events.jsonl"), "utf8")
-			.trim()
-			.split("\n")
-			.map((line) => line.replace(/"at":\d+,?/, ""));
-		if (JSON.stringify(inFile) !== JSON.stringify(written)) {
-			throw new Error("events.jsonl is not what stdout has");
+		// The lines of the last second are in a file a second later.
+		const inFiles = await pollFor(() => {
+			const lines = agentEventFiles(out);
+			return lines.length >= written.length ? lines : undefined;
+		}, "the files of events/ to have every line of stdout");
+		if (JSON.stringify(inFiles) !== JSON.stringify(written)) {
+			throw new Error("the files of events/ are not what stdout has");
 		}
-		summary = `through the own relay, xmoq-agent --meeting r was told of p1 and p2, answered /frame alone with "nobody has spoken", /frame p1, /frame p2 and /frame p1 again with a PNG each (${seen.join("; ")}) in ${frameLines(agent).length} frame lines, /frame p3 with "not in the meeting", and wrote p2 as left when its page closed its session; after the relay's GOAWAY it moved to the second relay, wrote p3 as joined and p4 as left, and p1, there again, not as joined a second time; events.jsonl had the same ${written.length} lines`;
+		summary = `through the own relay, xmoq-agent --meeting r was told of p1 and p2, answered /frame alone with "nobody has spoken", /frame p1, /frame p2 and /frame p1 again with a PNG each (${seen.join("; ")}) in ${frameLines(agent).length} frame lines, /frame p3 with "not in the meeting", and wrote p2 as left when its page closed its session; after the relay's GOAWAY it moved to the second relay, wrote p3 as joined and p4 as left, and p1, there again, not as joined a second time; the files of events/ had the same ${written.length} lines`;
 	} finally {
 		await runCleanups();
 		rmSync(directory, { recursive: true, force: true });

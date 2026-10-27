@@ -1,21 +1,31 @@
-//! The lines of stdin, read on a thread of their own.
+//! The lines of stdin and of `<DIR>/inbox.txt`, each read on a thread of
+//! its own, in one channel.
 
 use std::io::BufRead;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
+use xmoq_agent::inbox::new_lines;
+use xmoq_agent::input::MOST_A_LINE;
 
-/// The most bytes of a line of stdin. A longer one is not read, and is told
-/// as too long. WHY a limit of its own, above the chat's 512 bytes: a line
-/// is kept whole until its end comes, and the chat's limit is for what is
-/// said, which is checked after.
-pub const MOST_A_LINE: usize = 4096;
+/// How often `inbox.txt` is read again. **Provisional.** WHY read again,
+/// and not told of a change: the page of a meeting cannot be told
+/// (`INBOX_EVERY_MS` of `@xmoq/meeting`), and an agent writes to either in
+/// the same way; a second is as long as a person waits for a line of the
+/// chat.
+const INBOX_EVERY: Duration = Duration::from_secs(1);
 
-/// A line of stdin, or one that was longer than [`MOST_A_LINE`].
+/// A line of stdin or of `inbox.txt`, or one that was longer than
+/// [`MOST_A_LINE`].
 pub enum Line {
     /// The line, without its line break; bytes that are no UTF-8 replaced.
     Read(String),
     /// A line that was too long, of this many bytes.
     TooLong(usize),
+    /// `inbox.txt` could not be read, and why; told once until it is read
+    /// again.
+    InboxFailed(String),
 }
 
 /// Reads the next line of `reader`, keeping no more than `most` bytes of it.
@@ -52,10 +62,12 @@ fn ended(kept: &[u8], length: usize, most: usize) -> Line {
     }
 }
 
-/// The lines of stdin as they come. The channel closes at the end of
-/// stdin, which is no reason to end: a reader run with `&` has none.
-pub fn lines() -> mpsc::Receiver<Line> {
+/// The lines of stdin and of `inbox` as they come. The end of stdin is no
+/// reason to end: a reader run with `&` has none.
+pub fn lines(inbox: PathBuf) -> mpsc::Receiver<Line> {
     let (sender, receiver) = mpsc::channel(64);
+    let from_inbox = sender.clone();
+    std::thread::spawn(move || read_inbox(&inbox, &from_inbox));
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();
@@ -66,6 +78,60 @@ pub fn lines() -> mpsc::Receiver<Line> {
         }
     });
     receiver
+}
+
+/// Reads what is added to `inbox` every [`INBOX_EVERY`], until the
+/// receiver is gone. The file is made where it is not.
+///
+/// WHY what is in it when the reader begins is passed over: it was written
+/// for a reader before, which did it or did not.
+fn read_inbox(inbox: &std::path::Path, lines: &mpsc::Sender<Line>) {
+    let made = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(inbox);
+    let mut failing = made
+        .err()
+        .map(|error| format!("{}: {error}", inbox.display()));
+    if let Some(why) = &failing
+        && lines.blocking_send(Line::InboxFailed(why.clone())).is_err()
+    {
+        return;
+    }
+    let first = new_lines(&std::fs::read(inbox).unwrap_or_default(), 0, &[]);
+    let (mut offset, mut head) = (first.offset, first.head);
+    loop {
+        std::thread::sleep(INBOX_EVERY);
+        let read = match std::fs::read(inbox) {
+            Ok(bytes) => {
+                failing = None;
+                new_lines(&bytes, offset, &head)
+            }
+            Err(error) => {
+                let why = format!("{}: {error}", inbox.display());
+                // WHY once: a file that was taken away fails every second,
+                // and the lines an agent reads would be these alone.
+                if failing.as_ref() != Some(&why) {
+                    failing = Some(why.clone());
+                    if lines.blocking_send(Line::InboxFailed(why)).is_err() {
+                        return;
+                    }
+                }
+                continue;
+            }
+        };
+        offset = read.offset;
+        head = read.head;
+        for line in read.lines {
+            let line = match line {
+                Ok(text) => Line::Read(text),
+                Err(length) => Line::TooLong(length),
+            };
+            if lines.blocking_send(line).is_err() {
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +149,7 @@ mod tests {
             lines.push(match line {
                 Line::Read(text) => Ok(text),
                 Line::TooLong(length) => Err(length),
+                Line::InboxFailed(why) => panic!("{why}"),
             });
         }
         lines

@@ -1,10 +1,17 @@
-//! What a line of stdin asks for: a line of the chat, or a command.
+//! What a line of stdin or of `inbox.txt` asks for: a line of the chat, or
+//! a command.
 //!
 //! A line that begins with `/` is a command; one that begins with `//` is
 //! said with one `/` taken off, so that the chat can have a line that
 //! begins with `/`. WHY a mark at the beginning, and not a line of JSON:
 //! an agent writes `echo hello` as easily as a person types it, and the
 //! chat is what it does most.
+
+/// The most bytes of a line. A longer one is not read, and is told as too
+/// long. WHY a limit of its own, above the chat's 512 bytes: a line is kept
+/// whole until its end comes, and the chat's limit is for what is said,
+/// which is checked after.
+pub const MOST_A_LINE: usize = 4096;
 
 /// What a line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]

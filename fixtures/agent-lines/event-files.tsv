@@ -1,0 +1,8 @@
+none before	-	1700000000000	1700000000000.jsonl
+a clock of fewer digits is padded to 13	-	5	0000000000005.jsonl
+a clock after the newest	1700000000000.jsonl	1700000000500	1700000000500.jsonl
+the same millisecond as the newest	1700000000000.jsonl	1700000000000	1700000000001.jsonl
+a clock that went back	1700000000500.jsonl	1700000000000	1700000000501.jsonl
+the newest by its number, not by where it is listed	1700000000000.jsonl,1700000000900.jsonl,1700000000100.jsonl	1700000000200	1700000000901.jsonl
+other names are not counted	.1700000009999.jsonl.tmp,events.jsonl,170000000099.jsonl,1700000099999.txt,17000000x0000.jsonl	1700000000000	1700000000000.jsonl
+a padded name is counted by its number	0000000000005.jsonl	3	0000000000006.jsonl

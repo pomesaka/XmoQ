@@ -3,14 +3,22 @@
 // System Access API of Chromium: one root the person chooses once, which is
 // remembered (IndexedDB), and under it a folder for each meeting the page
 // attends, `<root>/<room>/<id>/`, laid out as `xmoq-agent --out` lays its
-// own: `events.jsonl`, `inbox.txt` and `frames/<when the writing began>/`.
+// own: `events/`, `inbox.txt` and `frames/<when the writing began>/`.
 
-import { type AgentEvent, agentLine } from "../core/agent-lines.ts";
+import {
+	type AgentEvent,
+	agentLine,
+	EVENTS_DIR,
+	eventFileName,
+	eventFileNumber,
+	nextEventFile,
+} from "../core/agent-lines.ts";
 
 /**
- * How long a line waits to be written to `events.jsonl`, with the lines
- * after it, in ms. **Provisional.** WHY: every write copies the whole file
- * (the WHY at `flush`); a second is as long as the inbox waits too.
+ * How long a line waits to be written to a file of `events/`, with the
+ * lines after it, in ms. **Provisional.** WHY: each wait is a file; a
+ * second is as long as the inbox waits too, and as `xmoq-agent` waits
+ * (`FLUSH_EVERY`).
  */
 export const FLUSH_EVERY_MS = 1000;
 
@@ -151,7 +159,7 @@ export interface AgentFolder {
 	readonly path: string;
 	/** When the writing began (ms), which names the folder of its pictures. */
 	readonly began: number;
-	/** Adds a line to `events.jsonl`, behind the ones before. Never throws; a failure is told to `onError`. */
+	/** Adds a line to the next file of `events/`, behind the ones before. Never throws; a failure is told to `onError`. */
 	write(event: AgentEvent): void;
 	/** Writes a picture at `path`, from the folder (`framePath`), before its line is written. */
 	writeFile(path: string, data: Blob): Promise<void>;
@@ -161,7 +169,7 @@ export interface AgentFolder {
 
 /**
  * Opens, and makes where it is not, `<root>/<room>/<id>/` with its
- * `events.jsonl`, `inbox.txt` and `frames/<began>/`.
+ * `events/`, `inbox.txt` and `frames/<began>/`.
  */
 export async function openAgentFolder(
 	root: FileSystemDirectoryHandle,
@@ -173,8 +181,16 @@ export async function openAgentFolder(
 	const folder = await (
 		await root.getDirectoryHandle(room, { create: true })
 	).getDirectoryHandle(id, { create: true });
-	const events = await folder.getFileHandle("events.jsonl", { create: true });
+	const events = await folder.getDirectoryHandle(EVENTS_DIR, { create: true });
 	const inbox = await folder.getFileHandle("inbox.txt", { create: true });
+	/** The number of the newest file of `events/`, which the next is named after (`nextEventFile`). */
+	let newest: number | undefined;
+	for await (const name of events.keys()) {
+		const number = eventFileNumber(name);
+		if (number !== undefined && (newest === undefined || number > newest)) {
+			newest = number;
+		}
+	}
 	const began = now();
 	/** The lines that wait to be written, and the write under way. */
 	let waiting: string[] = [];
@@ -185,18 +201,26 @@ export async function openAgentFolder(
 		if (waiting.length === 0) return;
 		const text = waiting.join("");
 		waiting = [];
-		// WHY a writable for every flush: what is written there reaches the
-		// file when it is closed, and an agent reads the file meanwhile.
-		// What that costs: Chromium writes into a swap file, which keeps a
-		// copy of the file (`keepExistingData`), and moves it over the file
-		// at `close` (`FileSystemAccessSafeMoveHelper` in
+		const number = nextEventFile(now(), newest);
+		newest = number;
+		// WHY a file of its own for every flush, and not one file added to:
+		// Chromium writes into a swap file, which keeps a copy of the file
+		// (`keepExistingData`), and moves it over the file at `close`
+		// (`FileSystemAccessSafeMoveHelper` in
 		// content/browser/file_system_access/file_system_access_file_writer_impl.cc,
-		// Chromium's main, read on 2026-10-25): the file is copied once a
-		// flush, and is another file after it, so a reader that follows it is
-		// to follow its name (`tail -F`).
-		const writable = await events.createWritable({ keepExistingData: true });
+		// Chromium's main, read on 2026-10-25). One file would be copied
+		// whole once a flush, and be another file after it, which `tail -F`
+		// of macOS prints again from its beginning (run on 2026-10-27).
+		// What a reader sees meanwhile: the file is there, empty, from
+		// `getFileHandle`, and has all its lines from `close`, the swap
+		// file moved over it; never a part of them. A
+		// reader takes an empty file for one being written
+		// (`fixtures/agent-lines/README.md`).
+		const file = await events.getFileHandle(eventFileName(number), {
+			create: true,
+		});
+		const writable = await file.createWritable();
 		try {
-			await writable.seek((await events.getFile()).size);
 			await writable.write(text);
 		} finally {
 			await writable.close();

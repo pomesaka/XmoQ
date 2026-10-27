@@ -45,7 +45,7 @@ pub struct Args {
     pub room: Room,
     /// `--name`: the reader's name in the chat.
     pub name: String,
-    /// `--out`: the directory of `events.jsonl` and what it names.
+    /// `--out`: the directory of `events/`, `inbox.txt` and the pictures.
     pub out: String,
     /// `--chat-catch-up-lines`: how many of the lines missed while the
     /// subscription to `lines` was away are fetched, 1 to 1,000.
@@ -109,7 +109,7 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> --namespace <a
 xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> --meeting <room> --out <dir>
            [--chat-room broadcast/<name>|meeting/<name>] [--name agent]
   --chat-room <kind>/<name>         the chat's room with --url (with --room, the room's)
-  --out <dir>                       where events.jsonl is written (made where it is not)
+  --out <dir>                       where events/ and inbox.txt are (made where they are not)
   --chat-catch-up-lines <n>         the lines missed while away that are fetched (16; 1 to 1000)
   --answer-wait-ms <ms>             how long the relay gets to answer a request (10000)
   --setup-wait-ms <ms>              how long the relay gets for its SETUP (10000)
@@ -129,8 +129,9 @@ xmoq-agent --url https://host:port/ --cert-sha256 <64 hex digits> --meeting <roo
   --speech on|off                   off: no transcript is followed (on)
   --transcript <prefix>             the prefix the transcriber listens under (the room's, else the
                                     meeting's, else the broadcast's namespace)
-Each event is a line of JSON on stdout and in <dir>/events.jsonl. A line of stdin is said in the
-chat; /frame asks for a picture; a line that begins with // is said with one / taken off.";
+Each event is a line of JSON on stdout at once, and in a file of <dir>/events/ with the others of
+its second. A line of stdin, or one added to <dir>/inbox.txt, is said in the chat; /frame asks for
+a picture; a line that begins with // is said with one / taken off.";
 
 fn number(flag: &str, value: &str) -> Result<u64, Invalid> {
     value

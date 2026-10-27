@@ -85,8 +85,12 @@ export interface ReceivedLine extends Line {
 
 /** What became of a line the participant said. */
 export type SayOutcome =
-	/** Written on `said` in Group `group`; the gatherer may still drop it (its rate is counted where the line arrives). */
-	| { type: "sent"; group: bigint }
+	/**
+	 * Written on `said` in Group `group`, with `sentAt`; the gatherer may
+	 * still drop it (its rate is counted where the line arrives). A line
+	 * that comes back from the gatherer has the same `sentAt`.
+	 */
+	| { type: "sent"; group: bigint; sentAt: number }
 	/** Not sent, for a limit of the chat or a text no reader takes. */
 	| { type: "kept-back"; why: KeptBack }
 	/**
@@ -384,10 +388,10 @@ export async function joinChat(
 		});
 	}
 
-	/** Writes `payload` as the Object 0 of the next Group of `track`, the whole of that Group. */
+	/** Writes `payload` of the clock now as the Object 0 of the next Group of `track`, the whole of that Group. */
 	const write = async (
 		track: Ours,
-		payload: () => Uint8Array,
+		payload: (sentAt: number) => Uint8Array,
 	): Promise<SayOutcome> => {
 		const published = track.listener;
 		if (published === undefined)
@@ -404,8 +408,9 @@ export async function joinChat(
 				// One line, or one reaction, is the whole of its Group.
 				endOfGroup: true,
 			});
+			const sentAt = now();
 			try {
-				await stream.write({ objectId: 0n, payload: payload() });
+				await stream.write({ objectId: 0n, payload: payload(sentAt) });
 				await stream.close();
 			} catch (error) {
 				await stream.reset().catch(() => {});
@@ -414,7 +419,7 @@ export async function joinChat(
 			if (track.lastGroup === undefined || group > track.lastGroup) {
 				track.lastGroup = group;
 			}
-			return { type: "sent", group };
+			return { type: "sent", group, sentAt };
 		} catch (error) {
 			return { type: "not-sent", why: "failed", error };
 		} finally {
@@ -429,12 +434,12 @@ export async function joinChat(
 		async say(text) {
 			const why = keepBack(text, limits, lineRate, now());
 			if (why !== undefined) return { type: "kept-back", why };
-			return write(said, () => saidPayload({ text, sentAt: now() }));
+			return write(said, (sentAt) => saidPayload({ text, sentAt }));
 		},
 		async react(emoji) {
 			const why = keepBackReaction(emoji, reactionRate, now());
 			if (why !== undefined) return { type: "kept-back", why };
-			return write(reacted, () => reactedPayload({ emoji, sentAt: now() }));
+			return write(reacted, (sentAt) => reactedPayload({ emoji, sentAt }));
 		},
 	};
 }

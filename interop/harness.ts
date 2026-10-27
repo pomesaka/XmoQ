@@ -8,7 +8,13 @@ import {
 	spawn,
 } from "node:child_process";
 import { createHash, createHmac, X509Certificate } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Browser, chromium, type Page } from "playwright-core";
@@ -1191,6 +1197,25 @@ export function spawnAgent(
 	]);
 	defer(`stop ${spawned.label}`, () => stopProcess(spawned, "SIGTERM"));
 	return spawned;
+}
+
+/**
+ * The lines of the files of `<out>/events/` that `xmoq-agent --out` writes,
+ * in the order of their names, without their `at`: as an agent reads them
+ * (`fixtures/agent-lines/README.md`). The lines of the last second are
+ * there a second later.
+ */
+export function agentEventFiles(out: string): string[] {
+	const dir = join(out, "events");
+	return readdirSync(dir)
+		.filter((name) => /^\d{13,}\.jsonl$/.test(name))
+		.sort()
+		.flatMap((name) =>
+			readFileSync(join(dir, name), "utf8")
+				.split("\n")
+				.filter((line) => line !== ""),
+		)
+		.map((line) => line.replace(/"at":\d+,?/, ""));
 }
 
 /**

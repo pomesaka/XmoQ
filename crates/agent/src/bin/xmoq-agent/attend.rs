@@ -110,9 +110,13 @@ pub(crate) async fn on<T>(item: Option<impl std::future::Future<Output = T>>) ->
     }
 }
 
-/// The event of a line of the chat.
-fn chat_event(line: ChatLine) -> Event {
+/// The event of a line of the chat; `own` is the reader's name in it.
+///
+/// WHY every line of its own name is the agent's: the reader says only the
+/// lines of stdin and of `inbox.txt`, and the name is its own.
+fn chat_event(line: ChatLine, own: &str) -> Event {
     Event::Chat {
+        by_agent: line.name == own,
         number: line.number,
         from: line.name,
         text: line.text,
@@ -358,9 +362,9 @@ fn on_speech(reader: &mut Reader, out: FollowOutcome<Speech>) {
 }
 
 /// Writes what came of the chat on tracks.
-fn on_chat(reader: &mut Reader, out: ChatOutcome) {
+fn on_chat(reader: &mut Reader, out: ChatOutcome, own: &str) {
     match out {
-        ChatOutcome::Line(line) => reader.tell(&chat_event(line)),
+        ChatOutcome::Line(line) => reader.tell(&chat_event(line, own)),
         ChatOutcome::Gap(gap) => reader.tell(&Event::ChatGap {
             after: gap.after,
             before: gap.before,
@@ -376,14 +380,14 @@ fn remember_speech(reader: &mut Reader, place: &Place, follower: &Follower<Speec
     }
 }
 
-/// What a line of stdin asks for, where the session has to do it.
+/// What a line of stdin or of `inbox.txt` asks for, where the session has to do it.
 enum Wants {
     Nothing,
     /// `/frame`, and in a meeting whose picture.
     Frame(Option<String>),
 }
 
-/// Says a line of stdin in the chat, or tells what it asks for.
+/// Says a line of stdin or of `inbox.txt` in the chat, or tells what it asks for.
 fn on_line(
     chat: &mut ChatTracks,
     connection: &Arc<WtConnection>,
@@ -393,6 +397,10 @@ fn on_line(
     let text = match line {
         Line::TooLong(length) => {
             reader.too_long(length);
+            return Wants::Nothing;
+        }
+        Line::InboxFailed(why) => {
+            reader.error(why);
             return Wants::Nothing;
         }
         Line::Read(text) => text,
@@ -833,7 +841,7 @@ pub async fn attend(
             }
             came = tracks.next() => {
                 for out in chat.tracks.on(&mut session, came).await? {
-                    on_chat(reader, out);
+                    on_chat(reader, out, &args.name);
                 }
                 reader.had = chat.tracks.last_shown();
             }
@@ -862,7 +870,7 @@ pub async fn attend(
                     if chat.tracks.lines_alias() == Some(header.track_alias) =>
                 {
                     if let Some(line) = chat.tracks.live(header.group_id, &object.payload) {
-                        reader.tell(&chat_event(line));
+                        reader.tell(&chat_event(line, &args.name));
                     }
                     reader.had = chat.tracks.last_shown();
                 }
@@ -936,7 +944,7 @@ pub async fn attend(
                         }
                         if let Some(outs) = chat.tracks.malformed(request) {
                             for out in outs {
-                                on_chat(reader, out);
+                                on_chat(reader, out, &args.name);
                             }
                             reader.had = chat.tracks.last_shown();
                         } else if let Some(outs) = speech.as_mut().and_then(|follower| follower.malformed(request)) {

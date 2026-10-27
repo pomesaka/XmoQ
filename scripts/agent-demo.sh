@@ -222,13 +222,15 @@ start() {
 	# reads this script's output waiting for its end.
 	nohup sleep 2147483647 </dev/null >"${say}" 2>/dev/null &
 	local holder=$!
-	local events="${out}/events.jsonl" before=0
-	[[ ! -f ${events} ]] || before=$(wc -l <"${events}")
+	# WHY the log is waited on, and not events/: the reader writes each line
+	# on stdout at once, and in a file of events/ only a second later; the
+	# log is begun anew with each start.
+	local events="${out}/events" agent_log="${out}/agent.log"
 	local room="http://127.0.0.1:${rooms_port}/broadcasts/demo"
 	[[ ${meeting} -eq 0 ]] || room="http://127.0.0.1:${rooms_port}/meetings/demo"
 	nohup target/release/xmoq-agent --room "${room}" \
 		--name "${name}" --out "${out}" \
-		<"${say}" >"${out}/agent.log" 2>&1 &
+		<"${say}" >"${agent_log}" 2>&1 &
 	local agent=$!
 	record "${holder}" "sleep"
 	record "${agent}" "xmoq-agent"
@@ -241,12 +243,12 @@ start() {
 		local page=$!
 		record "${page}" "demo/open-publish.ts"
 		wait_for_line 0 "${out}/page.log" "^opened " 60 "${page}"
-		wait_for_line "${before}" "${events}" '"state":"began","type":"broadcast"' 60 "${agent}"
+		wait_for_line 0 "${agent_log}" '"state":"began","type":"broadcast"' 60 "${agent}"
 		grep -E "^(no )?captions:" "${out}/demo.log" || true
 		cat <<EOF
 the reader is in ${room} as ${name}, and the broadcast began
   say:    echo 'hello' > ${say}      (/frame for a picture)
-  read:   ${events}
+  read:   ${events}/   (a file a second, in the order of their names)
   logs:   ${out}/demo.log, ${out}/agent.log, ${out}/page.log
   watch:  http://localhost:${port}/watch
   stop:   mise run agent-demo -- stop --out ${out}
@@ -271,15 +273,15 @@ EOF
 	done
 	local id
 	for id in "${ids[@]}"; do
-		wait_for_line "${before}" "${events}" "\"id\":\"${id}\",\"state\":\"joined\",\"type\":\"participant\"" 60 "${agent}"
+		wait_for_line 0 "${agent_log}" "\"id\":\"${id}\",\"state\":\"joined\",\"type\":\"participant\"" 60 "${agent}"
 	done
 	grep -E "^(no )?captions:" "${out}/demo.log" || true
 	cat <<EOF
 the reader is in ${room} as ${name}, with ${meeting} participants: ${ids[*]}
   say:    echo 'hello' > ${say}      (said in the room's chat)
   frame:  echo '/frame ${ids[0]}' > ${say}   (a picture of that participant; /frame alone, of the one who spoke last)
-  who:    grep '"type":"participant"' ${events}   (each one's id, as it joins and leaves)
-  read:   ${events}   ("speech" lines, each with the participant's namespace as "from")
+  who:    cat ${events}/*.jsonl | grep '"type":"participant"'   (each one's id, as it joins and leaves)
+  read:   ${events}/   ("speech" lines, each with the participant's namespace as "from"; a file a second)
   logs:   ${out}/demo.log, ${out}/agent.log, ${logs[*]}
   meet:   http://localhost:${port}/meet   (one more participant, in a browser)
   stop:   mise run agent-demo -- stop --out ${out}

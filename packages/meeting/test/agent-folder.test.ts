@@ -44,7 +44,7 @@ test.each<{
 			at += 1;
 			if (next === undefined) throw new Error("read more than the test has");
 			if ("fails" in next) throw new DOMException("in the test", next.fails);
-			return new File([next.text], "events.jsonl");
+			return new File([next.text], "inbox.txt");
 		},
 	};
 	const outcome = await readWhole(file).then(

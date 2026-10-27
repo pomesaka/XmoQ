@@ -1,5 +1,5 @@
 //! What the reader writes: one event a line, as JSON (JSON Lines), to
-//! stdout and to `<DIR>/events.jsonl`.
+//! stdout and to the files of `<DIR>/events/`.
 //!
 //! Every line has `type` and `at`, the reader's clock in milliseconds since
 //! the Unix epoch when it wrote the line. The keys are in the order of their
@@ -50,6 +50,11 @@ pub enum Event {
         sent_at: u64,
         /// When the gatherer took it, on its clock (ms).
         gathered_at: u64,
+        /// Whether the agent said it, through the reader: written as
+        /// `"by":"agent"`, and left out otherwise. WHY: on a page the agent
+        /// says its lines under the person's name, and `from` cannot tell
+        /// them from the person's.
+        by_agent: bool,
     },
     /// Lines of the chat that were said while the reader was away and are
     /// not fetched: those after `after` and before `before`, more than
@@ -141,14 +146,21 @@ impl Event {
                 text,
                 sent_at,
                 gathered_at,
-            } => json!({
-                "type": "chat",
-                "number": number,
-                "from": from,
-                "text": text,
-                "sent_at": sent_at,
-                "gathered_at": gathered_at,
-            }),
+                by_agent,
+            } => {
+                let mut chat = json!({
+                    "type": "chat",
+                    "number": number,
+                    "from": from,
+                    "text": text,
+                    "sent_at": sent_at,
+                    "gathered_at": gathered_at,
+                });
+                if let (true, Value::Object(fields)) = (by_agent, &mut chat) {
+                    fields.insert("by".to_string(), json!("agent"));
+                }
+                chat
+            }
             Self::ChatGap { after, before } => {
                 json!({"type": "chat_gap", "after": after, "before": before})
             }
@@ -228,18 +240,10 @@ impl Event {
 mod tests {
     use super::*;
 
-    /// The rows of `fixtures/agent-lines/lines.tsv`, which `@xmoq/meeting`
-    /// reads as well: the lines both write, each with the event that is to
-    /// write it.
-    #[test]
-    fn the_lines_both_write_are_as_the_shared_table_says() {
-        let path = format!(
-            "{}/../../fixtures/agent-lines/lines.tsv",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let table =
-            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
-        let events = [
+    /// The event of each row of `fixtures/agent-lines/lines.tsv`, by its
+    /// name.
+    fn shared_events() -> [(&'static str, Event); 8] {
+        [
             (
                 "a participant came",
                 Event::Participant {
@@ -262,6 +266,7 @@ mod tests {
                     text: "hello".to_string(),
                     sent_at: 990,
                     gathered_at: 995,
+                    by_agent: false,
                 },
             ),
             (
@@ -272,6 +277,7 @@ mod tests {
                     text: "a\u{1b}[2J\nb".to_string(),
                     sent_at: 0,
                     gathered_at: 0,
+                    by_agent: false,
                 },
             ),
             (
@@ -299,6 +305,17 @@ mod tests {
                 },
             ),
             (
+                "a line the agent said",
+                Event::Chat {
+                    number: 9,
+                    from: "alice".to_string(),
+                    text: "hi".to_string(),
+                    sent_at: 991,
+                    gathered_at: 995,
+                    by_agent: true,
+                },
+            ),
+            (
                 "an error",
                 Event::Error {
                     message:
@@ -306,7 +323,21 @@ mod tests {
                             .to_string(),
                 },
             ),
-        ];
+        ]
+    }
+
+    /// The rows of `fixtures/agent-lines/lines.tsv`, which `@xmoq/meeting`
+    /// reads as well: the lines both write, each with the event that is to
+    /// write it.
+    #[test]
+    fn the_lines_both_write_are_as_the_shared_table_says() {
+        let path = format!(
+            "{}/../../fixtures/agent-lines/lines.tsv",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let table =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        let events = shared_events();
         let rows: Vec<(&str, &str)> = table
             .lines()
             .map(|row| row.split_once('\t').expect("a name and a line"))
@@ -339,6 +370,7 @@ mod tests {
                     text: "hello".to_string(),
                     sent_at: 990,
                     gathered_at: 995,
+                    by_agent: false,
                 },
                 r#"{"at":1000,"from":"alice","gathered_at":995,"number":7,"sent_at":990,"text":"hello","type":"chat"}"#,
             ),
@@ -351,6 +383,7 @@ mod tests {
                     text: "a\u{1b}[2J\nb".to_string(),
                     sent_at: 0,
                     gathered_at: 0,
+                    by_agent: false,
                 },
                 r#"{"at":1000,"from":"b\"ob","gathered_at":0,"number":8,"sent_at":0,"text":"a\u001b[2J\nb","type":"chat"}"#,
             ),
