@@ -6,7 +6,9 @@
 // sound of all of them, and the small video of the first 8 who came.
 //
 // The sound is the microphone; `?audio=none` sends none. The picture is
-// one the page paints, small (320x180), with its id on it.
+// one the page paints, small (320x180), with its id on it. `?uni=N`,
+// `?diag=1` and `?timer=` are as for the pages of the broadcast
+// (`../lib/relay.ts`, `../lib/page.ts`).
 
 import { type ChatRoom, roomFields } from "@xmoq/chat";
 import {

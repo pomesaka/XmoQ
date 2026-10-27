@@ -2,10 +2,57 @@
 // together, by the times their Objects carry, and shows how long a frame
 // and a piece of audio took from the publisher's clock to this page.
 //
-//   ?buffer=N   how many milliseconds a frame or a piece is held before it
-//               is shown or sounded, counted from the fastest one that came
-//               (150 when left out; 0 plays each as it comes)
-//   ?join=no    waits for the next key frame, as without the Joining FETCH
+// Its flags, each a query of its address; "a trial" is something tried
+// behind the flag and not the demo's way. Those every page of the
+// broadcast takes (`room`, `token`, `via`, `uni`, `diag`, `timer`,
+// `chatCatchUpLines`) are at the top of `room.ts`, `../lib/relay.ts`,
+// `../lib/page.ts` and `../lib/chat.ts`.
+//
+//   ?buffer=N             how many milliseconds a frame or a piece is held
+//                         before it is shown or sounded, counted from the
+//                         fastest one that came (`DEFAULT_PLAYOUT_BUFFER_MS`
+//                         of @xmoq/media when left out; 0 plays each as it
+//                         comes)
+//   ?buffer=auto          a trial: the buffer follows how late Objects come
+//   ?autoMax=MS, ?autoShare=F
+//                         with `buffer=auto`: its limit, and the share of the
+//                         Objects it covers (@xmoq/media's when left out)
+//   ?autoDown=quarter, ?autoWindow=MS
+//                         trials, with `buffer=auto`: it comes down a quarter
+//                         of the way at a time, and looks back so far
+//   ?audioMin=MS          the least the sound waits where the buffer is
+//                         shorter (`DEFAULT_AUDIO_MIN_MS` when left out)
+//   ?order=no             a piece of sound that comes before its turn is not
+//                         held for the ones before it
+//   ?join=no              no Joining FETCH for the video: the picture begins
+//                         with the next key frame
+//   ?audioJoin=1          a Joining FETCH for the sound as well
+//   ?newgroup=1           a trial: the video's SUBSCRIBE asks the sender for
+//                         a new Group (NEW_GROUP_REQUEST 0); with `join=no`,
+//                         the picture begins with the key frame it makes
+//   ?video=no             the sound alone
+//   ?videoTimeout=MS      the delivery timeout asked for the video; 0 asks
+//                         for none (`VIDEO_TIMEOUT_MS` when left out)
+//   ?audioTimeout=MS      the same for the sound; none asked when left out
+//   ?videoTimeoutThen=MS, ?videoTimeoutAfter=S
+//                         changes the video's timeout while it plays, with a
+//                         REQUEST_UPDATE, after S seconds (10 when left out)
+//   ?cutSound=S           for trying: the first subscription of the sound is
+//                         cancelled after S seconds, and the page subscribes
+//                         to the sound again on the session
+//   ?abr=1                a trial: changes between the versions of the
+//                         publishing page's `ladder=1`
+//   ?judge=try            a trial, with `abr=1`: a higher version is received
+//                         for 2 s before it is shown
+//   ?versionTimeouts=A,B  a trial, with `abr=1`: a delivery timeout for each
+//                         version
+//   ?wait=no              closes the session where nobody publishes, and
+//                         connects again after the pause (`AGAIN`)
+//   ?diag=1               more in the page's report, for looking into a run
+//   ?clockSkewPpm=N       for measuring: the page's clock runs N parts in a
+//                         million faster
+//   ?clockBehindMs=N      for measuring: the page's clock is N ms behind for
+//                         its first 5 seconds
 
 import {
 	AUTO_MARGIN_MS,

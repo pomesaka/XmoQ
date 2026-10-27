@@ -4,7 +4,7 @@
 //! WHY `whisper-rs` 0.16.0: it builds whisper.cpp 1.8.3 from the source it
 //! carries, has a safe API over it (the workspace forbids `unsafe`), and
 //! was the one that crates.io listed with releases through 2026
-//! (repository on codeberg.org, read on 2026-10-25; README). WHY NOT the
+//! (repository on codeberg.org, read on 2026-10-25). WHY NOT the
 //! program `whisper-cli` of whisper.cpp, run for each piece: the model
 //! would be loaded again for every piece, seconds for the large ones.
 

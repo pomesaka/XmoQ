@@ -1,5 +1,5 @@
 //! What was said in one piece of a voice, as the transcriber publishes it on
-//! `speech` (decided on 2026-10-25): one Group a piece, numbered from 0
+//! `speech`: one Group a piece, numbered from 0
 //! without a gap within the transcript, whose Object 0 is
 //! `{"from": [string, ...], "text": string, "startUs": number, "endUs": number, "at": number}`,
 //! in that order. The shared rows that every reader reads are in

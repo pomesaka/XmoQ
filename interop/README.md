@@ -24,21 +24,7 @@ Needs `cargo`, `openssl` and the tools of `mise.toml`. From the repository root,
 mise run interop
 ```
 
-It runs `scripts/ci/interop.sh`, which does these steps and skips what is already built:
-
-```sh
-cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --locked --root interop/peers/moqtail/.tools relay
-cargo install --git https://github.com/moqtail/moqtail --tag relay@0.15.0 --locked --root interop/peers/moqtail/.tools client
-# moqlivemock v0.16.1: a clone of the tag, `go build` of mlmpub, a patch of one line and `go build` of mlmsub, and its asset (peers/moqlivemock/README.md)
-cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
-cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat -p xmoq-agent
-cargo build --locked --release -p xmoq-watch -p xmoq-transcriber
-crates/speech/scripts/fetch-model.sh tiny    # the models of the transcriber's run, into ~/.cache/xmoq/whisper/
-crates/speech/scripts/fetch-model.sh silero-v5.1.2
-bun install --frozen-lockfile
-bun run --cwd interop playwright-core install --no-shell chromium
-bun interop/matrix.ts
-```
+It runs `scripts/ci/interop.sh`, which builds the peers, the own programs, the transcriber's models and the Chromium, skips what is already built, and runs `bun interop/matrix.ts`. The steps are in that script alone.
 
 The Chromium is the build that the pinned `playwright-core` drives; it goes to Playwright's cache directory, outside the repository.
 
@@ -80,18 +66,11 @@ Every driver starts what it needs (the certificate, the relay, the pages in a he
 
 One side of a pairing has to be an own client: a run between two moqtail peers checks nothing of this repository.
 
-**The runs wait for lines of the own relay's log**, so changing the form of such a line breaks them. What a run counts in the relay's log, or expects not to be there, it counts before a line of the relay that it names, and never "so far": the lines of the relay and of a client reach the driver in no order, and a count taken when a client has reported something can miss the relay's line that is on its way. `RelayLog` in `harness.ts` has no other way to count, so a run that does not name such a line does not pass the type check. A run with no step of its own after the moment it checks has `connectedNow` connect a client, whose session line is the fence.
+**The runs wait for lines of the own relay's log**, so changing the form of such a line breaks them. How a run counts them, and why never "so far", is `RelayLog` in `harness.ts`; a run with no step of its own after the moment it checks has `connectedNow` connect a client, whose session line is the fence.
 
 ## Certificate
 
-The relay runs on a self-signed certificate that the drivers create under `.cert/` and re-creates when less than a day of validity is left. No root CA is installed and no browser flag is set.
-
-| Requirement | Reason |
-|---|---|
-| ECDSA P-256, valid for under two weeks (13 days here) | Chromium accepts nothing else through `serverCertificateHashes`, which is how the browser clients pin the certificate's SHA-256 |
-| Key from `openssl ecparam -genkey`, certificate from `openssl req -x509 -new -key` | With LibreSSL 3.3.6, the relay could not load a key written by the one-step `openssl req -newkey ec` |
-
-The Rust clients pin the same SHA-256: the own client through `web-transport-quinn`'s `with_server_certificate_hashes`, the moqtail client through `wtransport`'s.
+The relay runs on a self-signed certificate that the drivers create under `.cert/` and re-creates when less than a day of validity is left. **No root CA is installed and no browser flag is set**: the browser clients pin the certificate's SHA-256 through `serverCertificateHashes`, and the Rust clients pin the same hash (the own client through `web-transport-quinn`'s `with_server_certificate_hashes`, the moqtail client through `wtransport`'s). Why the certificate is made as it is, at `ensureCertificate` in `harness.ts`.
 
 ## Generated files
 

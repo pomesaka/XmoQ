@@ -10,26 +10,14 @@
 
 ## Build
 
-`mise run interop` does it, and fails when the tag is no longer the commit above. By hand, from the repository root, with the Go of `mise.toml`:
-
-```sh
-git clone --depth 1 --branch v0.16.1 https://github.com/Eyevinn/moqlivemock /tmp/moqlivemock
-(cd /tmp/moqlivemock && go build -o "$OLDPWD/interop/peers/moqlivemock/.tools/bin/" ./cmd/mlmpub)
-git -C /tmp/moqlivemock apply "$PWD/interop/peers/moqlivemock/mlmsub-legacy-connect-protocol.patch"
-(cd /tmp/moqlivemock && go build -o "$OLDPWD/interop/peers/moqlivemock/.tools/bin/" ./cmd/mlmsub)
-mkdir -p interop/peers/moqlivemock/.tools/assets
-cp -R /tmp/moqlivemock/assets/test10s interop/peers/moqlivemock/.tools/assets/
-```
-
-- **`go install github.com/Eyevinn/moqlivemock/cmd/mlmpub@v0.16.1` does not work.** The `go.mod` of the tag has a `replace` directive (a fork of `webtransport-go`), and `go install` refuses that for a module that is not the main one.
-- Measured on macOS, arm64, 11 cores, with empty Go caches: the clone 4.6 seconds and 16 MB, the build of the two commands 9.8 seconds, a second build 0.17. The binaries are 19 MB and 14.6 MB.
+`mise run interop` does it, and fails when the tag is no longer the commit above. The steps, and why not `go install`, are in `scripts/ci/interop.sh` alone.
 
 ## The patch to `mlmsub`
 
 `mlmsub-legacy-connect-protocol.patch` adds one line to `cmd/mlmsub/handler.go`: `LegacyConnectProtocol: true` in the settings of the WebTransport dialer. **`mlmpub` is built as it is.**
 
 - **What it changes:** the `:protocol` of the CONNECT request that opens the WebTransport session. The library moqlivemock uses (`Eyevinn/webtransport-go`, a fork of `quic-go/webtransport-go` 0.12.0) sends `webtransport-h3`, the token of `draft-ietf-webtrans-http3-15`, and with that setting `webtransport`, the token before it. `mlmsub` has no flag for it. Nothing of MoQ Transport or of MSF is touched.
-- **Without it, `mlmsub` connects to neither relay here** (seen on 2026-10-11, with the binary of the tag):
+- **Without it, `mlmsub` connects to neither relay here** (seen with the binary of the tag):
   - the own relay prints `HANDSHAKE_FAILED connection lost: failed to exchange h3 connect: protocol error: expected webtransport, got: Some("webtransport-h3")`, and `mlmsub` reports `http3: parsing frame failed: Application error 0x0 (remote)`. The relay's library, `web-transport-proto` 0.6.2 under `web-transport-quinn` 0.13.2, accepts `webtransport` alone (`src/connect.rs`: `if protocol != Some("webtransport")`), and sends that token itself as a client. Chromium 156 connects to the relay, so it sends that one too;
   - against the `moqtail` relay 0.15.0, `mlmsub` reports `http3: parsing frame failed: EOF`. What that relay printed was not looked at.
 - `scripts/ci/interop.sh` applies it with `git apply`, which fails when it no longer fits the source.

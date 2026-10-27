@@ -81,7 +81,7 @@ const { values: options } = parseArgs({
 		// The language the transcriber reads in: `auto` (its default), or a
 		// code of whisper's. A code is twice as fast as `auto`, and has every
 		// voice read in that language: an English voice read with `ja` came
-		// out in Japanese (crates/speech/README.md).
+		// out in Japanese (docs/experiments/2026-10-25-the-transcriber-reads-a-voice.md).
 		"transcribe-language": { type: "string", default: "auto" },
 		// The model of whisper.cpp the transcriber reads with, and its model of
 		// voice activity: the files `mise run speech-model` fetches into the

@@ -1,8 +1,7 @@
 //! Who is in the chat of the room: those whose namespace
 //! `xmoq/chat/<kind>/<room>/<name>` the relay tells of, to a
-//! `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<kind>/<room>` (decided on
-//! 2026-10-25), as the gatherer finds
-//! them (`crates/chat/README.md`). Only those who announce a namespace for
+//! `SUBSCRIBE_NAMESPACE` for `xmoq/chat/<kind>/<room>`, as the gatherer
+//! finds them (`crates/chat/src/lib.rs`). Only those who announce a namespace for
 //! the chat are seen: a viewer that does not take part in it is not. The
 //! rule across sessions is `xmoq_viewer::presence`'s, which a meeting's
 //! participants go by as well; here are the room and the reader itself.

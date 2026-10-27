@@ -12,6 +12,12 @@
 //! (`docs/experiments/2026-10-25-the-transcriber-reads-a-voice.md`).
 //! WHY loudness is kept: it needs no model, and the tests of the cutting
 //! use it; the transcriber takes it with `--voice loudness`.
+//!
+//! What the model costs: a piece cannot end before its frames are judged,
+//! so its words come up to half a second later. WHY NOT the VAD that
+//! whisper.cpp runs inside `whisper_full` (`vad` of its parameters): it
+//! runs on what it is given to read, and the cutting into pieces, which
+//! decides when words come, is before that.
 
 use anyhow::Result;
 

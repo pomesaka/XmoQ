@@ -4,6 +4,25 @@ The names of a transcript's track, and the JSON the transcriber writes on `speec
 
 Columns are separated by a tab. A text column holds a JSON literal (`from` an array of strings, `text` a string), so that quotes, backslashes and line breaks are written as JSON writes them; `-` is "none".
 
+## The payload
+
+One piece of speech is one Group of `speech`, and its Object 0 is
+
+```json
+{"from":["xmoq","demo"],"text":"Hello everyone.","startUs":1761350400000000,"endUs":1761350402500000,"at":1761350403700}
+```
+
+with the members in that order. The Group IDs of a transcript go up by one, without a gap.
+
+| Member | What it is |
+|---|---|
+| `from` | The namespace of the broadcast whose voice it was, every field |
+| `text` | The words whisper.cpp read |
+| `startUs`, `endUs` | Where the piece begins and ends, in microseconds, on the clock of the Timestamps of LOC of that broadcast's audio track. A piece keeps up to 200 ms of quiet before its first word and after its last |
+| `at` | The transcriber's clock when it had read the piece, in milliseconds since the Unix epoch |
+
+Every number is an integer from 0 to 2^53 - 1, which a JavaScript number holds exactly.
+
 ## `names.tsv`
 
 Which track is the transcript of which prefix: `xmoq-transcript-tracks` (`names.rs`) reads each track and makes the track of each prefix, and `@xmoq/transcript` (`test/names.test.ts`) makes the track of each prefix and reads none.

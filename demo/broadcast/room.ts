@@ -134,6 +134,7 @@ export async function joinRoom(as: string): Promise<Room> {
 		namespace: described.namespace,
 	};
 	const token: Room["token"] = async (role, namespace) => {
+		// `?token=no`: asks the room for no token, to see the relay refuse.
 		if (new URLSearchParams(location.search).get("token") === "no") {
 			return undefined;
 		}

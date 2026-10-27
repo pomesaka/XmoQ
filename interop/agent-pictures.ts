@@ -176,7 +176,7 @@ function fileName(path: string): string {
 
 /**
  * The `path` a `frame` line has for `file` of the run in `framesDir`: from
- * `--out`, with `/` (`crates/agent/README.md`, `fixtures/agent-lines/`).
+ * `--out`, with `/` (`fixtures/agent-lines/`).
  */
 function inRun(framesDir: string, file: string): string {
 	return `frames/${basename(framesDir)}/${file}`;
