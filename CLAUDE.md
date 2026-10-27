@@ -84,6 +84,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | docs/architecture.md、docs/assets/ | 仕様 | 構成要素の責務と境界。図 |
 | docs/glossary.md | 仕様 | 配信と会議の語。MoQの語はdraftを指すだけ |
 | docs/protocols.md | 仕様 | プロトコルの層、版、一次仕様へのリンク |
+| docs/moqt-state-models.md | 仕様 | セッションと要求の状態の移り方。draft 18の状態に節番号を付け、draftが黙っている所は覚え書きの行を名前で指す |
 | docs/moqt-implementation-notes.md | 仕様 | draftが黙っている箇所と矛盾している箇所で2つの実装がそろえる挙動。既知の不足 |
 | docs/open-questions.md | 仕様 | 未決事項と、仮の値の置き場所 |
 | docs/scale-and-meetings.md | 設計の案 | 配信をリレーで広げる形と、会議の形（proposed） |
@@ -113,7 +114,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | 新しい文書を足した | README.md の一覧、このDocumentation Map |
 | エージェントの進め方を変えた | docs/agent-guide.md、CLAUDE.md |
 | 既知の不足を直した（draftの要件を満たした、上限を足した） | docs/moqt-implementation-notes.md の既知の不足の項目と、それを指す`FIXME:`を消す。その挙動を表の行に書く。部品のREADMEの既知の不足とStatus |
-| draftの解釈や、本文に無い挙動を決めた・変えた | docs/moqt-implementation-notes.md。RustとTypeScriptの両方を同じPRで直す |
+| draftの解釈や、本文に無い挙動を決めた・変えた | docs/moqt-implementation-notes.md。RustとTypeScriptの両方を同じPRで直す。状態の移り方が変わるならdocs/moqt-state-models.mdも |
 | 受信の上限やタイムアウトの値を決めた・変えた | 値を置くコードの定数のコメント（provisionalの印を含む）、docs/moqt-implementation-notes.md |
 | moqtailから固定値を採った・採り直した | fixtures/moqt-18/README.md |
 | ブラウザやライブラリから固定値を採った・採り直した | その固定値のディレクトリのREADME（fixtures/webtransport-close/README.md など） |
