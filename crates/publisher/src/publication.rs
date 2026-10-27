@@ -59,26 +59,36 @@ pub enum StreamEndDoes {
 /// What `end` does to a PUBLISH of the client at `stage`; the gatherer of
 /// the chat and the transcriber go by it, and
 /// `fixtures/own-requests/stream-ends.tsv` has the rows. A reset ends a
-/// PUBLISH (§3.3.2), and so does a `STOP_SENDING`, by which a subscriber
-/// ends a subscription (§5.1); a FIN of the subscriber does not: §3.3.2
-/// has a request cancelled "by resetting or sending `STOP_SENDING`". After
-/// `PUBLISH_DONE` the end of the relay's direction is what the task waits
-/// for (§10.11), and a `STOP_SENDING` there finds the client's direction
-/// finished.
+/// PUBLISH (§3.3.2: "Implementations SHOULD cancel requests by abruptly
+/// terminating any directions of a stream that are still open by resetting
+/// or sending `STOP_SENDING`"). Before the answer, a FIN ends it too: §5.1,
+/// "A subscriber MUST send exactly one `PUBLISH_OK` ... or `REQUEST_ERROR`
+/// in response to a PUBLISH", and the direction that would carry it is
+/// over.
+///
+/// WHY a `STOP_SENDING` before the answer ends nothing, where after
+/// `PUBLISH_OK` it ends the subscription (§5.1: a subscriber ends one with
+/// `STOP_SENDING`): §5.1 has no such transition from Pending, and §3.3.2
+/// lets a receiver cancel; the text does not decide, and this is the
+/// ruling of `docs/moqt-implementation-notes.md`, which `@xmoq/moqt` follows
+/// too. The PUBLISH waits for the subscriber's reset or answer.
+/// WHY NOT end it: the subscriber that stopped may still answer.
+///
+/// After `PUBLISH_DONE` the end of the relay's direction is what the task
+/// waits for (§10.11), and a `STOP_SENDING` there finds the client's
+/// direction finished.
 #[must_use]
 pub fn stream_end(stage: PublishStage, end: RequestStreamEnd) -> StreamEndDoes {
     match (stage, end) {
         (PublishStage::Done, RequestStreamEnd::Fin | RequestStreamEnd::Reset) => {
             StreamEndDoes::PeerEnd
         }
-        (PublishStage::Done, RequestStreamEnd::StopSending)
-        | (PublishStage::Pending | PublishStage::Established, RequestStreamEnd::Fin) => {
-            StreamEndDoes::Nothing
+        (PublishStage::Done | PublishStage::Pending, RequestStreamEnd::StopSending)
+        | (PublishStage::Established, RequestStreamEnd::Fin) => StreamEndDoes::Nothing,
+        (PublishStage::Pending, RequestStreamEnd::Fin | RequestStreamEnd::Reset)
+        | (PublishStage::Established, RequestStreamEnd::Reset | RequestStreamEnd::StopSending) => {
+            StreamEndDoes::Ends
         }
-        (
-            PublishStage::Pending | PublishStage::Established,
-            RequestStreamEnd::Reset | RequestStreamEnd::StopSending,
-        ) => StreamEndDoes::Ends,
     }
 }
 
@@ -342,7 +352,7 @@ mod tests {
             };
             assert_eq!(got, expected, "{name}");
         }
-        assert_eq!(read, 7);
+        assert_eq!(read, 9);
     }
 
     const TOKEN: u64 = 7;
