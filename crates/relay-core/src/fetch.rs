@@ -45,7 +45,7 @@ pub(crate) const MAX_FETCHES_PER_SESSION: usize = 16;
 /// FETCH requests the relay may have open on one publisher's session at once.
 /// One more is answered with `EXCESSIVE_LOAD`.
 ///
-/// WHY a number of its own below [`MAX_OWN_REQUESTS_PER_SESSION`]: the
+/// WHY a number of its own below [`crate::MAX_OWN_REQUESTS_PER_SESSION`]: the
 /// publisher's fetch stream stays open for as long as the subscriber takes
 /// to read it, and each such stream is one of the unidirectional streams the
 /// publisher may have open towards the relay (64). Slow subscribers with

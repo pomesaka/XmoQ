@@ -28,7 +28,7 @@ description = "Run every check that CI runs"
 depends = ["check:rust", "check:ts", "check:layers", "check:workflows", "check:docs"]
 
 [tasks."check:rust"]
-description = "cargo fmt --check, clippy and test for the workspace"
+description = "cargo fmt --check, clippy, test and doc for the workspace"
 run = "scripts/ci/check-rust.sh"
 
 [tasks."check:ts"]
