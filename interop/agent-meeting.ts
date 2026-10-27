@@ -1,6 +1,6 @@
 // An agent in a meeting: two pages each publish a broadcast of their own
 // (`publishBroadcast`, 640x360) under `xmoq/meet/r/<id>`, as the
-// participants of a meeting do (`docs/scale-and-meetings.md`, Part 2), and
+// participants of a meeting do (the meetings of `docs/architecture.md`), and
 // `xmoq-agent --meeting r` is told of them and asked for their pictures.
 // No transcriber runs: nobody's voice is read (`--speech off`).
 //

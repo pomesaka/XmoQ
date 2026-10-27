@@ -1,6 +1,6 @@
 // Where the broadcasts of a meeting are: every participant publishes under
 // `xmoq/meet/<room>/<id>`, and is found with one SUBSCRIBE_NAMESPACE for
-// `xmoq/meet/<room>` (decided on 2026-10-25, `docs/scale-and-meetings.md`).
+// `xmoq/meet/<room>` (the meetings of `docs/architecture.md`).
 // `xmoq-meeting-tracks` (`crates/meeting-tracks`) has the same, and
 // `namespaces.tsv` and `participant-of.tsv` of `fixtures/meeting-presence/`
 // pin both. WHY no import here: the room's Worker reads this file

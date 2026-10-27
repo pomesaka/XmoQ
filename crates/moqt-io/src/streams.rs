@@ -83,6 +83,11 @@ pub struct StreamConfig {
     /// this endpoint accepts.
     ///
     /// FIXME: replace with the Object size limit once `XmoQ` decides one.
+    ///
+    /// FIXME: one measure and one value for both: `@xmoq/moqt` bounds the
+    /// payload and the properties of an Object apart
+    /// (`maxObjectPayloadLength`, `maxObjectPropertiesLength`), so an Object
+    /// one session takes the other can stop (`fixtures/limits/README.md`).
     pub subgroup_buffer_limit: usize,
     /// Undecoded bytes all subgroup streams of the session may hold together.
     /// A stream that would take the session over it is stopped.

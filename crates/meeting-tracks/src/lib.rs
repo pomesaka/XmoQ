@@ -1,4 +1,4 @@
-//! The namespaces of a meeting (`docs/scale-and-meetings.md`), as every
+//! The namespaces of a meeting (the meetings of `docs/architecture.md`), as every
 //! side uses them: every participant publishes a broadcast of its own under
 //! `xmoq/meet/<room>/<id>` ([`participant`]), and is found with one
 //! `SUBSCRIBE_NAMESPACE` for `xmoq/meet/<room>` ([`prefix`]); the room's

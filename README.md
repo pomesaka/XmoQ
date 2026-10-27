@@ -13,7 +13,7 @@ XmoQ explores one-to-many live streaming using MoQ/WebTransport, browser WebCode
 
 ![XmoQ architecture](docs/assets/architecture.svg)
 
-*The intended components. What of it is built is in the [architecture](docs/architecture.md).*
+*The components, built and run on one machine. Where each requirement stands is in the [requirements](docs/requirements.md).*
 
 ## Documentation
 
@@ -40,7 +40,7 @@ Bytes and tables that more than one implementation reads in its tests are under 
 
 ## Checks
 
-Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise install` once. The Rust build also needs a C and a C++ compiler, which mise does not install (for SQLite in `xmoq-chat` and OpenH264 in `xmoq-watch`). Then:
+Tool versions are pinned in `mise.toml` and `rust-toolchain.toml`. Run `mise install` once. The Rust build also needs a C and a C++ compiler, which mise does not install: for SQLite in `xmoq-chat`, OpenH264 in `xmoq-watch`, and whisper.cpp in `xmoq-transcriber`, which needs libclang as well ([`crates/speech/README.md`](crates/speech/README.md)). Then:
 
 | Command | When |
 |---|---|

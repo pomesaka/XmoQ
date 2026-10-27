@@ -1,7 +1,7 @@
 // A participant of a meeting in a page: it learns who is there from one
 // SUBSCRIBE_NAMESPACE for `xmoq/meet/<room>` (draft 18 §6.1), reads each
 // one's catalog, and receives the sound of all of them and the small video
-// of the first who came (decided on 2026-10-25, `docs/scale-and-meetings.md`).
+// of the first who came (the meetings of `docs/architecture.md`).
 // What it receives is handed to the caller, who plays it; publishing its
 // own broadcast is the caller's as well (`@xmoq/media`, `@xmoq/msf`).
 

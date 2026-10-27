@@ -6,9 +6,9 @@
 //! spoke (`from` of `speech`). It subscribes to one participant's video at
 //! a time, the one a picture is asked for.
 //!
-//! **Proposed** (`docs/scale-and-meetings.md`, Part 2); how the participants
-//! find each other is undecided, and this is the side that reads the
-//! namespaces of the relay. WHY one video at a time, and not one for each:
+//! How the participants find each other is the meetings of
+//! `docs/architecture.md`; this is the side that reads the namespaces of the
+//! relay. WHY one video at a time, and not one for each:
 //! a reader that asks for a picture now and then would receive 48 videos
 //! for it, and keep the pictures of each apart (`--frames-kept` bounds
 //! them together through one `Frames` of `xmoq-picture`). WHY a video is

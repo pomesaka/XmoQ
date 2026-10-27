@@ -158,7 +158,7 @@ const ANNOUNCE_ONLY: Pairing[] = ["moqtail-rust", "own-rust"].map(
 
 /**
  * Two relays, the run's above an own one (`--parent` of the own relay,
- * `docs/scale-and-meetings.md`): the publisher is at the run's relay, the
+ * the relay of `docs/architecture.md`): the publisher is at the run's relay, the
  * subscribers at the own relay below it, which asks the one above for the
  * track. "edge: " lets `--only` pick these runs alone.
  */

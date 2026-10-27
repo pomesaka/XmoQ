@@ -9,12 +9,12 @@
 <path d="M660 290 H845" class="dashed" marker-end="url(#amb)"/><text x="752" y="281" class="desc" text-anchor="middle">where it is · token</text>
 <path d="M660 335 H475" class="line" marker-end="url(#arr)"/><text x="567" y="326" class="desc" text-anchor="middle">SUBSCRIBE · Joining FETCH</text>
 <path d="M475 380 H660" class="line" marker-end="url(#arr)"/><text x="567" y="371" class="desc" text-anchor="middle">latest Group, then Objects</text>
-<text x="54" y="448" class="tag" fill="#b9a3f2">CHAT ON TRACKS · THE GATHERER, THE DEMO'S PAGES AND THE TERMINAL VIEWER; THE ROOM'S WEBSOCKET CARRIES NO CHAT</text>
+<text x="54" y="448" class="tag" fill="#b9a3f2">CHAT ON TRACKS · THE GATHERER, THE DEMO'S PAGES AND THE TERMINAL VIEWER; THE ROOM, ASKED OVER HTTP, CARRIES NO CHAT</text>
 <path d="M105 480 H475" class="chat" marker-end="url(#vio)"/><text x="290" y="471" class="desc" text-anchor="middle">SUBSCRIBE_NAMESPACE xmoq/chat</text>
 <path d="M660 525 H475" class="chat" marker-end="url(#vio)"/><text x="567" y="516" class="desc" text-anchor="middle">PUBLISH_NAMESPACE …/&lt;room&gt;/&lt;name&gt;</text>
 <path d="M475 570 H105" class="chat" marker-end="url(#vio)"/><text x="290" y="561" class="desc" text-anchor="middle">NAMESPACE; it subscribes to said</text>
 <path d="M660 615 H475" class="chat" marker-end="url(#vio)"/><text x="567" y="606" class="desc" text-anchor="middle">said: a line a Group</text><path d="M475 615 H105" class="chat" marker-end="url(#vio)"/><text x="290" y="606" class="desc" text-anchor="middle">numbered, kept in SQLite</text>
 <path d="M105 660 H475" class="chat" marker-end="url(#vio)"/><text x="290" y="651" class="desc" text-anchor="middle">PUBLISH lines of xmoq/chat/&lt;room&gt;</text><path d="M475 660 H660" class="chat" marker-end="url(#vio)"/><text x="567" y="651" class="desc" text-anchor="middle">lines; latest by FETCH</text>
 <path d="M54 712 H94" class="chat"/><text x="104" y="716" class="desc">The gatherer (xmoq-chat), the demo's pages (@xmoq/chat) and the terminal viewer (xmoq-chat-tracks)</text>
-<text x="480" y="752" class="desc" text-anchor="middle">The room's WebSocket carries tokens and where a broadcast is; the relay checks a token where it has the room's key.</text>
+<text x="480" y="752" class="desc" text-anchor="middle">The room, asked over HTTP, gives tokens and where a broadcast is; the relay checks a token where it has the room's key.</text>
 </svg>
