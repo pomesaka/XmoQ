@@ -88,7 +88,7 @@ const KEEP_ALIVE: Duration = Duration::from_secs(3);
 /// How long nothing may arrive from a peer before a server counts the
 /// connection as lost, unless the caller says otherwise. A peer that
 /// vanishes without closing is only noticed this way, and until then its
-/// tracks and subscriptions stay. Provisional; the default of quinn-proto
+/// tracks and subscriptions stay. Provisional (§13.6.1); the default of quinn-proto
 /// 0.11.19 is 30 seconds (`TransportConfig::default`, read 2026-10-10).
 ///
 /// WHY 6 seconds and a keep-alive every 3: a vanished peer is noticed after
