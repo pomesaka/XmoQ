@@ -123,6 +123,11 @@ export interface CatalogFollower {
  * given up, and the reading goes on with the subscription alone: the first
  * catalog is then the one of the next Group the publisher starts.
  * `joiningFetch` of the result says which it was.
+ *
+ * Every call starts from nothing: the Locations of an earlier subscription
+ * are not compared, so a publisher that starts again at a lower Group
+ * (§6.1 has it use a larger one; the catalog of `mlmpub` is Object 0 of
+ * Group 0 after every start) is followed all the same.
  */
 export async function followCatalog(
 	connection: Pick<MoqtConnection, "subscribe" | "fetch" | "close">,

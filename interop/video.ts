@@ -556,7 +556,7 @@ const NOISE = {
 	noise: true,
 };
 const PAGE_VIDEO = options.picture === "noise" ? NOISE : BARS;
-/** What a viewer of the noise takes of one Object at most: what the README of `@xmoq/media` asks of a viewer. */
+/** What a viewer of the noise takes of one Object at most: no more than `playVideoTrack` of `@xmoq/media` asks of a viewer's connection. */
 const VIEWER_MAX_OBJECT = 1024 * 1024;
 /** Frames the publisher has painted before the viewer comes: more than a Group. */
 const PAINTED_BEFORE = 30;

@@ -172,6 +172,8 @@ export function createMeeting(options: MeetingOptions): Meeting {
 						trackNamespace,
 						trackName,
 						codec,
+						// **Provisional**: a sound track without `samplerate` is taken
+						// for 48,000 Hz, and one without `channelConfig` for one channel.
 						sampleRate: track.samplerate ?? 48_000,
 						numberOfChannels: Number(track.channelConfig ?? 1),
 						onData: (data) => options.onAudio(id, data),

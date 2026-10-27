@@ -57,7 +57,8 @@ export function locProperties(timing: LocTiming): LocProperty[] {
  * Timescale that comes twice, a Timescale of 0, and a Timescale without a
  * Timestamp, which gives a unit to nothing. A value is not looked at
  * beyond that: what the caller hands in as an integer is handed out, also
- * one MoQ Transport cannot carry (below 0, or 2^64 and above).
+ * one MoQ Transport cannot carry (below 0, or 2^64 and above). The time is
+ * carried and not compared: nothing here says that timestamps grow.
  */
 export function readLocTiming(
 	properties: readonly LocProperty[],
@@ -95,7 +96,8 @@ export function readLocTiming(
 /**
  * The time of a frame in microseconds, the unit of `timestamp` in WebCodecs:
  * since the Unix epoch without a timescale, and since whatever the
- * application counts from with one. Rounded down. A `LocTiming` that was
+ * application counts from with one. Rounded down, so two frames closer
+ * than a microsecond in a fine timescale get the same time. A `LocTiming` that was
  * read or written here has no timescale of 0; one made by hand with it is
  * a `RangeError`, and a negative one gives a negative time.
  */

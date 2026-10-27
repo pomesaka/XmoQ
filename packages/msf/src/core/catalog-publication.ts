@@ -145,6 +145,13 @@ const attributesOf = (track: CatalogTrack): string =>
  * whether the namespace is spelled out or is the catalog track's. A track
  * that was removed and comes back is compared with nothing: only the
  * catalog before is known here.
+ *
+ * **The draft contradicts that sentence of §5.3 itself**: §11.3 has a
+ * publisher that turns a broadcast into VOD publish a catalog "which, for
+ * each track, sets isLive Section 5.2.7 to FALSE and adds a track duration
+ * Section 5.2.35 field", a field added to a track that was declared.
+ * `trackDuration` is not written here, so the rule does not meet it; when
+ * it is, it is to be left out of what may not change, as `isLive` is.
  */
 export function nextPublication(
 	before: CatalogPublication,

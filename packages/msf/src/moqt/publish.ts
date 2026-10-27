@@ -91,7 +91,9 @@ export interface CatalogPublisher {
 	 * says whether it was. One that is taken is accepted with the Location of
 	 * the newest catalog as its LARGEST_OBJECT, and gets every catalog after
 	 * that; the newest itself is not sent again, a subscriber gets it with a
-	 * Joining FETCH (§5).
+	 * Joining FETCH (§5). `moqlivemock`'s publisher sends it on the
+	 * subscription as well, "for backward compatibility with subscribe-only
+	 * clients"; that is not done here.
 	 *
 	 * A subscription with FORWARD 0 is accepted and sent nothing (transport
 	 * §5.1: "The publisher does not send Objects if the Forward State is

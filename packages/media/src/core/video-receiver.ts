@@ -200,7 +200,12 @@ const MAX_VALUE = 2n ** 64n - 1n;
  *   of a subgroup stream, and the Prior Group ID Gap and Prior Object ID
  *   Gap properties (§12.8, §12.9).
  * - Groups come out in ascending order, and one that was passed does not
- *   come back.
+ *   come back. So one Object 0 of a Group far ahead, from a publisher or a
+ *   fault, makes every Group below it late until the Group IDs catch up.
+ * - **What is held is held without a time limit**: a track that stops in
+ *   the middle of a Group keeps up to `maxHeldObjects` Objects until the
+ *   receiver is let go. After an End of Track, what is held before it
+ *   stays held, though no later Group can begin.
  *
  * Throws a `RangeError` for a limit or a Timescale outside its range.
  */
