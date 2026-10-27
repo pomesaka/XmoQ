@@ -72,13 +72,18 @@ function feed(
 // a stream has sent when its time runs out, and whether it is stopped then.
 // Each row is run with its bytes in one read and a byte at a time.
 describe("fixtures/first-bytes: whether a stream has said what it is when its time runs out", () => {
-	const STOPPED: Record<PeerStreamKind, string[]> = {
-		uni: ["stop uni 7 code 0", "timed out uni 7"],
-		bidi: ["abandon bidi 7 code 1", "timed out bidi 7"],
-	};
+	const stoppedWith = (
+		kind: PeerStreamKind,
+		code: number | undefined,
+	): string[] =>
+		code === undefined
+			? []
+			: kind === "uni"
+				? [`stop uni 7 code ${code}`, "timed out uni 7"]
+				: [`abandon bidi 7 code ${code}`, "timed out bidi 7"];
 	test.each(firstBytesFixtures())(
 		"$kind $name: $said",
-		({ kind, sentHex, said }) => {
+		({ kind, sentHex, said, stopped }) => {
 			const bytes = hex(sentHex);
 			const readings = [
 				bytes.length === 0 ? [] : [sentHex],
@@ -89,10 +94,36 @@ describe("fixtures/first-bytes: whether a stream has said what it is when its ti
 				session.peerStreamOpened(kind, 7);
 				feed(session, kind, chunks);
 				expect(briefly(session.peerStreamTimedOut(kind, 7))).toEqual(
-					said ? [] : STOPPED[kind],
+					stoppedWith(kind, stopped),
 				);
 				expect(session.closed).toBe(false);
+				expect(said).toBe(stopped === undefined);
 			}
+		},
+	);
+
+	// What a FIN does to a stream that has not said what it is: one that
+	// sent nothing carried nothing, and one that ends inside its type, its
+	// header or its first message closes the session. §10: "If the length
+	// does not match the length of the Message Payload, the receiver MUST
+	// close the session with a PROTOCOL_VIOLATION"; §10.12.3 has the
+	// FETCH_HEADER on every fetch stream; the draft has no rule for a stream
+	// that ends inside its Stream Type, which is read as one that ends inside
+	// an Object (§11.4).
+	test.each(firstBytesFixtures().filter((row) => !row.said))(
+		"$kind $name ends with a FIN: $fin",
+		({ kind, sentHex, fin }) => {
+			const session = started();
+			session.peerStreamOpened(kind, 7);
+			const outputs =
+				kind === "uni"
+					? session.receivePeerUniStreamData(7, hex(sentHex), true)
+					: session.receivePeerBidiStreamData(7, hex(sentHex), true);
+			const closes = briefly(outputs).filter((brief) =>
+				brief.startsWith("close "),
+			);
+			expect(closes).toEqual(fin === "nothing" ? [] : [`close ${fin}`]);
+			expect(session.closed).toBe(fin !== "nothing");
 		},
 	);
 });

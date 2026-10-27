@@ -1,18 +1,18 @@
-nothing	uni		not-yet
-half-of-a-type	uni	80	not-yet
-half-of-the-control-type	uni	af	not-yet
-control-type	uni	af00	said
-padding-type	uni	f0132b3e28	said
-subgroup-type	uni	5d	not-yet
-subgroup-type-and-track-alias	uni	5d00	not-yet
-subgroup-header	uni	5d00000000	said
-subgroup-header-and-half-an-object	uni	5d00000000000561	said
-fetch-type	uni	05	not-yet
-fetch-header	uni	0500	said
-nothing	bidi		not-yet
-message-type	bidi	03	not-yet
-type-and-length	bidi	03001f	not-yet
-request-id	bidi	03001f01	not-yet
-after-request-id	bidi	03001f0102	not-yet
-all-but-the-last-byte	bidi	03001f010204786d6f7106706861736530066f626a656374041001108001010201	not-yet
-whole-first-message	bidi	03001f010204786d6f7106706861736530066f626a65637404100110800101020101	said
+nothing	uni		not-yet	0x0	nothing
+half-of-a-type	uni	80	not-yet	0x0	closed:0x3
+half-of-the-control-type	uni	af	not-yet	0x0	closed:0x3
+control-type	uni	af00	said	-	-
+padding-type	uni	f0132b3e28	said	-	-
+subgroup-type	uni	5d	not-yet	0x0	closed:0x3
+subgroup-type-and-track-alias	uni	5d00	not-yet	0x0	closed:0x3
+subgroup-header	uni	5d00000000	said	-	-
+subgroup-header-and-half-an-object	uni	5d00000000000561	said	-	-
+fetch-type	uni	05	not-yet	0x0	closed:0x3
+fetch-header	uni	0500	said	-	-
+nothing	bidi		not-yet	0x1	nothing
+message-type	bidi	03	not-yet	0x1	closed:0x3
+type-and-length	bidi	03001f	not-yet	0x1	closed:0x3
+request-id	bidi	03001f01	not-yet	0x1	closed:0x3
+after-request-id	bidi	03001f0102	not-yet	0x1	closed:0x3
+all-but-the-last-byte	bidi	03001f010204786d6f7106706861736530066f626a656374041001108001010201	not-yet	0x1	closed:0x3
+whole-first-message	bidi	03001f010204786d6f7106706861736530066f626a65637404100110800101020101	said	-	-

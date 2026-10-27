@@ -429,11 +429,16 @@ describe("a request that is kept is not one that is yet to come, also when its I
 });
 
 describe("fixtures/moqt-18-by-hand: the REQUEST_UPDATE messages written by hand", () => {
-	test("the three files are the ones the tests read", () => {
+	// The first three are read here; the others are read in
+	// control-message.test.ts.
+	test("the files are the ones the tests read", () => {
 		expect([...BY_HAND_CONTROL_MESSAGES]).toEqual([
 			"request-update-request-id-3",
 			"request-update-request-id-5",
 			"request-update-new-group-request",
+			"request-update-track-namespace-prefix",
+			"subscribe-rendezvous-timeout",
+			"fetch-fill-timeout",
 		]);
 	});
 
@@ -898,7 +903,7 @@ describe("a SUBSCRIBE_NAMESPACE of the peer is decoded whole before it is refuse
 // TRACK_NAMESPACE_PREFIX (§10.2.14), written by hand: a REQUEST_UPDATE with
 // the Request ID 3 and the new prefix (xmoq), as a Track Namespace with no
 // length before it.
-const UPDATE_WITH_A_PREFIX = "02 00 09 03 01 34 01 04 78 6d 6f 71";
+const UPDATE_WITH_A_PREFIX = byHand("request-update-track-namespace-prefix");
 
 describe("a REQUEST_UPDATE with TRACK_NAMESPACE_PREFIX", () => {
 	test.each([

@@ -103,6 +103,11 @@ pub(crate) const REQUEST_UPDATES_BY_HAND: [(&str, u64, Option<u64>); 3] = [
 fn every_file_written_by_hand_is_read_by_a_test() {
     let mut read = crate::fetch::tests::names_of_files_written_by_hand();
     read.extend(REQUEST_UPDATES_BY_HAND.map(|(name, _, _)| name));
+    read.extend(
+        crate::message::tests::messages_written_by_hand()
+            .into_iter()
+            .map(|(name, _)| name),
+    );
     read.sort_unstable();
 
     assert_eq!(names_on_disk("moqt-18-by-hand"), read);
