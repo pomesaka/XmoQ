@@ -1,6 +1,7 @@
 // A reader of JSON (RFC 8259) that keeps the text of each number, for the
 // payloads of the tracks that Rust writes and reads with `serde_json`: the
-// chat's (`@xmoq/chat`) and the transcripts' (`@xmoq/transcript`).
+// chat's (`@xmoq/chat`) and the transcripts' (`@xmoq/transcript`), and the
+// catalogs of MSF (`@xmoq/msf`).
 //
 // WHY NOT `JSON.parse`: the same bytes are to give the same value, or the
 // same reason why there is none, in every reader (`fixtures/chat-tracks/`,

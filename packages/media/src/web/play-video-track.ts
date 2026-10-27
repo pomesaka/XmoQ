@@ -194,6 +194,10 @@ export interface VideoPlayback {
  *   the key frame of a later Group.
  * - An `end-of-track` of the receiver is counted, and the subscription goes
  *   on: it ends when the publisher ends it, or the caller.
+ * - **The caller makes the connection with `limits.maxObjectPayloadLength`
+ *   no higher than the receiver holds** (`DEFAULT_MAX_HELD_BYTES`): an
+ *   Object larger than that is never held, and this is handed a connection
+ *   and cannot set its limit.
  * - **The Group the viewer comes into is fetched** (`joiningFetch`): its
  *   Objects up to where the subscription begins come on a fetch stream and
  *   go through the same receiver, which puts them before the ones of the

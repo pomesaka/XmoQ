@@ -1,3 +1,7 @@
+// A reader of the transcripts that the transcriber (`crates/transcriber`)
+// publishes: the track `speech` of `xmoq/transcript/<prefix>`, a piece of
+// speech a Group, followed across sessions and shown in a page as captions.
+
 export {
 	SPEECH_TRACK,
 	TRANSCRIPT_PREFIX,

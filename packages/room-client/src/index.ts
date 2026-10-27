@@ -1,3 +1,7 @@
+// Asking a room (@xmoq/room) over HTTP: where its relay is, tokens for that
+// relay, and the seats of a meeting. What the room answers, and how a client
+// reads it, is `fixtures/room-api/README.md`.
+
 export {
 	broadcastRoom,
 	type KeptSeat,

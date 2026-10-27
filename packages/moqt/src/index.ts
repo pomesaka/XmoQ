@@ -48,6 +48,10 @@ export type {
 	TrackStatusRequest,
 } from "./core/requests.ts";
 export { MAX_NAMESPACES_OF_A_SUBSCRIPTION } from "./core/requests.ts";
+// `createSubgroupStreamDecoder` is the decoder a connection uses itself. It
+// is exported for tests outside this package that read a captured stream
+// (`@xmoq/media` reads the one of `moqlivemock` in `fixtures/moqt-18/`), not
+// as a second way to receive Objects.
 export {
 	createSubgroupStreamDecoder,
 	type ObjectStatus,
