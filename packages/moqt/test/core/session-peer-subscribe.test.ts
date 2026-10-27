@@ -763,7 +763,7 @@ describe("fixtures/peer-subscribe: what becomes of a SUBSCRIBE of the peer", () 
 	};
 
 	test("the table has the twelve rows of its README", () => {
-		expect(rows.length).toBe(12);
+		expect(rows.length).toBe(13);
 	});
 
 	test.each(rows)(

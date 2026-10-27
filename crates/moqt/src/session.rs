@@ -3441,6 +3441,115 @@ mod tests {
         }
     }
 
+    /// The rows of `fixtures/early-objects/aliases.tsv`, which `@xmoq/moqt`
+    /// reads as well: steps in a client's session, and then whom a Track
+    /// Alias names. §11.1: "Track Alias is chosen by the publisher and
+    /// included in `SUBSCRIBE_OK`", and "Objects can arrive after a
+    /// subscription has been cancelled", so an alias this end chose is not
+    /// given again, and one past an alias this end uses is not given either.
+    /// §10.11: after `PUBLISH_DONE` the alias stays the subscription's until
+    /// the streams its Stream Count named have ended; then a late stream
+    /// under it is stopped, and more streams than counted are not a reason
+    /// to close the session. A `SUBSCRIBE_OK` that reuses the alias of a
+    /// draining subscription takes it; one that is refused for a Mandatory
+    /// Track Property (§2.5.1) leaves it to the draining one; one whose alias
+    /// another subscription holds closes the session with
+    /// `DUPLICATE_TRACK_ALIAS` before the property is looked at.
+    #[test]
+    fn a_track_alias_names_what_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<3>("early-objects/aliases.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 8);
+        for [name, steps, expected] in rows {
+            let mut session = client();
+            let mut own = std::collections::HashMap::new();
+            let mut given = Vec::new();
+            let mut peer_request_id = 1;
+            let mut fault = None;
+            for step in steps.split(' ') {
+                let parts: Vec<&str> = step.split(':').collect();
+                let fed = match parts[..] {
+                    ["subscribe", track_name] => {
+                        let (request, _) = session
+                            .subscribe(track(track_name.as_bytes()), vec![])
+                            .unwrap();
+                        own.insert(track_name, request);
+                        Ok(())
+                    }
+                    ["ok", track_name, alias] => session
+                        .feed(
+                            own[track_name],
+                            subscribe_ok(alias.parse().unwrap(), vec![]),
+                        )
+                        .map(|_| ()),
+                    ["ok-mandatory", track_name, alias] => session
+                        .feed(
+                            own[track_name],
+                            subscribe_ok(
+                                alias.parse().unwrap(),
+                                vec![KeyValuePair::varint(0x4000, 1).unwrap()],
+                            ),
+                        )
+                        .map(|_| ()),
+                    ["done", track_name, streams] => session
+                        .feed(
+                            own[track_name],
+                            ControlMessage::PublishDone(PublishDone {
+                                status_code: 2,
+                                stream_count: streams.parse().unwrap(),
+                                error_reason: ReasonPhrase::default(),
+                            }),
+                        )
+                        .map(|_| ()),
+                    ["end", alias] => {
+                        session.on_data_stream_closed(alias.parse().unwrap());
+                        Ok(())
+                    }
+                    ["publish", alias] => {
+                        session
+                            .publish(track(b"own"), alias.parse().unwrap(), vec![], vec![])
+                            .unwrap();
+                        Ok(())
+                    }
+                    ["peer-subscribe", track_name] => {
+                        let first = ControlMessage::Subscribe(Subscribe {
+                            request_id: peer_request_id,
+                            full_track_name: track(track_name.as_bytes()),
+                            parameters: vec![],
+                        });
+                        peer_request_id += 2;
+                        let Ok(PeerRequestOpened::Request(request, _)) =
+                            session.on_peer_request_opened(first)
+                        else {
+                            panic!("{name}: {step}");
+                        };
+                        given.push(session.accept_subscribe(request, vec![], vec![]).unwrap().0);
+                        Ok(())
+                    }
+                    _ => panic!("{name}: a step the test does not know: {step}"),
+                };
+                if let Err(error) = fed {
+                    fault = Some(error);
+                    break;
+                }
+            }
+            let got = if let Some(error) = fault {
+                closed_by(&error)
+            } else if !given.is_empty() {
+                let given: Vec<String> = given.iter().map(ToString::to_string).collect();
+                format!("given:{}", given.join(","))
+            } else {
+                match session.subscribed_alias(9) {
+                    SubscribedAlias::Established(track) | SubscribedAlias::Draining(track) => {
+                        format!("object:{}", String::from_utf8_lossy(track.name()))
+                    }
+                    SubscribedAlias::Retired | SubscribedAlias::Unknown => "stopped".to_string(),
+                }
+            };
+            assert_eq!(got, expected, "{name}");
+        }
+    }
+
     #[test]
     fn a_request_update_is_refused_where_the_peer_may_send_one() {
         // Every update has a Request ID of its own (§10.1).

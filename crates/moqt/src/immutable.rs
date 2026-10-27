@@ -261,7 +261,7 @@ mod tests {
             );
             read += 1;
         }
-        assert_eq!(read, 30);
+        assert_eq!(read, 32);
     }
 
     /// What a reader above the session searches: column 6 of the rows the

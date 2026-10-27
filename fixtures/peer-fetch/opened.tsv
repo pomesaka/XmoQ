@@ -15,6 +15,7 @@ joins-an-accepted-subscribe	subscribe-accepted	joining	160007030201000120c8	hand
 joins-an-accepted-subscribe-absolute	subscribe-accepted	joining	160007030301050120c8	handed
 joins-a-subscribe-after-publish-done	subscribe-done	joining	160007030201000120c8	refused 0x32
 joins-a-rejected-subscribe	subscribe-rejected	joining	160007030201000120c8	refused 0x32
+joins-an-accepted-subscribe-of-forward-0	subscribe-accepted-forward-0	joining	160007030201000120c8	handed
 request-id-of-the-wrong-parity	nothing	standalone	16001d02010204786d6f7106706861736530066f626a656374000101020120c8	closed 0x4
 request-id-used-before	subscribe	standalone	16001d01010204786d6f7106706861736530066f626a656374000101020120c8	closed 0x4
 a-parameter-that-is-none-of-a-fetch	nothing	standalone	16001d01010204786d6f7106706861736530066f626a65637400010102011001	closed 0x3

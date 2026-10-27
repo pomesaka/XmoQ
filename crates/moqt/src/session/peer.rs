@@ -2089,6 +2089,22 @@ mod tests {
                 let request = handed(&mut session);
                 session.accept_subscribe(request, vec![], vec![]).unwrap();
             }
+            "subscribe-accepted-forward-0" => {
+                let ControlMessage::Subscribe(mut held) = subscribe.clone() else {
+                    panic!("{before}: no SUBSCRIBE: {subscribe:?}");
+                };
+                for parameter in &mut held.parameters {
+                    if let Parameter::Forward(forward) = parameter {
+                        *forward = false;
+                    }
+                }
+                let Ok(PeerRequestOpened::Request(request, _)) =
+                    session.on_peer_request_opened(ControlMessage::Subscribe(held))
+                else {
+                    panic!("{before}");
+                };
+                session.accept_subscribe(request, vec![], vec![]).unwrap();
+            }
             "subscribe-done" => {
                 let request = handed(&mut session);
                 session.accept_subscribe(request, vec![], vec![]).unwrap();
@@ -2148,7 +2164,7 @@ mod tests {
         let rows = opened_rows(&table).unwrap_or_else(|error| panic!("{path}: {error}"));
         // As many as the table has: a row that is added there and not
         // read here is counted.
-        assert_eq!(rows.len(), 12, "{path}");
+        assert_eq!(rows.len(), 13, "{path}");
         // The README has the request that came before be the SUBSCRIBE of
         // the first row: Request ID 1, for the track "object".
         let first = rows.first().expect("rows");
@@ -2159,7 +2175,18 @@ mod tests {
         let subscribe = whole_message(&first.sent);
         for row in &rows {
             let mut session = session_before(&row.before, &subscribe);
-            let outcome = match session.on_peer_request_opened(whole_message(&row.sent)) {
+            // What the decoder refuses closes the session before the session
+            // sees it.
+            let message = match ControlMessage::decode(&row.sent) {
+                Ok(Some((message, used))) if used == row.sent.len() => message,
+                Err(error) => {
+                    let code = error.termination_code().expect("it closes the session");
+                    assert_eq!(format!("closed {:#x}", code.code()), row.outcome, "{row:?}");
+                    continue;
+                }
+                other => panic!("{row:?}: {other:?}"),
+            };
+            let outcome = match session.on_peer_request_opened(message) {
                 Ok(PeerRequestOpened::Request(_, PeerRequest::Subscribe(_))) => {
                     "handed".to_string()
                 }
@@ -2196,7 +2223,7 @@ mod tests {
     fn a_fetch_of_the_peer_is_handed_on_refused_or_fatal_where_the_shared_table_says() {
         let rows = table_rows::<5>("peer-fetch/opened.tsv");
         // As many as the README has.
-        assert_eq!(rows.len(), 22);
+        assert_eq!(rows.len(), 23);
         let subscribe = first_subscribe_of_the_shared_table();
         for [name, before, kind, sent, outcome] in &rows {
             let mut session = session_before(before, &subscribe);
@@ -2244,7 +2271,7 @@ mod tests {
     fn a_fetch_of_the_peer_is_answered_step_by_step_as_the_shared_table_says() {
         let rows = table_rows::<3>("peer-fetch/updates.tsv");
         // As many as the README has.
-        assert_eq!(rows.len(), 13);
+        assert_eq!(rows.len(), 16);
         // The FETCH of the README: the capture, with the Request ID 1, the
         // Start Location {3, 4} and the End Location {5, 1}.
         let ControlMessage::Fetch(mut fetch) =
@@ -2317,8 +2344,18 @@ mod tests {
                         updated(&mut session, vec![Parameter::SubscriberPriority(200)])
                     }
                     "update-forward" => updated(&mut session, vec![Parameter::Forward(true)]),
+                    "update-filter" => updated(
+                        &mut session,
+                        vec![Parameter::SubscriptionFilter(
+                            crate::params::SubscriptionFilter::NextGroupStart,
+                        )],
+                    ),
+                    "update-new-group-request" => {
+                        updated(&mut session, vec![Parameter::NewGroupRequest(7)])
+                    }
                     "accept" => accepted(&mut session, at(5, 1)),
                     "accept-before-start" => accepted(&mut session, at(3, 3)),
+                    "accept-at-start" => accepted(&mut session, at(3, 4)),
                     "accept-beyond-end" => accepted(&mut session, at(9, 0)),
                     "reject" => match session.reject(request, 0x10, 0, ReasonPhrase::default()) {
                         Ok(response) => named(&response).to_string(),
@@ -3091,6 +3128,13 @@ mod tests {
         );
     }
 
+    /// §10.12.2: "if that subscription has not yet been established, the
+    /// Publisher receiving the Joining Fetch buffers the pending Joining
+    /// Fetch until either the Subscription is established or the request
+    /// times out". The session holds it for its caller, and lets it be
+    /// answered once the SUBSCRIBE is accepted; one whose SUBSCRIBE is over
+    /// before or after is the caller's to reject. `@xmoq/moqt` serves no
+    /// Joining FETCH, so this is the Rust session's alone.
     #[test]
     fn a_joining_fetch_is_answered_once_its_subscribe_is_accepted() {
         let mut session = server();

@@ -11,7 +11,7 @@ One row a line, five fields separated by tabs:
 | Field | Meaning |
 |---|---|
 | name | What the row is about |
-| before | What happened in the session before the row's bytes: as in [`../peer-subscribe/README.md`](../peer-subscribe/README.md) |
+| before | What happened in the session before the row's bytes: as in [`../peer-subscribe/README.md`](../peer-subscribe/README.md), and `subscribe-accepted-forward-0`, as `subscribe-accepted` with the SUBSCRIBE's FORWARD 0 in place of 1 |
 | kind | `standalone` or `joining`: what the FETCH is, for the one place the two implementations part (below); `neither` for the row with a Fetch Type the draft does not have |
 | sent | The bytes the server sends on a new bidirectional stream, in hex: one FETCH, whole |
 | outcome | `handed`: the caller of the session gets the request. `refused 0x11`, `refused 0x32`: the session answers REQUEST_ERROR with that code itself (`INVALID_RANGE`, `INVALID_JOINING_REQUEST_ID`). `closed 0x3`, `closed 0x4`: the session is closed with that Session Termination Error Code (`PROTOCOL_VIOLATION`, `INVALID_REQUEST_ID`) |
@@ -33,8 +33,11 @@ What happens to one Standalone FETCH of the peer, in order, and what this endpoi
 | `update` | The peer sends REQUEST_UPDATE with no parameter, with its next Request ID (3, then 5) |
 | `update-priority` | The same with SUBSCRIBER_PRIORITY 200, which the update of a FETCH may carry |
 | `update-forward` | The same with FORWARD 1, which it may not (§10.2.12) |
+| `update-filter` | The same with the Subscription Filter NextGroupStart, which it may not (§10.2.9) |
+| `update-new-group-request` | The same with NEW_GROUP_REQUEST 7, which it may not (§10.2.13) |
 | `accept` | The application accepts, with End Location {5, 1}: what was asked for |
 | `accept-before-start` | It accepts with End Location {3, 3}, before the Start Location |
+| `accept-at-start` | It accepts with End Location {3, 4}, the Start Location |
 | `accept-beyond-end` | It accepts with End Location {9, 0}, beyond what was asked for |
 | `reject` | It rejects, with `DOES_NOT_EXIST` |
 

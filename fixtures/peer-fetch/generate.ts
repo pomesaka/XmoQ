@@ -70,7 +70,9 @@ type Before =
 	| "subscribe"
 	| "subscribe-accepted"
 	| "subscribe-done"
-	| "subscribe-rejected";
+	| "subscribe-rejected"
+	/** As subscribe-accepted, with the SUBSCRIBE's FORWARD 0 in place of 1. */
+	| "subscribe-accepted-forward-0";
 /** What the FETCH is; `neither` for a Fetch Type the draft does not have. */
 type Kind = "standalone" | "joining" | "neither";
 type Outcome = "handed" | `refused 0x${string}` | `closed 0x${string}`;
@@ -95,6 +97,10 @@ const opened: [name: string, before: Before, kind: Kind, sent: string, outcome: 
 	["joins-an-accepted-subscribe-absolute", "subscribe-accepted", "joining", joining(3, 3, 1, 5), "handed"],
 	["joins-a-subscribe-after-publish-done", "subscribe-done", "joining", joining(3, 2, 1, 0), "refused 0x32"],
 	["joins-a-rejected-subscribe", "subscribe-rejected", "joining", joining(3, 2, 1, 0), "refused 0x32"],
+	// §10.12.2 has a Joining FETCH "only permitted when the associated
+	// subscription has Forward State 1"; the session does not look at it, and
+	// leaves it to whoever answers the FETCH (a known shortcoming).
+	["joins-an-accepted-subscribe-of-forward-0", "subscribe-accepted-forward-0", "joining", joining(3, 2, 1, 0), "handed"],
 	["request-id-of-the-wrong-parity", "nothing", "standalone", standalone(2, [0, 1], [1, 2]), "closed 0x4"],
 	["request-id-used-before", "subscribe", "standalone", standalone(1, [0, 1], [1, 2]), "closed 0x4"],
 	["a-parameter-that-is-none-of-a-fetch", "nothing", "standalone", standalone(1, [0, 1], [1, 2], FORWARD), "closed 0x3"],
@@ -112,10 +118,16 @@ type Step =
 	| "update-priority"
 	/** REQUEST_UPDATE with FORWARD 1, which it may not. */
 	| "update-forward"
+	/** REQUEST_UPDATE with the Subscription Filter NextGroupStart, which it may not either. */
+	| "update-filter"
+	/** REQUEST_UPDATE with NEW_GROUP_REQUEST 7, which it may not either. */
+	| "update-new-group-request"
 	/** The application accepts, with End Location {5, 1}: what was asked for. */
 	| "accept"
 	/** It accepts with End Location {3, 3}, which is before the Start Location. */
 	| "accept-before-start"
+	/** It accepts with End Location {3, 4}, the Start Location (§10.12.3: "the same or a larger Location"). */
+	| "accept-at-start"
 	/** It accepts with End Location {9, 0}, beyond what was asked for. */
 	| "accept-beyond-end"
 	/** It rejects, with DOES_NOT_EXIST. */
@@ -137,6 +149,9 @@ const updates: [name: string, steps: Step[], sent: Sent[][]][] = [
 	["rejected-then-accepted", ["reject", "accept"], [["REQUEST_ERROR"], ["usage-error"]]],
 	["end-before-the-start-then-accepted", ["accept-before-start", "accept"], [["usage-error"], ["FETCH_OK"]]],
 	["end-beyond-what-was-asked", ["accept-beyond-end"], [["FETCH_OK"]]],
+	["end-at-the-start", ["accept-at-start"], [["FETCH_OK"]]],
+	["update-with-a-filter", ["update-filter"], [["closed 0x3"]]],
+	["update-with-a-new-group-request", ["update-new-group-request"], [["closed 0x3"]]],
 ];
 
 writeFileSync(

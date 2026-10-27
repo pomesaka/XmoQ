@@ -13,7 +13,7 @@ The draft has the rules. §5.1: "an endpoint can have at most one subscription t
 | name | What the row is about |
 | before | What happened in the session before the row's bytes, below |
 | sent | The bytes the server sends on a new bidirectional stream, in hex: one SUBSCRIBE, whole |
-| outcome | `handed`: the application gets the request. `refused 0x19`: the session answers REQUEST_ERROR with that code itself, and the application sees nothing. `closed 0x4`: the session is closed with that Session Termination Error Code (§3.5) |
+| outcome | `handed`: the application gets the request. `refused 0x19`: the session answers REQUEST_ERROR with that code itself, and the application sees nothing. `closed 0x4`, `closed 0x3`: the session is closed with that Session Termination Error Code (§3.5) |
 
 The session is that of a client, after its own SETUP.
 
@@ -32,9 +32,8 @@ The last two states are about what still comes on the stream of a request that w
 
 ## Where the bytes come from
 
-Every `sent` is `../moqt-18/subscribe-moqtail-rs.hex`, captured from the `moqtail` crate 0.15.0, with two changes: its Request ID, which is 0 there and has to be one of a server here (1, 3 or 5; 2 for the row of the wrong parity), and for the rows of another track the last byte of its Track Name (`object` to `objecu`). `generate.ts` makes the table: `bun fixtures/peer-subscribe/generate.ts`.
+Every `sent` is `../moqt-18/subscribe-moqtail-rs.hex`, captured from the `moqtail` crate 0.15.0, with two changes, and one with its Message Length one less and its last byte gone (`a-subscribe-that-does-not-decode`): its Request ID, which is 0 there and has to be one of a server here (1, 3 or 5; 2 for the row of the wrong parity), and for the rows of another track the last byte of its Track Name (`object` to `objecu`). `generate.ts` makes the table: `bun fixtures/peer-subscribe/generate.ts`.
 
 ## Not in the table
 
 - How many requests of the peer may be open at once, and `EXCESSIVE_LOAD` (`0x9`) for one more: `peer-requests` of [`fixtures/limits/`](../limits/README.md), which differs between the two, and the row "Requests of the peer that are open at once" of the implementation notes.
-- A SUBSCRIBE that does not decode.

@@ -120,7 +120,7 @@ const ROWS = immutablePropertiesFixtures();
 
 describe("Immutable Properties (§12.7)", () => {
 	test("the shared table has the rows this test expects", () => {
-		expect(ROWS.length).toBe(30);
+		expect(ROWS.length).toBe(32);
 	});
 
 	test.each(ROWS)(
