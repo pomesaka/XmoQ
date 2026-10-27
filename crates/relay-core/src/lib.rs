@@ -497,8 +497,11 @@ struct InStream {
     /// "SHOULD NOT attempt to open a new stream to deliver additional
     /// Objects in that Subgroup"). WHY here and not with the Subgroup: a
     /// Subgroup taken anew from another stream of its source is what the
-    /// relay already lets reach a subscriber twice (§2.2, the gap on a
-    /// second stream for a Subgroup); this covers the stream that goes on.
+    /// relay already lets reach a subscriber twice (§2.2;
+    /// `known_gap_a_subgroup_forgotten_past_the_limit_passes_from_another_source`);
+    /// this covers the stream that goes on. A subscriber that stopped the
+    /// Subgroup gets it again where it is taken anew from another stream
+    /// (`known_gap_a_subgroup_a_subscriber_stopped_reaches_it_again_on_another_stream_of_its_source`).
     /// WHY by Track Alias as well: a later subscription of the same session
     /// has another alias and asked for the track anew.
     stopped: HashSet<(SessionKey, u64)>,
@@ -651,7 +654,13 @@ enum Admission {
 ///   the stream that was opened later: the relay knows the order in which
 ///   the headers were read and not the QUIC stream IDs, so when the header of
 ///   the first stream is read after that of the second, it is the second, the
-///   one the source goes on with, that is stopped. The stream of the other is
+///   one the source goes on with, that is stopped, and the Subgroup is lost
+///   for every subscriber when the first ends with its reset: §11.4.3 has "A
+///   publisher that receives a `STOP_SENDING` on a Subgroup stream SHOULD NOT
+///   attempt to open a new stream to deliver additional Objects in that
+///   Subgroup". No subscriber gets a wrong Object
+///   (`known_gap_the_stream_whose_header_is_read_later_is_kept_though_it_was_reset_first`;
+///   not seen with real peers). The stream of the other is
 ///   reset downstream before a new one is opened, so that no subscriber has
 ///   two streams for the Subgroup of which neither was reset (§2.2), nor two
 ///   open at a time with the same header (§11.4).
@@ -785,6 +794,13 @@ impl Subgroups {
         let newest = self.newest_group.map_or(group, |newest| newest.max(group));
         self.newest_group = Some(newest);
         let forgotten = |group: u64| newest.saturating_sub(group) >= MAX_REMEMBERED_GROUPS;
+        // A second stream for a Subgroup that is forgotten, by its Group or
+        // past `MAX_REMEMBERED_SUBGROUPS`, passes where it is not left
+        // below, and a subscriber gets the Subgroup on two streams of which
+        // neither was reset, against §2.2: "Objects from the same Subgroup
+        // MUST NOT be sent on different streams"
+        // (`a_stream_whose_subgroup_was_forgotten_while_it_was_open`,
+        // `known_gap_a_subgroup_forgotten_past_the_limit_passes_from_another_source`).
         if forgotten(group) {
             return if several_sources {
                 Admission::Discard
@@ -795,7 +811,14 @@ impl Subgroups {
         let source: SourceId = (stream.0, track_alias);
         let taken = self.taken.get(&(group, subgroup));
         // Two priorities that are known and differ. One the relay is not
-        // sure of is not held against the track.
+        // sure of is not held against the track. §9.1: "An endpoint that
+        // receives a duplicate Object with a different Forwarding
+        // Preference, Subgroup ID, Priority or Payload MUST treat the track
+        // as Malformed"; of the four only the priority is compared here, so
+        // the MUST is met in part, and a difference is looked for only in a
+        // Subgroup that is remembered
+        // (`known_gap_a_priority_is_not_compared_for_a_subgroup_the_relay_has_forgotten`,
+        // `known_gap_a_priority_is_compared_again_only_once_a_stream_with_a_known_one_brings_the_subgroup`).
         let differs = |taken: &Taken| match (taken.priority, priority) {
             (Some(before), Some(now)) => before != now,
             _ => false,
@@ -3902,7 +3925,25 @@ impl Relay {
         // first Object: until then the relay cannot tell whether it has taken
         // that Subgroup from another stream already.
         // §11.4.2: a header without a Publisher Priority has the one of the
-        // subscription the stream came on, which is that of its source.
+        // subscription the stream came on, which is that of its source. The
+        // header goes on as it came, and a subscriber reads it with the
+        // default of the source whose Track Properties it was told (§2.5),
+        // which for a track with two sources need not be this one
+        // (`known_gap_a_subgroup_without_a_priority_reaches_the_subscriber_under_another_default`).
+        //
+        // Nothing but the Track Alias says which subscription a stream is
+        // of (§10.11). A late stream of a subscription whose alias a new
+        // one took is read as one of the new one, with its default
+        // (`known_gap_a_late_stream_of_the_subscription_before_is_counted_for_the_new_one`,
+        // `known_gap_a_late_stream_is_read_with_the_default_of_the_subscription_that_took_its_alias`),
+        // a stream of a new subscription read before the PUBLISH_DONE of
+        // the first as one of the first
+        // (`known_gap_a_stream_sent_ahead_of_a_publish_is_read_before_the_publish_done`),
+        // and a stream sent ahead for a PUBLISH that is refused as one of
+        // the subscription that drains under the alias (§5.1: "Publishers
+        // MAY start sending Objects on PUBLISH-initiated subscriptions
+        // before receiving a PUBLISH_OK response";
+        // `known_gap_a_stream_sent_ahead_for_a_refused_publish_is_taken_for_the_draining_one`).
         //
         // WHY not where the source drains: the publisher may have sent
         // PUBLISH anew under the alias, with another default, and this
@@ -5289,7 +5330,9 @@ impl TrackEnd {
 /// looking for the value of a property, processors MUST search both").
 /// A value above 255 never gets here: the decoder of `xmoq-moqt` closes the
 /// session. Of two such properties the first searched counts, the ones
-/// outside before the ones inside; nothing refuses a second.
+/// outside before the ones inside; nothing refuses a second, and both are
+/// passed on (§12.4 has no rule for two;
+/// `known_gap_two_default_publisher_priorities_in_one_publish_are_not_refused`).
 fn default_publisher_priority(properties: &[KeyValuePair]) -> u8 {
     searched_properties(properties, Of::Track)
         .iter()
