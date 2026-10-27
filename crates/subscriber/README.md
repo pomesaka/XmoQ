@@ -13,4 +13,4 @@ What a client of the relay needs to read the tracks of others on its session. Th
 
 The name of the catalog track and the most a catalog may be are [`xmoq-msf`](../msf/src/lib.rs)'s. What a client of each role values (how many of the latest items of a followed track it fetches, how many it catches up) is the caller's: the chat's are `RECENT_LINES` and `CATCH_UP_LINES` of [`xmoq-viewer`](../viewer/src/lib.rs).
 
-What becomes of a kept track after each thing that can happen to it is the shared table of [`fixtures/kept-track/`](../../fixtures/kept-track/README.md), which `@xmoq/tracks` is to read as well; which of its past a followed track fetches is that of [`fixtures/chat-history/`](../../fixtures/chat-history/README.md), which `@xmoq/chat` reads.
+What becomes of a kept track after each thing that can happen to it is the shared table of [`fixtures/kept-track/`](../../fixtures/kept-track/README.md), whose rows of no limit on the times and of a required track `@xmoq/tracks` reads as well; which of its past a followed track fetches is that of [`fixtures/chat-history/`](../../fixtures/chat-history/README.md), which `@xmoq/tracks` reads.
