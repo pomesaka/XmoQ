@@ -11,6 +11,10 @@ cd "${REPO_ROOT}"
 # WHY generated: a record is added with nearly every change, and an index kept by hand misses
 # them (57 of 214 records were linked from nowhere when this was written). WHY by the Phase its
 # own line names: the record says what it was for, and nothing here has to judge it.
+#
+# The Phases are the "## Phase <N> — <title>" headings of docs/roadmap.md. A Phase keeps its number
+# and its heading after its work is done, and a new one is added at the end: the records name the
+# Phase they were for by its number.
 
 readme=docs/experiments/README.md
 marker="<!-- The index below is written by scripts/ci/experiments-index.sh (mise run fmt). -->"

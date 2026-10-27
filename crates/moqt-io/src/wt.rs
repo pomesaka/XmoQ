@@ -4,6 +4,25 @@
 //! replacing the library changes nothing else. No type of the library or of
 //! quinn appears in the public interface.
 //!
+//! WHY `web-transport-quinn`: a viewer has to tell apart "the broadcast
+//! ended", "the server refused" and "the connection broke", which needs the
+//! Session Termination Error Code and reason of a session the relay closes
+//! to reach the browser; this library sends them (`CLOSE_WEBTRANSPORT_SESSION`),
+//! and Chromium 156 read both from the own relay. It also maps stream error
+//! codes into the WebTransport range, so no mapping is kept here. WHY NOT
+//! `wtransport` 0.7.2, which the relay was first written on and the `moqtail`
+//! peers use: it cannot send `CLOSE_WEBTRANSPORT_SESSION`, so a browser sees
+//! "Connection lost." without code or reason, and it does not map stream
+//! codes (`docs/experiments/2026-10-10-webtransport-library-comparison.md`).
+//!
+//! A stream that has arrived and was not accepted yet when the connection
+//! closes can be lost: this library returns the connection error first
+//! (`poll_accept_uni` and `poll_accept_bi`, `src/session.rs`), where
+//! `wtransport` handed such a stream over. So "the peer's transport has it"
+//! is not "the peer will read it"; the publisher waits for the FIN that ends
+//! the relay's direction of the request stream after `PUBLISH_DONE` before it
+//! closes (`docs/moqt-implementation-notes.md`).
+//!
 //! What the library does, so this file does not:
 //!
 //! * Stream error codes are mapped into the HTTP/3 range of WebTransport on

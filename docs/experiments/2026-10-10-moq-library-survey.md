@@ -1,8 +1,10 @@
 # MoQ library candidates
 
-Status: **survey closed; no library was selected.** After the Phase 0 runs the project owner decided to implement MoQ Transport draft 18 in this repository and to keep `moqtail` as an interop peer; see [Protocols and layers](protocols.md). The sections "Recommended pair" and "Decisions needed" below are kept as the input to that decision and are no longer open.
+- Date: 2026-10-10
+- Commit SHA: 00c6dc6c, the commit that added the survey
+- Roadmap item: Phase 0, "Select candidate Rust and browser MoQ libraries; record supported draft revisions"
 
-The survey itself is from documentation and source reading. Two pairs were then run locally: [moq-dev](experiments/2026-10-10-moq-dev-object-transfer.md) and [moqtail](experiments/2026-10-10-moqtail-object-transfer.md). Statements changed by the two runs are marked "(run 2026-10-10)".
+The survey itself is from documentation and source reading. Two pairs were then run locally: [moq-dev](2026-10-10-moq-dev-object-transfer.md) and [moqtail](2026-10-10-moqtail-object-transfer.md). Statements changed by the two runs are marked "(run 2026-10-10)".
 
 All facts below were checked on **2026-10-10** against the sources in [Sources](#sources). `[n]` refers to that list. "Last commit" is the default branch unless noted.
 

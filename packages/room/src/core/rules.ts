@@ -12,7 +12,14 @@ import {
 	seatSubscribeNamespace,
 } from "@xmoq/meeting/names";
 
-/** The participants of a meeting, the agents among them (decided on 2026-10-25). */
+/**
+ * The participants of a meeting, the agents among them (decided on 2026-10-25).
+ *
+ * The limit holds at the room: it counts the participants of a meeting and
+ * gives no seat or token past it. A page keeps as many others as the room has
+ * seats, less itself (`mostOthers` of `createMeeting` in `@xmoq/meeting`), so
+ * that a relay that tells of more is not followed past them.
+ */
 export const MOST_IN_A_MEETING = 49;
 
 /** Whether the namespace is a meeting's: `xmoq/meet` or under it. */

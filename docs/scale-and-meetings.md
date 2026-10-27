@@ -1,19 +1,8 @@
 # Scaling a broadcast over relays, and meetings — design draft (proposed)
 
-Everything here is **proposed**, and undecided until the project owner decides it ([open decisions](open-questions.md)), except where a choice says it was decided. What the own relay does today was read in the code of `main` on 2026-10-25 (`bdad71ce`), and the file is named where it matters.
-
-Decided on 2026-10-25, the inputs of this draft ([requirements](requirements.md)):
-
-- The goals of a broadcast and the size of a meeting, rows "Latency, capacity" and "Meetings (many to many)" of the requirements.
-- An agent takes part through a CLI; it gets speech as text from a transcriber beside the relay, and speaks as chat lines.
+Everything here is **proposed**, and undecided until the project owner decides it ([open decisions](open-questions.md)), except where a choice says it was decided. Its inputs are the goals of a broadcast and the size of a meeting, rows "Latency, capacity" and "Meetings (many to many)" of the [requirements](requirements.md). What is built is in the [implementation notes](moqt-implementation-notes.md) and the code.
 
 ## Part 1: a broadcast of 10,000
-
-### What one relay does today
-
-- With a video track and a track of the shape of the sound (an Object a stream, 50 a second), one relay on Linux in a VM of 5 cores gave everything to 500 viewers and fell seconds behind at 1,000; with video alone it gave everything to 1,000 ([record](experiments/2026-10-24-one-video-track-to-many-viewers-on-linux.md)). The sound costs more than its bytes: at 500 viewers it is 25,000 streams opened and closed a second.
-- The relay takes 1,000 sessions at once unless `--max-sessions` says otherwise (`HubConfig::max_sessions` in `crates/relay/src/hub.rs`, provisional). One more is sent to another relay with GOAWAY where `--when-full` names one, and closed with `INTERNAL_ERROR` and the reason `too many sessions` otherwise. A page of the demo is two sessions, one for the media and one for the chat (`@xmoq/chat` connects on its own), so 500 viewers are 1,000 sessions.
-- A relay sends GOAWAY with a New Session URI (`--redirect-uri`) only when it is told to stop. The page (`keepPlaying`, `keepPublishing`) and the terminal viewer follow it to the URI.
 
 ### Shapes
 
@@ -37,7 +26,7 @@ Decided on 2026-10-25, the inputs of this draft ([requirements](requirements.md)
 
 ### The other direction: what viewers send
 
-A viewer that chats announces `xmoq/chat/<room>/<name>` and says its lines on `said`, and the gatherer finds them with SUBSCRIBE_NAMESPACE at its relay ([architecture](architecture.md)). With edges the gatherer sits at the origin and the participants announce at the edges, where it does not see them. §9.5 has "Relays MUST forward PUBLISH_NAMESPACE or PUBLISH messages to all matching subscribers". **Recommended: the edge sends the PUBLISH_NAMESPACE of its sessions on to its parent**, so that the gatherer is told of it and its SUBSCRIBE comes back down through the edge. The same carries an agent's lines and, later, a meeting's participants on different edges. Whether 10,000 viewers may all write in the chat is a separate question: one session of a gatherer at the own relay holds about 250 participants, and the gatherers are split by room for that ([architecture](architecture.md)).
+A viewer that chats announces `xmoq/chat/<room>/<name>` and says its lines on `said`, and the gatherer finds them with SUBSCRIBE_NAMESPACE at its relay ([architecture](architecture.md)). With edges the gatherer sits at the origin and the participants announce at the edges, where it does not see them. §9.5 has "Relays MUST forward PUBLISH_NAMESPACE or PUBLISH messages to all matching subscribers". **Recommended: the edge sends the PUBLISH_NAMESPACE of its sessions on to its parent**, so that the gatherer is told of it and its SUBSCRIBE comes back down through the edge. The same carries an agent's lines and, later, a meeting's participants on different edges. Whether 10,000 viewers may all write in the chat is a separate question: one session of a gatherer at the own relay holds only as many requests as a session may have, and the gatherers are split by room for that ([`crates/chat/README.md`](../crates/chat/README.md)).
 
 ### Who sends a viewer to which relay
 
@@ -57,19 +46,14 @@ Before a relay is full with too many viewers, it falls behind for all of them: a
 
 ### What the own relay has and lacks to be an edge
 
-Built: choice 1 above, with the session opened when a request needs it and moved at a GOAWAY of the parent, and the namespaces announced below passed up (`--parent`, `--parent-cert-sha256`, `--parent-namespace`; the row on a relay above this one in the [implementation notes](moqt-implementation-notes.md)). The relay is the client of that session, and asks the parent for a SUBSCRIBE, FETCH or TRACK_STATUS of a track that no session of its own announced. Lacking, read in the code of `main` on 2026-10-25:
+Choice 1 above is built, with its own token for the parent, and the namespaces announced below are passed up (the row on a relay above this one in the [implementation notes](moqt-implementation-notes.md)). Lacking:
 
 1. **Choice 2.** It sends no SUBSCRIBE_NAMESPACE to the parent and does not read NAMESPACE; `discovery.rs` only sends them.
 2. **PUBLISH to the parent.** The PUBLISH_NAMESPACE of its sessions is passed to the parent (the other direction above, built: the chat's gatherer above hears participants below); PUBLISH is not, since neither relay serves SUBSCRIBE_TRACKS.
-3. **The origin limits an edge as one viewer.** Built in part (decided on 2026-10-25): what waits is counted by each subscription as well as by the session, so an edge that falls behind on one track loses that track alone, and its 500 viewers of one broadcast are one subscription a track at the origin, which the session's limit does not reach (`HubConfig` in `crates/relay/src/hub.rs`). Still as one viewer: the session's limit of all its tracks (8 MiB, 16,384 Objects, 4,096 streams, the same as a viewer's), and the 4 FETCHes and 8 requests on a publisher of a session, which an edge spends for all its viewers; the origin cannot tell an edge from a viewer without something in its token, which is not decided. **The limits of a session hold for the one between an edge and its parent as well**: the requests the edge may have open at the origin (256), the requests the origin may have open on the edge and the edge on the origin (64), and the namespaces the edge may have announced there (64). They are flags (`--peer-requests-per-session`, `--own-requests-per-session`, `--namespaces-per-session`), whose defaults stay at what a viewer is given. A meeting of 49 spread over edges needs more, counting for each participant its catalog, its sound, its video (the 8 who came first) and its chat's `said`, and for the room its chat's `lines` and its transcript: with `k` participants at an edge, the edge asks the origin for `2 × (49 − k) + 8 + 2` tracks and up to 16 FETCHes at once (122 for `k` = 1), the origin asks the edge for `3 × k + 8` (152 for `k` = 48), and the edge announces `2 × k` namespaces there (96 for `k` = 48); the peer's requests stay within 256 either way. So `--own-requests-per-session 256 --namespaces-per-session 128` at both relays carry one meeting, and each more meeting on the same edge as much again. **The flags hold for every session of the relay**: a viewer of the origin may then have the relay open as many requests on it, and announce as many namespaces, as an edge. A limit of its own for the session with the parent relay, or for a session the origin knows to be an edge, is not built.
-4. **Its own token.** Built for its SETUP, its SUBSCRIBE, FETCH and TRACK_STATUS, and the PUBLISH_NAMESPACE it passes up: with `--auth-key-hex` an edge makes tokens for `*` with the key, and takes what comes from its parent without a token (decided on 2026-10-25, the row on a relay above this one in the [implementation notes](moqt-implementation-notes.md)); the viewers' tokens are checked at the edge and not passed on (§10.2.1).
-5. **Losing the origin.** When the origin's session goes, the edge ends the tracks of its viewers as for any source that goes (PUBLISH_DONE), and the clients ask again, and the edge connects again for the next request. A GOAWAY of the origin has the edge connect to the URI it names and take what it carries from there as well, so that its viewers go on (built).
+3. **The origin limits an edge as one viewer.** What waits is counted by each subscription as well as by the session (`HubConfig` in `crates/relay/src/hub.rs`), so an edge that falls behind on one track loses that track alone. Still as one viewer: the session's limit of all its tracks (8 MiB, 16,384 Objects, 4,096 streams, the same as a viewer's), and the 4 FETCHes and 8 requests on a publisher of a session, which an edge spends for all its viewers; the origin cannot tell an edge from a viewer without something in its token, which is not decided. **The limits of a session hold for the one between an edge and its parent as well**: the requests the edge may have open at the origin (256), the requests the origin may have open on the edge and the edge on the origin (64), and the namespaces the edge may have announced there (64). They are flags (`--peer-requests-per-session`, `--own-requests-per-session`, `--namespaces-per-session`), whose defaults stay at what a viewer is given. A meeting of 49 spread over edges needs more, counting for each participant its catalog, its sound, its video (the 8 who came first) and its chat's `said`, and for the room its chat's `lines` and its transcript: with `k` participants at an edge, the edge asks the origin for `2 × (49 − k) + 8 + 2` tracks and up to 16 FETCHes at once (122 for `k` = 1), the origin asks the edge for `3 × k + 8` (152 for `k` = 48), and the edge announces `2 × k` namespaces there (96 for `k` = 48); the peer's requests stay within 256 either way. So `--own-requests-per-session 256 --namespaces-per-session 128` at both relays carry one meeting, and each more meeting on the same edge as much again. **The flags hold for every session of the relay**: a viewer of the origin may then have the relay open as many requests on it, and announce as many namespaces, as an edge. A limit of its own for the session with the parent relay, or for a session the origin knows to be an edge, is not built.
+4. **Losing the origin.** When the origin's session goes, the edge ends the tracks of its viewers as for any source that goes (PUBLISH_DONE), and the clients ask again, and the edge connects again for the next request. A GOAWAY of the origin has the edge connect to the URI it names and take what it carries from there as well, so that its viewers go on (built).
 
 Not lacking: the cache, FETCH, priorities, delivery timeouts and RENDEZVOUS_TIMEOUT work at an edge as at any relay (a held SUBSCRIBE is held at the origin as well), and the origin serves an edge as it serves any subscriber.
-
-### To measure
-
-Measured once, on one machine over loopback ([record](experiments/2026-10-25-one-video-track-through-two-edges.md)): an origin with two edges of up to 250 viewers each, where the origin sent each Group once to each edge and the frames came sooner than with the same viewers at the origin alone. Still to measure: the delay a second hop adds on its own machine; an origin with 20 edges; a page with both tracks on one session, which the record of 500 viewers did not have (each viewer there was two sessions of the Rust client); and a run of 10,000, which takes about 21 machines or a scaled-down run with fewer viewers an edge.
 
 ## Part 2: meetings of 49
 
@@ -77,16 +61,16 @@ Measured once, on one machine over loopback ([record](experiments/2026-10-25-one
 
 At 2.5 Mbit/s a participant, a participant that receives everybody else gets 48 × 2.5 = 120 Mbit/s, and the relay sends 49 × 120 ≈ 5.9 Gbit/s. Each participant has to receive less than everybody.
 
-Sound is Opus, a piece every 20 ms, each an Object on a stream of its own (decided on 2026-10-13). If all 49 send all the time, each receives 48 × 50 = 2,400 streams a second and the relay opens 117,600 a second, nearly five times the 25,000 with which the relay's processor went from 24% to 59% at the mean in the record above.
+Sound is Opus, a piece every 20 ms, each an Object on a stream of its own. If all 49 send all the time, each receives 48 × 50 = 2,400 streams a second and the relay opens 117,600 a second, nearly five times the 25,000 with which the relay's processor went from 24% to 59% at the mean with 500 viewers of a broadcast ([record](experiments/2026-10-24-one-video-track-to-many-viewers-on-linux.md)).
 
 ### Finding each other
 
 | Choice | How | For | Against |
 | --- | --- | --- | --- |
-| A. SUBSCRIBE_NAMESPACE | Each participant announces `xmoq/meet/<room>/<participant>` and publishes a catalog there; each subscribes to the namespaces under `xmoq/meet/<room>` and is told NAMESPACE when one comes and NAMESPACE_DONE when one goes | The relay serves it (8 a session, 4,096 namespaces under a prefix, row on SUBSCRIBE_NAMESPACE in the [implementation notes](moqt-implementation-notes.md)); the relay itself says who left; as the chat does | None was found: `@xmoq/moqt` sends SUBSCRIBE_NAMESPACE since 2026-10-25 (`MoqtConnection.subscribeNamespace`) |
-| B. The room lists them | The room's WebSocket says who is there | Nothing new in the browser library | The room believes the pages; a participant whose connection to the relay died stays listed; against the direction of carrying everything over QUIC (the chat's decision of 2026-10-24) |
+| A. SUBSCRIBE_NAMESPACE | Each participant announces `xmoq/meet/<room>/<participant>` and publishes a catalog there; each subscribes to the namespaces under `xmoq/meet/<room>` and is told NAMESPACE when one comes and NAMESPACE_DONE when one goes | The relay serves it (8 a session, 4,096 namespaces under a prefix, row on SUBSCRIBE_NAMESPACE in the [implementation notes](moqt-implementation-notes.md)); the relay itself says who left; as the chat does | None was found |
+| B. The room lists them | The room's WebSocket says who is there | Nothing new in the browser library | The room believes the pages; a participant whose connection to the relay died stays listed; against the direction of carrying everything over QUIC (the chat's decision) |
 
-**Decided on 2026-10-25: A**, provisionally. The namespace prefix is the meeting's own, apart from `xmoq/chat`, and the meeting's chat is the room's chat as it is. A page does it with `@xmoq/meeting` ([record](experiments/2026-10-25-a-meeting-of-pages.md)), and the reader for agents with `xmoq-agent --meeting`.
+**Decided: A**, provisionally. The namespace prefix is the meeting's own, apart from `xmoq/chat`, and the meeting's chat is the room's chat as it is. A page does it with `@xmoq/meeting` ([record](experiments/2026-10-25-a-meeting-of-pages.md)), and the reader for agents with `xmoq-agent --meeting`.
 
 ### Which video each one receives
 
@@ -97,7 +81,7 @@ Sound is Opus, a piece every 20 ms, each an Object on a stream of its own (decid
 | C. The relay chooses | The relay forwards versions by who speaks | — | The relay reads no media, and would have to |
 | D. One picture made by a server | A server decodes, composes and encodes | One stream a participant | A decoder and encoder for 49, and the delay of both |
 
-**Recommended: B.** With one large version and 8 small tiles a participant receives about 2.5 + 8 × 0.6 ≈ 7.3 Mbit/s; showing all 48 at once needs a smaller version still, whose bitrate was not measured. **Decided on 2026-10-25 for the first version: the small version of 8, as they came, and the sound of all**; one who leaves gives the place to the next who came (`@xmoq/meeting`). The large version of who speaks is not in it, and is proposed below. Details:
+**Recommended: B.** With one large version and 8 small tiles a participant receives about 2.5 + 8 × 0.6 ≈ 7.3 Mbit/s; showing all 48 at once needs a smaller version still, whose bitrate was not measured. **Decided for the first version: the small version of 8, as they came, and the sound of all**; one who leaves gives the place to the next who came (`@xmoq/meeting`). The large version of who speaks is not in it, and is proposed below. Details:
 
 - The relay subscribes to a version only while somebody wants it, where the participant announces its namespace instead of sending PUBLISH, and cancels its SUBSCRIBE when the last subscriber leaves (row on the last subscriber of a track in the [implementation notes](moqt-implementation-notes.md)). So a version nobody shows is neither sent nor, if the sender stops encoding while it has no subscription, encoded.
 - On a change of speaker the participant subscribes to the new large version and keeps the small one until the large one has a key frame. It can ask for one with NEW_GROUP_REQUEST, which the relay passes on and the video sender of `@xmoq/media` answers with `dynamicGroups` (a new Group once the current one is 500 ms long).
@@ -111,7 +95,7 @@ Sound is Opus, a piece every 20 ms, each an Object on a stream of its own (decid
 | B. A mixer beside the relay | Like the gatherer of the chat: it subscribes to all and publishes a mix | One track for each listener | Each listener needs a mix without its own voice, so 49 mixes; a decode and an encode of delay; an agent gets one mix and has to tell the voices apart |
 | C. A then B | A, and a mixer for the listeners that cannot take many tracks | — | Two ways to keep |
 
-**Decided on 2026-10-25 for the first version: A**, each page receiving the sound of everybody apart and mixing it itself; whether a mixer (B or C) is added later is undecided. **Recommended: A, with only speech sent.** A participant sends no sound while it does not speak (a voice activity detector at the sender, or muted), so a participant receives the few that speak; at two at once that is 2 × 50 streams a second, and the relay's 117,600 become about 4,900. Who speaks is found by each participant from the sound it decodes; an audio level in an Object property, as RTP has, is the next step if decoding all of them costs too much. How Chromium's echo cancellation works with several tracks played at once was not looked at.
+**Decided for the first version: A**, each page receiving the sound of everybody apart and mixing it itself; whether a mixer (B or C) is added later is undecided. **Recommended: A, with only speech sent.** A participant sends no sound while it does not speak (a voice activity detector at the sender, or muted), so a participant receives the few that speak; at two at once that is 2 × 50 streams a second, and the relay's 117,600 become about 4,900. Who speaks is found by each participant from the sound it decodes; an audio level in an Object property, as RTP has, is the next step if decoding all of them costs too much. How Chromium's echo cancellation works with several tracks played at once was not looked at.
 
 ### What an agent subscribes to in a meeting
 
@@ -119,7 +103,7 @@ Sound is Opus, a piece every 20 ms, each an Object on a stream of its own (decid
 
 ### Who may enter
 
-The room of the spike gives a token to anyone, and who may get one is undecided for the broadcast as well ([open decisions](open-questions.md)).
+The room gives a token to anyone, and who may get one is undecided for the broadcast as well ([open decisions](open-questions.md)).
 
 | Choice | How | For | Against |
 | --- | --- | --- | --- |
@@ -127,9 +111,9 @@ The room of the spike gives a token to anyone, and who may get one is undecided 
 | b. A list of invited people | The room checks who asks | — | Needs authentication, which is undecided |
 | c. A host admits | The room holds who asks until the host lets them in | — | A host's page and a waiting state in the room |
 
-**Where the limit of 49 holds, decided on 2026-10-25: at the room.** The room counts the participants of a meeting and gives no token past 49; a page keeps 48 others besides, so that a relay that tells of more is not followed past them (`mostOthers` of `createMeeting`, which the demo's page takes from the seats its room says).
+**The limit of 49 holds at the room** (`MOST_IN_A_MEETING` in `packages/room/src/core/rules.ts`).
 
-**Recommended: a to begin with**, with the tokens it already makes: one to publish on the participant's own namespace, `xmoq/meet/<room>/<participant>`, and one to subscribe to `xmoq/meet/<room>/*` (a `*` at the end allows the namespaces under it, decided on 2026-10-24), and the chat's two. b or c when authentication is decided. An agent is brought in by a participant, who gets a token for it from the room, so that somebody present answers for it.
+**Recommended: a to begin with**, with the tokens it already makes: one to publish on the participant's own namespace, `xmoq/meet/<room>/<participant>`, and one to subscribe to `xmoq/meet/<room>/*` (a `*` at the end allows the namespaces under it), and the chat's two. b or c when authentication is decided. An agent is brought in by a participant, who gets a token for it from the room, so that somebody present answers for it.
 
 ### The delay
 
@@ -138,6 +122,6 @@ The goal of 500 ms at the 99th percentile is a broadcast's. A conversation needs
 ### Limits of the relay a meeting reaches
 
 - Sessions: 49 participants are about 98, within the default of 1,000.
-- What a slow subscriber is counted by: by each subscription and by its session (decided on 2026-10-25). A participant's session holds about 50 tracks (sound, catalogs, a few videos); 48 voices of an Object a stream are 2,400 streams a second, which reached 256 streams of a session at once at a round trip of 107 ms with nothing late. A session has 4,096, the round trip and the delay together 1.7 seconds of those voices, and a video that falls behind ends alone at its own limit (`HubConfig` in `crates/relay/src/hub.rs`). Not run with a meeting.
+- What a slow subscriber is counted by: by each subscription and by its session. A participant's session holds about 50 tracks (sound, catalogs, a few videos); 48 voices of an Object a stream are 2,400 streams a second, which reached 256 streams of a session at once at a round trip of 107 ms with nothing late. A session has 4,096, the round trip and the delay together 1.7 seconds of those voices, and a video that falls behind ends alone at its own limit (`HubConfig` in `crates/relay/src/hub.rs`). Not run with a meeting.
 - Requests: about 48 catalogs, up to 48 sound tracks and up to 9 videos, about 105 at once, with more while a speaker changes. The relay reads 264 request streams of a session at once; what `@xmoq/moqt` allows itself to open at once was not checked for this draft.
 - A meeting on one relay is recommended to begin with: across edges it needs the forwarding of PUBLISH_NAMESPACE of Part 1.

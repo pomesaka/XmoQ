@@ -13,7 +13,6 @@ model: opus
 
 ```
 ./CLAUDE.md
-./docs/agent-guide.md
 ./docs/protocols.md
 ./docs/moqt-implementation-notes.md（長いので全文を読まない。差分が扱う場面の行を rg で探して読む）
 ```

@@ -1,6 +1,19 @@
 //! The cache of a track (§9.1): the Objects of its latest Group, to answer a
 //! FETCH with that lies wholly in it.
 //!
+//! WHY a cache, where neither draft 18 nor MSF asks for one (§9.1: "Relays
+//! MAY cache Objects, but are not required to") and the relay can pass any
+//! FETCH on to one publisher: without it a browser publisher has to answer
+//! every FETCH itself, and once it is gone nobody can get the catalog; a
+//! FETCH with `FILL_TIMEOUT` 0, which asks for what the relay holds, gets
+//! nothing; the relay cannot keep the end of a Joining FETCH and the start
+//! of the subscription from overlapping, since the publisher answers the one
+//! and the relay said where the other begins; and with several publishers
+//! of a track a gap can open between the two, as the relay tells a
+//! subscriber the largest Location of all of them and fetches from one.
+//! WHY NOT leave it for later: the browser publisher would have been built to
+//! answer the FETCH requests that a cache then takes from it.
+//!
 //! WHY the latest Group and no more: it is what a Joining FETCH with offset
 //! 0 asks for, the way a subscriber gets a catalog and a viewer that comes
 //! late its first picture. Everything else is asked of a publisher.
