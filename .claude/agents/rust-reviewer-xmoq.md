@@ -13,7 +13,6 @@ model: sonnet
 
 ```
 ./CLAUDE.md
-./docs/agent-guide.md
 ~/.claude/docs/coding-policy.md（利用者の環境にあれば読む。無ければ飛ばす）
 ~/.claude/docs/testing-policy.md（利用者の環境にあれば読む。無ければ飛ばす）
 ```

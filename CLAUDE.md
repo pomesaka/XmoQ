@@ -4,7 +4,6 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 
 ## 着手前に読む
 
-- `docs/agent-guide.md`: このファイルに無い、実装エージェント向けの決まり（英語）
 - `docs/open-questions.md`: 触ろうとしている範囲に未決事項が無いかを確かめる
 - `docs/architecture.md`: 構成要素の責務と境界。どこまでできているかは`docs/requirements.md`、次の作業は`docs/roadmap.md`
 - 触る部品のREADMEと、`docs/moqt-implementation-notes.md`の該当の行
@@ -53,6 +52,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 
 - RustとTypeScriptの実装は、名前をdraft本文の用語に合わせ、`fixtures/moqt-18/`の同じ実バイト列をテストで読む。draftの外の契約（セッションを閉じるときの理由の切り方など）も、2つの実装が満たすなら`fixtures/`に共有の固定値を置き、両方のテストで読む。読んで比べるだけで「同じ」としない
 - テストの固定値は`moqtail`から採った実バイト列にする。自分で符号化したものを自分で復号するだけのテストは、照合にならない
+- draftのある部分を実装する前に、その部分のMUSTとSHOULDを節番号付きで列挙し、長く動くサーバーが守ること（上限、後始末、セッションどうしの隔離）を挙げる。列挙から異常系のテストを書き、成功する転送だけを試さない。WHY: 最初の実装へのレビューの指摘は、ほとんどがそこだった
 - 受け取る側のバッファとキューには上限を置く。遅いsubscriber、キャンセル、切断の後始末を書く
 - lintを`#[allow]`や設定で黙らせるときは理由を書く。黙らせるより直すほうを先に考える
 - `cfg`でOSを分けたコードは、手元のOSでコンパイルされない側がlintも型検査も受けない。書いたら報告にそう書き、CIの結果を見る
@@ -78,7 +78,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | ファイル/ディレクトリ | 種別 | 目的 |
 |---|---|---|
 | README.md | 入り口 | 概要、文書と部品の一覧、検査 |
-| CLAUDE.md、docs/agent-guide.md | エージェントへの指示 | 作業の決まりとコマンド。agent-guideはこのファイルに無い分だけを持つ |
+| CLAUDE.md | エージェントへの指示 | 作業の決まりとコマンド |
 | docs/vision.md | 仕様 | 目指す方向と範囲外 |
 | docs/requirements.md | 仕様 | 要件ごとの状態と、状態を表す語の定義 |
 | docs/architecture.md、docs/assets/ | 仕様 | 構成要素の責務と境界。図 |
@@ -89,9 +89,7 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 | docs/open-questions.md | 仕様 | 未決事項と、仮の値の置き場所 |
 | docs/scale-and-meetings.md | 設計の案 | 配信をリレーで広げる形と、会議の形（proposed） |
 | docs/roadmap.md | 計画 | Phaseごとの作業と終了条件 |
-| docs/validation.md、docs/experiments/ | 記録 | 検証の観点と、走らせた記録 |
-| docs/av-demo.md | 記録のまとめ | デモの映像と音で測れたことと限界。数字は記録から取る |
-| docs/moq-libraries.md | 記録 | Phase 0のライブラリ調査（終了済み） |
+| docs/experiments/ | 記録 | 検証の観点と、走らせた記録 |
 | crates/*/README.md、packages/*/README.md、demo/README.md | 仕様 | 部品の範囲、旗の組み合わせ、旗に閉じない上限、既知の不足。プログラムの旗と既定値は`USAGE`（無ければ`Args`のdoc）にだけ書く。READMEを持つのは、走らせ方、ビルド要件とライセンス、複数の実装が守る契約（共有の固定値の表）のどれかを持つ部品で、ほかはcrateなら`lib.rs`の`//!`に書く |
 | fixtures/*/README.md | 仕様 | 2つ以上の実装がテストで読む固定値と表の出どころ |
 | interop/README.md、interop/peers/*/README.md | 手順 | 照合の相手の用意と走らせ方 |
@@ -104,15 +102,15 @@ MoQ/WebTransportを使った1対多の配信と会議の実験。目的は、エ
 |---|---|
 | 未決事項を決めた | docs/open-questions.md、docs/requirements.md、その話題を扱う文書かコードのコメント |
 | ライブラリやMoQ draftの版を選んだ・変えた | docs/protocols.md |
-| 検証を実行した（成功・失敗とも） | docs/experiments/ に追加。デモの映像と音に関わる結果なら docs/av-demo.md も |
-| roadmapの項目を終えた | docs/roadmap.md のチェックボックス、docs/requirements.md |
+| 検証を実行した（成功・失敗とも） | docs/experiments/ に追加 |
+| roadmapの項目を終えた | docs/roadmap.md の項目を消し、docs/requirements.md の状態を直す |
 | 構成要素の責務や接続を変えた | docs/architecture.md、docs/assets/architecture.svg、docs/assets/broadcast-flow.svg |
 | プロトコルの層や運ぶものを変えた | docs/protocols.md、docs/assets/protocol-layers.svg |
 | 範囲を広げた・狭めた | docs/vision.md、docs/requirements.md、docs/roadmap.md |
 | ビルド・テスト・起動のコマンドを足した・変えた | `mise.toml`のdescription。検査のタスクなら CLAUDE.md と README.md の表も |
 | 部品（crate、パッケージ）や共有の固定値を足した | そのREADME、README.md の一覧 |
 | 新しい文書を足した | README.md の一覧、このDocumentation Map |
-| エージェントの進め方を変えた | docs/agent-guide.md、CLAUDE.md |
+| エージェントの進め方を変えた | CLAUDE.md |
 | 既知の不足を直した（draftの要件を満たした、上限を足した） | docs/moqt-implementation-notes.md の既知の不足の項目と、それを指す`FIXME:`を消す。その挙動を表の行に書く。部品のREADMEの既知の不足とStatus |
 | draftの解釈や、本文に無い挙動を決めた・変えた | docs/moqt-implementation-notes.md。RustとTypeScriptの両方を同じPRで直す。状態の移り方が変わるならdocs/moqt-state-models.mdも |
 | 受信の上限やタイムアウトの値を決めた・変えた | 値を置くコードの定数のコメント（provisionalの印を含む）、docs/moqt-implementation-notes.md |

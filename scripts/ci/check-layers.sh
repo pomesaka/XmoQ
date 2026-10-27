@@ -158,8 +158,8 @@ check_rust() {
 	done
 }
 
-# The layer of a crate of the workspace, a number; empty for a name that is none of them. The
-# table is that of docs/architecture.md ("The Rust crates"), which says what each layer is.
+# The layer of a crate of the workspace, a number; empty for a name that is none of them. This is
+# the one table of the crates' layers.
 crate_layer() {
 	case "$1" in
 	xmoq-moqt | xmoq-loc | xmoq-msf | xmoq-again) echo 0 ;;
@@ -180,14 +180,14 @@ check_crate_layers() {
 	while IFS= read -r name; do
 		layer="$(crate_layer "${name}")"
 		if [[ -z "${layer}" ]]; then
-			report "the crate ${name} has no layer; add it to crate_layer in this script and to the table of docs/architecture.md"
+			report "the crate ${name} has no layer; add it to crate_layer in this script"
 			continue
 		fi
 		while IFS= read -r dep; do
 			dep_layer="$(crate_layer "${dep}")"
 			# Empty: a crate from outside the workspace.
 			if [[ -n "${dep_layer}" ]] && ((dep_layer >= layer)); then
-				report "${name} (layer ${layer}) depends on ${dep} (layer ${dep_layer}); a crate depends on crates of a lower layer alone (docs/architecture.md)"
+				report "${name} (layer ${layer}) depends on ${dep} (layer ${dep_layer}); a crate depends on crates of a lower layer alone (crate_layer in this script)"
 			fi
 		done < <(jq -r --arg name "${name}" '.packages[] | select(.name == $name) | .dependencies[] | select(.kind != "dev") | .name' <<<"${metadata}")
 	done < <(jq -r '.packages[].name' <<<"${metadata}")

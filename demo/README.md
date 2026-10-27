@@ -91,6 +91,14 @@ tail -f /tmp/room/events.jsonl
 
 `broadcast/scripts/` runs `xmoq-watch` (a release build) against a demo of its own, its publishing page in headless Chromium (`publish-headless.ts`): `try.sh` plays it for some seconds and prints what the viewer cost, `try-room.sh` joins it through the room of the broadcast with a token and once more without one, `try-keys.sh` types the keys on a pseudo-terminal (`keys-on-a-pty.py`), and `try-narrow-link.sh` puts a link with less room than the video between the relay and the viewer. `try-silent-peers.sh` starts no demo: it has the viewer wait for a room and a relay that answer nothing. `watch-demo.sh` plays `mise run demo` without a room. Each says how to run it at its top.
 
+## Where it ends
+
+- **One machine.** No run over a real network, between two machines, or through a NAT; the hosting is undecided.
+- **A person watched twice**, and saw a viewer's picture, heard the sound and saw the terminal viewer's picture in Ghostty. The sync, the flags and the bad links nobody judged; every other statement about picture and sound is a count read from the page.
+- **A frame that does not come is not concealed.** The end of a Group that comes after the next has begun is dropped; a piece of sound that is missing leaves a gap.
+- **The camera and the microphone ran only as Chromium's fake devices.**
+- **A publisher whose video and sound are timed by two clocks is handled only behind a flag** (`/publish?stamp=least`), and was not measured with real devices ([record](../docs/experiments/2026-10-13-a-publisher-and-a-viewer-whose-clocks-run-at-different-speeds.md)).
+
 ## Every flag
 
 Read off the code on 2026-10-13 (`demo/broadcast/watch.ts`, `demo/broadcast/publish.ts`, `demo/broadcast/room.ts`, `demo/lib/`, `demo/serve.ts`). Each is a query of the page's address unless it begins with `--`. "Trial" is something tried behind the flag and not the demo's way; the sections above have what each trial showed.

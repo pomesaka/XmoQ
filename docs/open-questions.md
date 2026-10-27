@@ -9,17 +9,18 @@ When an item is decided, remove it here and write the decision where it takes ef
 - When to move the MoQ implementation from draft 18 to a newer draft
 - The codec beyond H.264 in Annex B (video) and Opus (audio). Facts are in the [WebCodecs loopback record](experiments/2026-10-10-webcodecs-loopback.md) and the [record of browser support](experiments/2026-10-10-browser-support-webtransport-webcodecs.md).
   - The H.264 profile and level, and whether the hardware encoder is asked for, left to the browser, or avoided
+  - Whether the hardware encoder keeps up in real time: in one run of Chrome 155 its queue reached 91 frames, about three seconds of picture, and that was not looked at further
   - The key frame interval, and whether a receiver can ask for a key frame
   - What a receiver does when a chunk is missing (H.264 and VP8 decoders show corrupt pictures without an error)
   - `latencyMode` and `optimizeForLatency`; whether `duration` travels; whether the resolution may change during a broadcast
   - Whether the Opus `description` is passed to the decoder (Chromium decodes without it, [record](experiments/2026-10-11-opus-audio-page-to-page.md))
-- Whether `playVideoTrack` of `@xmoq/media` asks for a delivery timeout on a video track without being told. Today it asks for nothing unless told; the demo's watching page asks for 150 ms (`demo/broadcast/watch.ts`). Measurements are in [the A/V demo and its limits](av-demo.md).
+- Whether `playVideoTrack` of `@xmoq/media` asks for a delivery timeout on a video track without being told. Today it asks for nothing unless told; the demo's watching page asks for 150 ms (`demo/broadcast/watch.ts`). Measurements are in the [record](experiments/2026-10-12-which-delivery-timeout-a-viewer-asks-for-on-its-video.md).
 - Whether a browser client ends a subscription itself when its application does not read. Today it reads a bounded number of streams and leaves the rest to the transport, so that the relay ends the subscription (`TOO_FAR_BEHIND`); a page that never reads is not told and loses its session later ([record](experiments/2026-10-10-subscription-backlog-in-chromium.md)).
 - Whether a REQUEST_UPDATE the relay read for an answered FETCH before it reset the request stream uses up a Request ID: after the reset of `end_answered_fetch` (`crates/relay-core/src/fetch.rs`) it does, and after the relay's other resets of an answered FETCH it does not. Neither can count what the stop kept from being read ([implementation notes](moqt-implementation-notes.md), row on what still comes on the stream of a request that was refused)
 - Whether a Subgroup whose stream was cut short is continued from another source of the track. Not done; the draft allows it (§2.2, §11.4.3).
-- Supported browsers beyond Chromium on desktop, operating systems, Ghostty versions
+- Supported browsers beyond Chromium on desktop, operating systems, Ghostty versions. Playwright's Firefox exchanged video with the own relay and Chromium in one build on one machine, and nothing could be run in Safari ([record](experiments/2026-10-10-browser-support-webtransport-webcodecs.md), [demo](experiments/2026-10-11-demo-in-firefox-and-webkit.md))
 - The CLI's audio output. `cpal` is used, in `crates/watch/src/bin/xmoq-watch/audio_output.rs` alone, so that it can be changed; nobody has listened to it ([record](experiments/2026-10-12-opus-decoded-and-played-with-rust-crates.md)).
-- Authorization beyond the form of the token (a token of the room on every request and on SETUP, `crates/relay/src/auth.rs`): who may get a token (the room, `packages/room`, gives one to anyone who asks, in the namespaces of that room alone: its chat, its transcripts and the broadcasts of `BROADCAST_NAMESPACES`, decided on 2026-10-26), how long one lives, and what happens to a subscription whose token has expired
+- Authorization beyond the form of the token (a token of the room on every request and on SETUP, `crates/relay/src/auth.rs`): who may get a token (the room, `packages/room`, gives one to anyone who asks, in the namespaces of that room alone: its chat, its transcripts and the broadcasts of `BROADCAST_NAMESPACES`), how long one lives, and what happens to a subscription whose token has expired
 - Authentication and SSO, privacy and moderation
 - What the relay and the room say to each other once there is authorization, and where the room lives: a Durable Object can neither accept nor open a WebTransport session
 - Hosting, TLS, monitoring and operating costs
@@ -36,11 +37,4 @@ When an item is decided, remove it here and write the decision where it takes ef
 
 ## Provisional values
 
-A value chosen to get going is marked **provisional** where it is set, with why it is what it is. It is not decided: change it with a measurement, or ask. Where they are:
-
-- The receive limits of the MoQ implementation, the limits and times of the relay's routing, and the limits of the Rust client: [implementation notes](moqt-implementation-notes.md), and the constants they name
-- What the relay holds and how many sessions it takes: `HubConfig` in `crates/relay/src/hub.rs`, each set by a flag of the relay
-- What `@xmoq/media` holds, waits for and drops when it sends and plays video and sound: [its README](../packages/media/README.md)
-- The catalog of `@xmoq/msf`: [its README](../packages/msf/README.md)
-- When a client asks again, on its session and for the next session: `packages/moqt/src/core/again.ts` and [`crates/again`](../crates/again/README.md), with the rows both read in [`fixtures/ask-again/`](../fixtures/ask-again/README.md)
-- The chat's gatherer, the transcriber and how the sound is cut: the READMEs of `crates/chat`, `crates/transcriber` and `crates/speech`
+A value chosen to get going is marked **provisional** where it is set, with why it is what it is (`rg -i provisional` finds them). It is not decided: change it with a measurement, or ask.

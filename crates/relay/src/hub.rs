@@ -114,6 +114,14 @@ pub struct HubConfig {
     /// `--session-send-streams`). Its `delivery_patience` is that of every
     /// subgroup stream of the relay (`--delivery-patience-ms`).
     ///
+    /// WHY end the subscription of a subscriber that falls behind, which can
+    /// subscribe again and resume at the next key frame: WHY NOT make the
+    /// publisher wait, as one viewer that does not read would stall the
+    /// broadcast for everyone. WHY NOT drop the queued Objects one by one: a
+    /// missing delta frame makes H.264 and VP8 decoders show corrupt
+    /// pictures without an error
+    /// (docs/experiments/2026-10-10-webcodecs-loopback.md).
+    ///
     /// WHY 4,096 streams: a participant of a meeting of 49 receives 48
     /// voices of an Object a stream, 2,400 streams a second, and a stream
     /// counts until the receiver's transport acknowledged it, so that the

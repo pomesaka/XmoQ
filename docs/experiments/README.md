@@ -2,7 +2,12 @@
 
 One file per experiment run: `YYYY-MM-DD-<kebab-case-title>.md`. Failed runs and blockers are recorded in the same form as successful ones.
 
-What to validate is listed in [validation](../validation.md). A record is written only for commands that were actually run.
+A record is written only for commands that were actually run. What a run looks at:
+
+- **Interoperability:** exact Rust and browser library versions, MoQ draft compatibility, certificates, connection setup, publish and subscribe, and Object delivery.
+- **Media:** frame ordering, timestamps, key frames, late join, reconnect, codec behaviour, jitter buffering and A/V synchronization.
+- **CLI:** Ghostty Kitty Graphics rendering, achieved FPS, artifacts, audio output and terminal compatibility. Kitty Graphics support does not imply native video decoding.
+- **Performance:** glass-to-glass latency (p50, p95, p99), dropped frames, stalls, relay RSS, per-subscriber memory, CPU, bandwidth, and recovery after packet loss. The goals are in the [requirements](../requirements.md), row "Latency, capacity".
 
 ## Template
 
@@ -35,6 +40,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 ### Phase 0 — Feasibility
 
 - 2026-10-10 [moq-dev: one MoQ object between Chromium and Rust](2026-10-10-moq-dev-object-transfer.md)
+- 2026-10-10 [MoQ library candidates](2026-10-10-moq-library-survey.md)
 - 2026-10-10 [2026-10-10 — moqtail: one Object between browser and Rust (MOQT draft 18)](2026-10-10-moqtail-object-transfer.md)
 
 ### Phase 0b — Own MoQ Transport implementation (draft 18)
