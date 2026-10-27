@@ -33,7 +33,7 @@ const STATUS_AND_END_OF_GROUP = 0x22n;
  *   draft has no rule for them, and a datagram has nothing after it that
  *   could bring the rest, so its type is unknown, which §11 has close the
  *   session. Both implementations keep to this rule
- *   (docs/moqt-implementation-notes.md, row on a datagram of the peer).
+ *   (fixtures/moqt-18-verdicts/datagrams.tsv).
  *
  * WHY padding is not a fault, although it is not of the form 0b00X0XXXX:
  * §11.5.2 defines it ("An endpoint MAY send a datagram with a type of

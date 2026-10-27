@@ -24,7 +24,7 @@ The design:
 - [Glossary](docs/glossary.md): the words of broadcasts and meetings
 - [Protocol layers](docs/protocols.md)
 - [MoQ Transport state models](docs/moqt-state-models.md): the states of a session and of each request, which both implementations keep
-- [MoQ Transport implementation notes](docs/moqt-implementation-notes.md): what both implementations do where draft 18 is silent or contradicts itself
+- [MoQ Transport implementation notes](docs/moqt-implementation-notes.md): where draft 18 is silent or contradicts itself, the rulings no test can hold and where the two implementations differ, and the known gaps against the draft. The rulings tests hold are the tables of `fixtures/` and the comments with the draft's sections in the code
 - [Scaling a broadcast and meetings: a design draft](docs/scale-and-meetings.md)
 - [Roadmap](docs/roadmap.md)
 - The [experiment records](docs/experiments/README.md): what a run looks at, and every run

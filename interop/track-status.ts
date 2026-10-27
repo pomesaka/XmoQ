@@ -24,7 +24,7 @@
 //      the publisher, which announced the namespace, and it refuses.
 //      own: `TRACK_STATUS_REFUSED error_code=0x10`: the refusal is passed on
 //        as for a SUBSCRIBE, and a NOT_SUPPORTED becomes DOES_NOT_EXIST
-//        (docs/moqt-implementation-notes.md, "TRACK_STATUS in the relay").
+//        (crates/relay-core/src/tests/track_status.rs).
 //      moqtail: `TRACK_STATUS_REFUSED error_code=0x3`, passed on as it came.
 //   4. `nothing` of the namespace `nobody`, which nobody announced: both
 //      `TRACK_STATUS_REFUSED error_code=0x10`.

@@ -352,7 +352,8 @@ export function createStreamIo(options: StreamIoOptions): StreamIo {
 	 * stream (`core/peer-requests.ts`). Without the limit, how many streams
 	 * hold that much is up to the transport: Chromium permits a peer at least
 	 * 100 bidirectional streams at once and takes no lower wish from the page
-	 * (docs/moqt-implementation-notes.md). With it, the number is this
+	 * (docs/moqt-implementation-notes.md, "Observations of other
+	 * implementations and of the browser"). With it, the number is this
 	 * endpoint's own, as in the Rust implementation (`max_request_streams`),
 	 * and the rest stays with the transport, where the peer waits.
 	 *

@@ -11,9 +11,9 @@
 //                     with CONTROL_MESSAGE_TIMEOUT: the peer prints
 //                     `SESSION_ENDED ... ClosedByPeer { code: 17,` (0x11),
 //                     between 1.5 and 5 seconds after the client began. All
-//                     three clients. (The rows "A peer that sends no SETUP"
-//                     and, for the two below, "A request the peer does not
-//                     answer" of docs/moqt-implementation-notes.md.)
+//                     three clients. (`setup-wait-ms` of
+//                     fixtures/limits/limits.tsv and, for the two below,
+//                     fixtures/request-answer-wait/.)
 //   no-publish-answer The peer answers a PUBLISH_NAMESPACE and no PUBLISH.
 //                     The client ends its PUBLISH with PUBLISH_DONE and a
 //                     FIN: the peer prints, for the stream of the PUBLISH,

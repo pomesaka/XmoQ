@@ -10,7 +10,7 @@ MoQ is a media Object distribution protocol, not a replacement for the entire We
 
 XmoQ implements the MoQ Transport layer itself, in Rust (relay and client) and in TypeScript (browser), pinned to `draft-ietf-moq-transport-18` (WebTransport subprotocol `moqt-18`). QUIC and WebTransport are not reimplemented: Rust uses existing crates and the browser uses its native `WebTransport`.
 
-What of the draft is implemented, and what is not, and what both implementations do where draft 18 is silent or contradicts itself, is in the [implementation notes](moqt-implementation-notes.md). The implementation follows the draft text, not library behaviour and not model memory.
+What both implementations do where draft 18 is silent or contradicts itself is in the tables of `fixtures/`, which both read in their tests, and in the comments of the code, with the section of the draft. The [implementation notes](moqt-implementation-notes.md) have the rulings no test can hold and what of the draft is not implemented (the known gaps). The implementation follows the draft text, not library behaviour and not model memory.
 
 The relay accepts WebTransport only, not native QUIC. Browsers can use nothing else, the Rust CLI can use WebTransport as well, and one path means one implementation and one set of interop runs.
 

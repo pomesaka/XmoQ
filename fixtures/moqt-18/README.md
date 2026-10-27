@@ -159,4 +159,4 @@ No fixture here covers the following. XmoQ's tests for them use bytes written by
 - An Absolute Joining FETCH (Fetch Type 0x3) as a message, and a FETCH with FILL_TIMEOUT (0x0A), GROUP_ORDER or AUTHORIZATION_TOKEN. FETCH_OK with End Of Track 1 or with Track Properties.
 - On a fetch stream: the End of Range indicators (0x8C, 0x10C), a stream in Descending Group Order, an Object with the Datagram bit (0x40), Subgroup ID mode 0x00 and 0x02, and an Object ID that is left out for the first Object of a Group. The moqtail relay 0.15.0 did not send a stream in Descending order when asked (the record above).
 
-The value of RENDEZVOUS_TIMEOUT, which the draft does not encode, is in [Encodings the draft does not give](../../docs/moqt-implementation-notes.md#encodings-the-draft-does-not-give).
+The value of RENDEZVOUS_TIMEOUT, which the draft does not encode, is in [`fixtures/moqt-18-by-hand/`](../moqt-18-by-hand/README.md).

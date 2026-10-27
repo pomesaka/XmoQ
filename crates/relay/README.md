@@ -1,6 +1,6 @@
 # xmoq-relay
 
-The relay of XmoQ: MoQ Transport draft 18 over WebTransport, on one machine. What it does and what is decided where is at the top of `src/main.rs`; who gets what and who is cut off is [`xmoq-relay-core`](../relay-core/src/lib.rs), and the streams are [`xmoq-moqt-io`](../moqt-io/src/lib.rs). Where draft 18 is silent or contradicts itself, what it does is in the relay's table of the [implementation notes](../../docs/moqt-implementation-notes.md).
+The relay of XmoQ: MoQ Transport draft 18 over WebTransport, on one machine. What it does and what is decided where is at the top of `src/main.rs`; who gets what and who is cut off is [`xmoq-relay-core`](../relay-core/src/lib.rs), and the streams are [`xmoq-moqt-io`](../moqt-io/src/lib.rs). Where draft 18 is silent or contradicts itself, what it does is held by the tests of `xmoq-relay-core` (`../relay-core/src/tests.rs` and `../relay-core/src/tests/`) and of this crate (`src/tests.rs`), with the section of the draft in the comments of the code; what no test can hold, and what of the draft the relay does not meet, are the relay's table and known gaps in the [implementation notes](../../docs/moqt-implementation-notes.md).
 
 ## Run
 

@@ -21,7 +21,7 @@ What can happen, column 3:
 |---|---|
 | `subscribed` | Its SUBSCRIBE was answered with SUBSCRIBE_OK; the shortest pause after a refusal begins anew |
 | `publish-done` | PUBLISH_DONE on its stream (§10.11) |
-| `fin` | The publisher finished its direction of the stream without PUBLISH_DONE, which travels on that direction and can no longer come: the request is over (§3.3.2 cancels by "resetting or sending STOP_SENDING", and §5.1 has PUBLISH_DONE end a subscription; the row on a requester that finishes its direction in [the implementation notes](../../docs/moqt-implementation-notes.md) has the publisher's FIN of a SUBSCRIBE as an ending) |
+| `fin` | The publisher finished its direction of the stream without PUBLISH_DONE, which travels on that direction and can no longer come: the request is over (§3.3.2 cancels by "resetting or sending STOP_SENDING", and §5.1 has PUBLISH_DONE end a subscription; the rows `subscribe-pending-fin` and `subscribe-established-fin` of [`fixtures/own-requests/stream-ends.tsv`](../own-requests/README.md) have the publisher's FIN of a SUBSCRIBE as an ending) |
 | `reset` | The publisher reset its direction of the stream (§3.3.2) |
 | `lost` | The connection went while the stream was read |
 | `goaway` | A GOAWAY on its stream (§10.4: "SHOULD re-issue that specific request"); it is asked for again on this session, where the rest of the session is |

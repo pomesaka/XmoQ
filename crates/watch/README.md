@@ -40,7 +40,7 @@ The buffer (`--buffer-ms`, and `--buffer-ms auto`) goes by the rule and the valu
 
 The viewer does not change the version of the video by itself: `--video-version` chooses one where the catalog has several ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-chooses-a-version-of-the-video.md)). Behind a link with less room than the video, `--video-timeout-ms` keeps the picture from falling behind ([record](../../docs/experiments/2026-10-12-the-terminal-viewer-asks-for-a-delivery-timeout.md)).
 
-Every limit on what the relay, the publisher behind it and the room can have it hold or wait for is a constant, with its value and its reason, in `src/`, `src/bin/xmoq-watch/`, `xmoq-viewer`, `xmoq-viewer-io` and `xmoq-subscriber`; those the pages share are the rows of the implementation notes and of `fixtures/ask-again/`, `fixtures/kept-track/` and `fixtures/followed-track/`.
+Every limit on what the relay, the publisher behind it and the room can have it hold or wait for is a constant, with its value and its reason, in `src/`, `src/bin/xmoq-watch/`, `xmoq-viewer`, `xmoq-viewer-io` and `xmoq-subscriber`; those the pages share are the rows of the implementation notes and of `fixtures/request-answer-wait/`, `fixtures/ask-again/`, `fixtures/kept-track/` and `fixtures/followed-track/`.
 
 **What it cannot check**: a room reached over `http://` is not authenticated, so whoever is on the path can name another relay as the broadcast, and the viewer would send its token there. A room's address is accepted as it is given; a broadcast it names has to be `https://`.
 

@@ -140,8 +140,7 @@ impl Default for StreamConfig {
 /// `INTERNAL_ERROR` and ends as [`StreamEnd::Aborted`] without a code; the
 /// subscription and the session go on. Fetch, control and padding streams do
 /// not have this time. As `idleSubgroupStreamTimeoutMs` of `@xmoq/moqt`
-/// (`docs/moqt-implementation-notes.md`, "A subgroup stream of the peer that
-/// sends nothing after its header"). Provisional. A relay passes such an
+/// (`idle-subgroup-stream-ms` of `fixtures/limits/limits.tsv`). Provisional. A relay passes such an
 /// end on to its subscribers as a reset with `INTERNAL_ERROR`.
 ///
 /// WHY a time at all: §11.4 and §11.4.3 say nothing of a subgroup stream
@@ -1972,7 +1971,8 @@ impl OutgoingSubgroup {
     /// A stream that was finished before keeps the time it was finished
     /// with: its timer runs. WHY: §8 starts the timer when the sender knows
     /// the Subgroup is complete and says nothing of a timeout that changes
-    /// under it (docs/moqt-implementation-notes.md, **provisional**).
+    /// under it (`an_update_of_the_delivery_timeout_holds_for_the_streams_that_end_after_it`
+    /// of `crates/relay/src/tests.rs`, **provisional**).
     pub fn set_delivery_timeout(&self, delivery_timeout: Option<Duration>) {
         self.asked.send_replace(delivery_timeout);
     }

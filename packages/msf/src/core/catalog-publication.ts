@@ -231,8 +231,7 @@ export type CatalogFetchAnswer =
  * Object 0 for a whole Group.
  *
  * The rule is the one of the Rust client that answers from what it
- * published (docs/moqt-implementation-notes.md, "A publisher that answers a
- * Standalone FETCH from what it published"), for a publisher that keeps one
+ * published (fixtures/published-fetch/answers.tsv), for a publisher that keeps one
  * Object:
  *
  * - Transport §10.12.3: "If ... Start Location is greater than the Largest

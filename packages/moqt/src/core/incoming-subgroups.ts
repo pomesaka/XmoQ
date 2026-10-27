@@ -401,7 +401,7 @@ export function createIncomingSubgroups(
 	 * says "The endpoint is overloaded", which it is not. INTERNAL_ERROR is
 	 * "An implementation specific error", and the code a stream that does not
 	 * say what it is gets (`peerStreamTimedOut` in session.ts); the Rust
-	 * implementation sends the same (docs/moqt-implementation-notes.md).
+	 * implementation sends the same (crates/moqt-io/src/streams.rs).
 	 */
 	const idleStream: StopReason = {
 		reason: "no bytes within the idle time",
