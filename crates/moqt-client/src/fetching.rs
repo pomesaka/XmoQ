@@ -646,6 +646,48 @@ impl BodyTask {
 mod tests {
     use super::*;
 
+    /// The rows of `fixtures/own-requests/stream-ends.tsv` for a FETCH,
+    /// which `@xmoq/moqt` reads as well. In Rust the session does not decide
+    /// what the end of the stream of a request of this end does; for a FETCH
+    /// this client does ([`step`]). A FIN of the peer before `FETCH_OK` ends
+    /// the FETCH, since no answer can come any more; one after it ends
+    /// nothing, the FETCH going on until its fetch stream ends (§5.2). A
+    /// reset ends it whenever it comes (§3.3.2). A `STOP_SENDING` for this
+    /// client's direction ends nothing by itself.
+    #[test]
+    fn the_end_of_the_stream_of_a_fetch_does_what_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/own-requests/stream-ends.tsv");
+        let mut read = 0;
+        for row in table.lines() {
+            let [name, request, state, event, expected] = row.split('\t').collect::<Vec<_>>()[..]
+            else {
+                panic!("a row of five columns: {row}");
+            };
+            if request != "fetch" {
+                continue;
+            }
+            read += 1;
+            let progress = Progress {
+                answered: state == "established",
+                stream: None,
+                over: false,
+                gave_up: false,
+            };
+            let how = match event {
+                "fin" => RequestClose::Fin,
+                "reset" => RequestClose::Reset(Some(0x1)),
+                "stop-sending" => RequestClose::Stopped(Some(0x1)),
+                other => panic!("{name}: {other}"),
+            };
+            let got = match step(progress, Happened::RequestClosed(how)).ended {
+                Some(_) => "ends",
+                None => "nothing",
+            };
+            assert_eq!(got, expected, "{name}");
+        }
+        assert_eq!(read, 6);
+    }
+
     const FIN: Option<StreamEnded> = Some(StreamEnded::Fin);
     const RESET: Option<StreamEnded> = Some(StreamEnded::Reset(Some(0x6)));
 

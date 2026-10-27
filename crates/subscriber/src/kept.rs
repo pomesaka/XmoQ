@@ -663,7 +663,7 @@ mod tests {
     use xmoq_moqt::name::FullTrackName;
     use xmoq_moqt::session::{RequestState, Role, Transport};
     use xmoq_moqt_io::memory;
-    use xmoq_moqt_io::{ReadError, RecvStream, RequestClose, Trace, send_message};
+    use xmoq_moqt_io::{ReadError, RecvStream, RequestClose, SendStream, Trace, send_message};
 
     use super::*;
 
@@ -861,6 +861,104 @@ mod tests {
                 (other, expected) => panic!("{name}: {other:?}, not {expected:?}"),
             }
         }
+    }
+
+    /// The rows of `fixtures/own-requests/stream-ends.tsv` for a SUBSCRIBE,
+    /// which `@xmoq/moqt` reads as well. In Rust the session does not decide
+    /// what the end of the stream of a request of this end does; for a
+    /// SUBSCRIBE a [`KeptTrack`] does. A FIN or a reset of the relay before
+    /// the answer, and after `SUBSCRIBE_OK` (where `PUBLISH_DONE`, which
+    /// travels on that direction, can no longer come), ends the request; one
+    /// after `PUBLISH_DONE` comes on a stream the track let go of. A
+    /// `STOP_SENDING` for the track's own direction ends nothing: the
+    /// subscriber is the one that ends a subscription with it (§5.1), and
+    /// the track reads the relay's direction alone.
+    #[tokio::test]
+    async fn the_end_of_the_stream_of_a_subscribe_does_what_the_shared_table_says() {
+        let table = include_str!("../../../fixtures/own-requests/stream-ends.tsv");
+        let mut read = 0;
+        for row in table.lines() {
+            let [name, request, state, event, expected] = row.split('\t').collect::<Vec<_>>()[..]
+            else {
+                panic!("a row of five columns: {row}");
+            };
+            if request != "subscribe" {
+                continue;
+            }
+            read += 1;
+            let (ours, relay) = memory::pair();
+            let ours = Arc::new(ours);
+            let mut session = Session::new(Role::Client, Transport::WebTransport);
+            let mut kept = KeptTrack::new(
+                Wanted {
+                    namespace: TrackNamespace::new(vec![b"xmoq".to_vec()]).unwrap(),
+                    name: "a".to_string(),
+                    rendezvous_ms: None,
+                    payload_most: None,
+                    again_after_failure: false,
+                },
+                Asking {
+                    connection: Arc::clone(&ours),
+                    stops: StreamStops::default(),
+                    token: None,
+                    answer_wait_ms: 10_000,
+                    open_wait_ms: 10_000,
+                },
+            );
+            let ask_now = kept.next().await;
+            assert!(kept.on(&mut session, ask_now).unwrap().is_none(), "{name}");
+            // The SUBSCRIBE is written while the track is polled.
+            let (mut relay_send, relay_recv) = tokio::select! {
+                _ = kept.next() => panic!("{name}: nothing is to come before the relay answers"),
+                accepted = relay.accept_bi() => accepted.unwrap(),
+            };
+            let trace = Trace::default();
+            if state != "pending" {
+                let answer = subscribe_ok();
+                let (settled, written) = tokio::join!(
+                    kept.next(),
+                    send_message(&mut relay_send, &answer, &trace, "relay")
+                );
+                written.unwrap();
+                assert!(kept.on(&mut session, settled).unwrap().is_some(), "{name}");
+            }
+            if state == "done" {
+                let done = ControlMessage::PublishDone(PublishDone {
+                    status_code: 2,
+                    stream_count: 1,
+                    error_reason: ReasonPhrase::default(),
+                });
+                let (came, written) = tokio::join!(
+                    kept.next(),
+                    send_message(&mut relay_send, &done, &trace, "relay")
+                );
+                written.unwrap();
+                assert!(matches!(
+                    kept.on(&mut session, came),
+                    Ok(Some(KeptTrackChange::Ended { .. }))
+                ));
+            }
+            match event {
+                "fin" => relay_send.finish(),
+                "reset" => relay_send.reset(0x1),
+                "stop-sending" => relay_recv.stop(0x1),
+                other => panic!("{name}: {other}"),
+            }
+            let got = match tokio::time::timeout(Duration::from_millis(100), kept.next()).await {
+                Err(_) | Ok(KeptTrackInput::AskNow) => "nothing",
+                Ok(came) => match kept.on(&mut session, came) {
+                    Ok(Some(
+                        KeptTrackChange::Ended { .. }
+                        | KeptTrackChange::Failed { .. }
+                        | KeptTrackChange::GivenUp(_),
+                    )) => "ends",
+                    Ok(None) => "nothing",
+                    other => panic!("{name}: {other:?}"),
+                },
+            };
+            assert_eq!(got, expected, "{name}");
+        }
+        assert_eq!(read, 8);
     }
 
     /// Reads `recv` until it ends: at its FIN, or with an error.
