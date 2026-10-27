@@ -103,6 +103,13 @@ export type VideoSenderStep =
 			opensStream: boolean;
 			/** Whether the stream is finished after the Object. */
 			closesStream: boolean;
+			/**
+			 * `"EndOfGroup"` for the Object that ends a Group when the source
+			 * stops (`endGroup("paused")`): its payload is empty and it has
+			 * no properties (transport draft 18 §11.2.1.1: "any object with a
+			 * status code other than zero MUST have an empty payload").
+			 */
+			status?: "EndOfGroup";
 	  }
 	/**
 	 * With "stream-per-group": finish the stream of this Group, with a FIN.
@@ -177,8 +184,14 @@ export interface VideoSender {
 	 * - "write-failed": an Object of the Group could not be written. The
 	 *   stream is reset. With a stream for every Object none is open here,
 	 *   and the stream of the Object that failed is the caller's to reset.
+	 * - "paused": the source stopped (a camera turned off), and the track
+	 *   goes on later with a key chunk. An Object of the status End of
+	 *   Group follows the last one of the Group, and its stream is
+	 *   finished. Nothing where no Group is being sent.
 	 */
-	endGroup(because: "track-ended" | "write-failed"): VideoSenderStep[];
+	endGroup(
+		because: "track-ended" | "write-failed" | "paused",
+	): VideoSenderStep[];
 }
 
 /** 2^64 - 1, the largest ID MoQ Transport carries. */
@@ -310,10 +323,39 @@ export function createVideoSender(options: VideoSenderOptions): VideoSender {
 		},
 
 		endGroup(because) {
+			const was = sending;
 			sending = undefined;
 			switch (because) {
 				case "track-ended":
 					return end("close");
+				case "paused": {
+					// WHY an Object of End of Group, and not a FIN alone: the
+					// stream of a Group is opened without END_OF_GROUP (the
+					// Group's end is not known when it is opened), so its FIN
+					// says only that the subgroup ended (§11.4.3), and a
+					// receiver takes the next Group for the end of this one.
+					// The Object says the Group is whole now (§11.2.1.1, 0x3),
+					// so a receiver that waits for the next Group does not
+					// count a gap.
+					if (was === undefined) return [];
+					const perObject = mapping === "stream-per-object";
+					const opensStream = perObject || open !== was.group;
+					if (!perObject) open = was.group;
+					return [
+						{
+							type: "object",
+							groupId: was.group,
+							subgroupId: perObject ? was.next : 0n,
+							objectId: was.next,
+							properties: [],
+							payload: new Uint8Array(),
+							opensStream,
+							closesStream: perObject,
+							status: "EndOfGroup",
+						},
+						...(perObject ? [] : close()),
+					];
+				}
 				case "write-failed":
 					return end("reset");
 				default:

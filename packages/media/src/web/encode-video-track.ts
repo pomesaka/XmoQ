@@ -177,6 +177,15 @@ export interface VideoTrackEncoder {
 	 */
 	wantsKeyFrame(): boolean;
 	/**
+	 * The source stopped (a camera turned off): the Group that is being sent
+	 * ends now (`VideoTrackPublisher.pause`), and what the encoder still
+	 * gives of the frames before is not sent. The next frame is a key frame,
+	 * which begins the next Group. Its time is the source's, so the time the
+	 * source stood still is in the times of the track, as it is in those of
+	 * a sound that stood still as long.
+	 */
+	pause(): void;
+	/**
 	 * What the encoder still holds is encoded and sent, for `endTimeoutMs`
 	 * at most; then the encoder is closed and the track is ended
 	 * (`VideoTrackPublisher.end`, which has its own waits). Never rejects.
@@ -315,6 +324,8 @@ export async function createVideoTrackEncoder(
 	let wantsKey = false;
 	/** The time of the last frame that was handed to the encoder. */
 	let lastTime: number | undefined;
+	/** The time of the last frame before `pause`: what the encoder gives of it and of the frames before is not sent. */
+	let pausedAfter: number | undefined;
 	let closed = false;
 	let fail: (error: unknown) => void = () => {};
 	const failed = new Promise<unknown>((resolve) => {
@@ -323,6 +334,7 @@ export async function createVideoTrackEncoder(
 
 	const encoder = new VideoEncoder({
 		output: (chunk) => {
+			if (pausedAfter !== undefined && chunk.timestamp <= pausedAfter) return;
 			const wall = stamp.of(chunk.timestamp);
 			if (wall === undefined) return;
 			const data = new Uint8Array(chunk.byteLength);
@@ -386,6 +398,11 @@ export async function createVideoTrackEncoder(
 	return {
 		publisher,
 		wantsKeyFrame: () => wantsKey,
+		pause() {
+			pausedAfter = lastTime;
+			publisher.pause();
+			wantsKey = true;
+		},
 		encode(frame, { keyFrame: asked = false } = {}) {
 			try {
 				if (closed) return notEncoded("closed");
