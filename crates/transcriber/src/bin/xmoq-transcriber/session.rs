@@ -28,7 +28,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinSet;
 use xmoq_again::next_session::{Pause, new_url};
 use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
@@ -36,9 +35,9 @@ use xmoq_moqt::early::{Arrived, EarlyObjects, held_bytes};
 use xmoq_moqt::fetch::{FetchEvent, FetchStreamDecoder, FetchStreamEncoder};
 use xmoq_moqt::immutable::{Of, TrackRefusal, searched_integers};
 use xmoq_moqt::message::{
-    ControlMessage, FetchRange, ReasonPhrase, RequestError, publish_done_status, request_error_code,
+    ControlMessage, FetchRange, RequestError, publish_done_status, request_error_code,
 };
-use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
+use xmoq_moqt::name::{FullTrackName, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter};
 use xmoq_moqt::session::{
     ControlEvent, FetchStreamOpened, MalformedRequest, RequestEvent, RequestId, Role, Session,
@@ -54,9 +53,9 @@ use xmoq_msf::{CATALOG_TRACK, MAX_CATALOG_LENGTH};
 use xmoq_publisher::answers::{self, Bounds, MAX_ANSWERED_AT_ONCE, Note};
 use xmoq_publisher::fetch::pieces_of;
 use xmoq_publisher::own::OwnRequests;
-use xmoq_publisher::publication::{Ending, FIRST_TRACK_ALIAS, Publication};
+use xmoq_publisher::publishing::{self, Publish, Publishing, Sent};
 use xmoq_publisher::requests::{AskedFetch, FetchAnswer, PeerRequests};
-use xmoq_publisher::streams::{COMMAND_QUEUE, Command, GroupToSend, Heard, Sending, send_group};
+use xmoq_publisher::streams::{COMMAND_QUEUE, Command, Heard};
 use xmoq_publisher::{shown, sleep_until};
 use xmoq_room_token::{Role as TokenRole, RoomKey};
 use xmoq_speech::cut::Cut;
@@ -156,8 +155,8 @@ struct Transcribing<'a> {
     stops: StreamStops,
     own: OwnRequests<Purpose>,
     /// The transcript of each prefix.
-    published: Vec<Publication<Speech>>,
-    next_track_alias: u64,
+    /// The transcript of each prefix, by its place in the flags.
+    publishing: Publishing<usize, Speech>,
     watches: Vec<KeptNamespace>,
     broadcasts: HashMap<TrackNamespace, Broadcast<Listener>>,
     /// The tracks of broadcasts to be asked for again, and when.
@@ -173,9 +172,6 @@ struct Transcribing<'a> {
     requests: PeerRequests,
     /// The PUBLISH requests that wait for their streams to be closed, by
     /// token, with their prefix.
-    ending: HashMap<u64, (usize, Ending)>,
-    drained: mpsc::Sender<u64>,
-    sends: JoinSet<()>,
     /// Audio Objects without a Timestamp of LOC, which are not read.
     untimed: u64,
 }
@@ -259,13 +255,8 @@ pub async fn transcribe(
         vad,
         session: Session::new(Role::Client, Transport::WebTransport),
         stops,
-        own: OwnRequests::new(heard, OPEN_WAIT),
-        published: args
-            .prefixes
-            .iter()
-            .map(|_| Publication::new(PIECES_WAITING_FOR_A_PUBLISH))
-            .collect(),
-        next_track_alias: FIRST_TRACK_ALIAS,
+        own: OwnRequests::new(Arc::clone(connection), heard, OPEN_WAIT),
+        publishing: Publishing::new(drained, PIECES_BEING_SENT),
         watches: args
             .prefixes
             .iter()
@@ -281,11 +272,14 @@ pub async fn transcribe(
             bytes: MAX_BYTES_HELD,
             say_queue: COMMAND_QUEUE,
         }),
-        ending: HashMap::new(),
-        drained,
-        sends: JoinSet::new(),
         untimed: 0,
     };
+
+    for prefix in 0..args.prefixes.len() {
+        transcribing
+            .publishing
+            .track(prefix, PIECES_WAITING_FOR_A_PUBLISH);
+    }
 
     let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
     // The relay looks at no namespace or role of the token of a SETUP.
@@ -351,7 +345,7 @@ pub async fn transcribe(
             Some(token) = drained_publishes.recv() => transcribing.publish_done(token)?,
             () = sleep_until(next_watch) => transcribing.watch_again()?,
             () = sleep_until(next_ask) => transcribing.ask_again()?,
-            Some(_) = transcribing.sends.join_next() => {}
+            () = transcribing.publishing.sent() => {}
         }
     };
     // The pieces under way are read: what was said before the end is not
@@ -433,8 +427,7 @@ impl Transcribing<'_> {
         message: ControlMessage,
         parameters: &[Parameter],
     ) -> u64 {
-        self.own
-            .open(self.connection, purpose, request, message, parameters)
+        self.own.open(purpose, request, message, parameters)
     }
 
     /// Tells the task of a request stream something; where its queue is
@@ -455,54 +448,32 @@ impl Transcribing<'_> {
         self.own.let_go(&mut self.session, token, command)
     }
 
-    // FIXME: take the steps of a PUBLISH (`publish` to `publish_done`,
-    // `send_live`) from `xmoq-publisher`; the gatherer has a copy of each.
     /// Publishes the transcript of a prefix, unless it is published or waits
     /// to be published again.
     fn publish(&mut self, prefix: usize) -> Result<()> {
         let Some(listened) = self.args.prefixes.get(prefix).cloned() else {
             return Ok(());
         };
-        let Some(entry) = self.published.get(prefix) else {
-            return Ok(());
-        };
-        if !entry.to_publish(Instant::now()) {
-            return Ok(());
-        }
-        let track_alias = self.next_track_alias;
-        self.next_track_alias += 1;
         let pub_token = self
             .token(
                 &namespace_text(&transcript_namespace(&listened)?),
                 TokenRole::Pub,
             )
             .map(Parameter::AuthorizationToken);
-        // §10.2.11: the latest piece, which the relay gives its subscribers
-        // in SUBSCRIBE_OK, and where a Joining FETCH ends.
-        let parameters: Vec<Parameter> = self
-            .transcripts
-            .get(prefix)
-            .and_then(Transcript::largest)
-            .map(|group| Parameter::LargestObject(Location { group, object: 0 }))
-            .into_iter()
-            .chain(pub_token)
-            .collect();
-        let published = self.session.publish(
+        let largest = self.transcripts.get(prefix).and_then(Transcript::largest);
+        let published = self.publishing.publish(
+            &prefix,
             speech_track(&listened)?,
-            track_alias,
-            parameters.clone(),
-            vec![],
+            &publishing::parameters(largest, pub_token),
+            &mut self.session,
+            &mut self.own,
+            Purpose::Speech(prefix),
         );
-        let Ok((request, message)) = published else {
+        if let Publish::Refused(_) = published {
             println!(
                 "TRANSCRIPT_NOT_PUBLISHED prefix={} why=\"the PUBLISH before is ending\"",
                 shown(&listened)
             );
-            return Ok(());
-        };
-        let token = self.open(Purpose::Speech(prefix), request, message, &parameters);
-        if let Some(entry) = self.published.get_mut(prefix) {
-            entry.published(token, track_alias);
         }
         Ok(())
     }
@@ -510,7 +481,7 @@ impl Transcribing<'_> {
     /// The PUBLISH of a transcript is over; it is published again after a
     /// pause, on the next piece.
     fn unpublish(&mut self, prefix: usize, token: u64) {
-        if let Some(entry) = self.published.get_mut(prefix)
+        if let Some(entry) = self.publishing.get_mut(&prefix)
             && entry.unpublished(token, true, Instant::now())
         {
             println!("TRANSCRIPT_UNPUBLISHED prefix={prefix}");
@@ -521,43 +492,24 @@ impl Transcribing<'_> {
     /// sent are closed ([`Self::publish_done`]), as the gatherer ends a
     /// room's.
     fn end_publish(&mut self, prefix: usize, status: u64) {
-        let Some(ending) = self
-            .published
-            .get_mut(prefix)
-            .and_then(|entry| entry.end(status))
-        else {
-            return;
-        };
-        let drained = self.drained.clone();
-        let when_drained = ending.when_drained();
-        tokio::spawn(async move {
-            let _ = drained.send(when_drained.await).await;
-        });
-        self.ending.insert(ending.token, (prefix, ending));
+        self.publishing.end(&prefix, status);
     }
 
     /// Every stream of an ending PUBLISH is closed: its `PUBLISH_DONE` with
     /// the number of streams (§10.11), and the transcript is published anew.
     fn publish_done(&mut self, token: u64) -> Result<()> {
-        let Some((prefix, ending)) = self.ending.remove(&token) else {
+        let Some(done) = self.publishing.done(token, &mut self.session, &self.own)? else {
             return Ok(());
         };
-        if let Some(own) = self.own.get(token) {
-            let streams = ending.streams();
-            let done = self.session.publish_done(
-                own.request,
-                ending.status,
-                streams,
-                ReasonPhrase::default(),
-            )?;
-            self.tell(token, Command::Say(done));
+        if let Some(message) = done.message {
+            self.tell(token, Command::Say(message));
             self.let_go(token, Command::Finish);
             println!(
-                "TRANSCRIPT_DONE prefix={prefix} status={:#x} streams={streams}",
-                ending.status
+                "TRANSCRIPT_DONE prefix={} status={:#x} streams={}",
+                done.key, done.status, done.streams
             );
         }
-        self.publish(prefix)
+        self.publish(done.key)
     }
 
     /// The pieces of a prefix's broadcasts that were read.
@@ -587,39 +539,23 @@ impl Transcribing<'_> {
     /// Sends a piece on the transcript of its prefix, or has it wait for the
     /// `PUBLISH_OK`.
     fn send_live(&mut self, prefix: usize, speech: Speech) -> Result<()> {
-        let is_live = self.published.get(prefix).is_some_and(Publication::live);
-        if !is_live {
+        if !self.publishing.live(&prefix) {
             self.publish(prefix)?;
-            if let Some(entry) = self.published.get_mut(prefix) {
-                entry.wait(speech);
-            }
+            self.publishing.wait(&prefix, speech);
             return Ok(());
         }
-        let Some(entry) = self.published.get(prefix) else {
-            return Ok(());
+        let number = speech.number;
+        let failed = move |why: String| {
+            println!("SPEECH_NOT_SENT prefix={prefix} number={number} why={why:?}");
         };
-        if self.sends.len() >= PIECES_BEING_SENT {
-            println!(
-                "SPEECH_NOT_SENT prefix={prefix} number={} why=too-many-at-once",
-                speech.number
-            );
-            return Ok(());
+        let group = (number, speech.payload());
+        if self
+            .publishing
+            .send(&prefix, self.connection, group, failed)
+            == Sent::TooMany
+        {
+            println!("SPEECH_NOT_SENT prefix={prefix} number={number} why=too-many-at-once");
         }
-        let group = GroupToSend {
-            track_alias: entry.track_alias(),
-            group_id: speech.number,
-            payload: speech.payload(),
-            opened: Arc::clone(entry.opened()),
-        };
-        let counted = Sending::begin(entry.sending());
-        let connection = Arc::clone(self.connection);
-        self.sends.spawn(async move {
-            let _counted = counted;
-            let number = group.group_id;
-            if let Err(why) = send_group(connection, group).await {
-                println!("SPEECH_NOT_SENT prefix={prefix} number={number} why={why:?}");
-            }
-        });
         Ok(())
     }
 
@@ -1180,11 +1116,7 @@ impl Transcribing<'_> {
     fn request_moved(&mut self, token: u64, purpose: &Purpose) {
         match purpose {
             Purpose::Speech(prefix) => {
-                if self
-                    .published
-                    .get(*prefix)
-                    .is_some_and(|entry| entry.publish() == Some(token))
-                {
+                if self.publishing.is_publish(prefix, token) {
                     self.end_publish(*prefix, publish_done_status::GOING_AWAY);
                 }
             }
@@ -1217,7 +1149,7 @@ impl Transcribing<'_> {
             Purpose::Speech(prefix) => {
                 println!("TRANSCRIPT_NOT_PUBLISHED prefix={prefix} why={why:?}");
                 self.unpublish(*prefix, token);
-                self.ending.remove(&token);
+                self.publishing.over(token);
             }
         }
     }
@@ -1305,8 +1237,8 @@ impl Transcribing<'_> {
     /// sent.
     fn published_ok(&mut self, prefix: usize, token: u64, forward: bool) -> Result<()> {
         let waiting = self
-            .published
-            .get_mut(prefix)
+            .publishing
+            .get_mut(&prefix)
             .map(|entry| entry.established(token, forward))
             .unwrap_or_default();
         let largest = self.transcripts.get(prefix).and_then(Transcript::largest);
@@ -1373,11 +1305,7 @@ impl Transcribing<'_> {
             (Purpose::Speech(prefix), RequestEvent::UpdateRefused { response }) => {
                 let prefix = *prefix;
                 self.tell(token, Command::Say(response));
-                if self
-                    .published
-                    .get(prefix)
-                    .is_some_and(|entry| entry.publish() == Some(token))
-                {
+                if self.publishing.is_publish(&prefix, token) {
                     self.end_publish(prefix, publish_done_status::UPDATE_FAILED);
                 }
             }
