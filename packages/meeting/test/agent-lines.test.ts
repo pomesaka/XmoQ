@@ -79,6 +79,18 @@ const EVENTS: Record<string, AgentEvent> = {
 		gatheredAt: 995n,
 		byAgent: true,
 	},
+	"the reader began, in a meeting": {
+		type: "reader",
+		state: "began",
+		room: "meeting/demo",
+		id: "p1",
+	},
+	"the reader began, with no id": {
+		type: "reader",
+		state: "began",
+		room: "broadcast/demo",
+	},
+	"the reader ended": { type: "reader", state: "ended" },
 	"an error": {
 		type: "error",
 		message:

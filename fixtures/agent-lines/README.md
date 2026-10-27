@@ -19,6 +19,7 @@ Every line has `type` and `at`, the writer's clock in milliseconds since the Uni
 
 | `type` | Fields | When |
 |---|---|---|
+| `reader` | `state` (`began`, `ended`); with `began`, `room` (the chat's room, `broadcast/<name>` or `meeting/<name>`) and, from a page, `id` (the page's id in the meeting) | `began`: the first line of each run (`xmoq-agent` started, a page called); `ended`: the last, where the reader stops of itself (`xmoq-agent` on a signal or `--seconds`, a page's stop). None where the process is killed or the page closed |
 | `broadcast` | `state` (`began`, `ended`), `namespace` | `began`: the broadcast's catalog came on the session, so the broadcast is there; `ended`: after `began`, the catalog's subscription ended (the broadcast left) or the session ended. Each `began` has its `ended`; a session in which the broadcast never came writes neither. With `--url`, the namespace of `--namespace`. Not in a meeting |
 | `chat` | `number`, `from`, `text`, `sent_at` (the sender's clock), `gathered_at` (the gatherer's clock); `by` (`agent`) on a line the agent said | A line of the room, each once, in the order of its number: the latest `RECENT_LINES` (`xmoq-viewer`) when the reader comes, then each as it is said. The reader's own lines come back as well, with `by`: `xmoq-agent` marks every line of its own name, and a page the lines it said for the agent this time it was called, known by the page's name, `sent_at` and `text` |
 | `chat_gap` | `after`, `before` | More lines were said while the reader was away than `--chat-catch-up-lines`: those between were not fetched |
@@ -60,7 +61,7 @@ One line a row, two columns separated by a tab, no header; every row ends with o
 | 1 | The name of the row, unique. Each reader's test has its own event for each name |
 | 2 | The line, as it is written: one object of JSON, its keys in the order of their names, `at` the writer's clock in milliseconds since the Unix epoch |
 
-The rows pin what is not written down elsewhere: the order of the keys, how a string is escaped (what a terminal would act on, and a line break, as `\u001b` and `\n`; other characters as they are), numbers without a fraction or an exponent, `id` on a `frame` of a meeting, `by` on a line the agent said, and the `path` of a `frame` from the folder the line is in (`frames/<when the writing began, ms>/<six digits>-g<group>-o<object>.png`).
+The rows pin what is not written down elsewhere: the order of the keys, how a string is escaped (what a terminal would act on, and a line break, as `\u001b` and `\n`; other characters as they are), numbers without a fraction or an exponent, `id` on a `frame` of a meeting and on the first line of a page, `by` on a line the agent said, and the `path` of a `frame` from the folder the line is in (`frames/<when the writing began, ms>/<six digits>-g<group>-o<object>.png`).
 
 ## `event-files.tsv`
 

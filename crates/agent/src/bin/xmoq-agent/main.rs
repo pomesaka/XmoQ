@@ -798,6 +798,10 @@ async fn read(args: &Args) -> Result<()> {
         participant: participant_id(),
         broadcast_began: false,
     };
+    reader.tell(&Event::Began {
+        room: args.room.to_string(),
+        id: None,
+    });
     let mut pictures = if args.frames {
         Some(Pictures::start(
             args.pictures,
@@ -824,6 +828,7 @@ async fn read(args: &Args) -> Result<()> {
     if let Some(pictures) = pictures {
         pictures.end().await;
     }
+    reader.tell(&Event::Ended);
     ran
 }
 

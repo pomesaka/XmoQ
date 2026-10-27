@@ -521,6 +521,8 @@ async function main(): Promise<void> {
 		const bridge = createAgentBridge({
 			folder,
 			name: self,
+			room: `meeting/${room}`,
+			id: self,
 			say: (text) =>
 				chat?.say(text) ?? Promise.resolve({ why: "this page has no chat" }),
 		});

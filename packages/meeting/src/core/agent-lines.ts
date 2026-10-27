@@ -7,6 +7,14 @@
 
 /** One thing that happened, as the page writes it. */
 export type AgentEvent =
+	/**
+	 * The page began to write the folder: its first line. `room` is the
+	 * chat's room (`meeting/<room>`), `id` the page's id in the meeting,
+	 * which the `from` of its own voice ends with. `xmoq-agent` writes none.
+	 */
+	| { type: "reader"; state: "began"; room: string; id?: string }
+	/** The page stopped writing the folder: its last line. None comes where the page is closed. */
+	| { type: "reader"; state: "ended" }
 	/** A participant of the meeting came or left. */
 	| { type: "participant"; state: "joined" | "left"; id: string }
 	/** A line of the room's chat. */
@@ -83,6 +91,15 @@ function written(value: Field): string {
 /** The fields of `event`, by the names the line has. */
 function fieldsOf(event: AgentEvent): Record<string, Field> {
 	switch (event.type) {
+		case "reader":
+			return event.state === "began"
+				? {
+						type: event.type,
+						state: event.state,
+						room: event.room,
+						...(event.id === undefined ? {} : { id: event.id }),
+					}
+				: { type: event.type, state: event.state };
 		case "participant":
 			return { type: event.type, state: event.state, id: event.id };
 		case "chat":

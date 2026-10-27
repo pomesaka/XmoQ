@@ -1014,6 +1014,8 @@ window.xmoqOwn = {
 			const bridge = createAgentBridge({
 				folder,
 				name: self,
+				room: `meeting/${room}`,
+				id: self,
 				say: async () => ({ why: "this page has no chat" }),
 			});
 			agentFolder = folder;
