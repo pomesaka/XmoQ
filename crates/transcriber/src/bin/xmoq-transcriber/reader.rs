@@ -16,6 +16,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use xmoq_speech::Words;
 use xmoq_speech::cut::Piece;
+use xmoq_transcriber::marks::only_marks;
 use xmoq_transcriber::transcript::ReadPiece;
 
 /// What the reader has read and the loop has not taken yet; the reader
@@ -119,9 +120,9 @@ fn run(
         let took_ms = began.elapsed().as_millis();
         let waited_ms = began.duration_since(given).as_millis();
         let text = match text {
-            Ok(text) if text.is_empty() => {
+            Ok(text) if only_marks(&text) => {
                 println!(
-                    "PIECE_WITHOUT_WORDS from={} start_us={} took_ms={took_ms}",
+                    "PIECE_WITHOUT_WORDS from={} start_us={} took_ms={took_ms} text={text:?}",
                     from.join("/"),
                     piece.start_us
                 );
