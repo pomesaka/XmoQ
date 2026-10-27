@@ -49,6 +49,19 @@ pub struct ChatTokens {
     pub subscribe: Option<Vec<u8>>,
 }
 
+/// The address of the relay a room named, and the SHA-256 of its
+/// certificate, to connect to.
+///
+/// # Errors
+///
+/// A room that named no relay, and a hash that is not 64 hex digits.
+pub fn relay_address(relay: Option<room::Relay>) -> Result<(String, [u8; 32])> {
+    let relay = relay.ok_or_else(|| anyhow!("the room names no relay"))?;
+    let cert_sha256 = xmoq_moqt_io::wt::certificate_hash(&relay.cert_sha256_hex)
+        .ok_or_else(|| anyhow!("the hash of a certificate is 64 hex digits"))?;
+    Ok((relay.relay_url, cert_sha256))
+}
+
 /// Whether the connection was refused: nobody listens there (yet).
 fn refused(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
@@ -497,6 +510,38 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
     const LEASE: &str = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
+
+    #[test]
+    fn the_relay_a_room_names_is_its_address_and_the_hash_of_its_certificate() {
+        let relay = |hex: &str| room::Relay {
+            relay_url: "https://relay.example:4443/".to_string(),
+            cert_sha256_hex: hex.to_string(),
+        };
+        // (what the room named; the address and the first byte of the hash,
+        // or the error)
+        let cases = [
+            (
+                Some(relay(
+                    "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+                )),
+                Ok(("https://relay.example:4443/", 0xa0)),
+            ),
+            (None, Err("the room names no relay")),
+            (
+                Some(relay("a0a1")),
+                Err("the hash of a certificate is 64 hex digits"),
+            ),
+        ];
+        for (named, expected) in cases {
+            let read = relay_address(named);
+            assert_eq!(
+                read.as_ref()
+                    .map(|(url, hash)| (url.as_str(), hash[0]))
+                    .map_err(ToString::to_string),
+                expected.map_err(str::to_string)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn a_room_is_asked_for() {

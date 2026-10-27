@@ -33,17 +33,11 @@ use xmoq_loc::draft_04 as loc;
 use xmoq_moqt::data::ObjectStatus;
 use xmoq_moqt::message::request_error_code;
 use xmoq_moqt::name::TrackNamespace;
-use xmoq_moqt::session::{
-    ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequestId, RequestEvent, Role, Session,
-    Transport,
-};
+use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, Role, Session, Transport};
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::client::{self, CloseWait, Signals, UntilClosed};
 use xmoq_moqt_io::wt::{self, WtConnection};
-use xmoq_moqt_io::{
-    RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent, read_request_streams,
-    read_uni_streams,
-};
+use xmoq_moqt_io::{RequestStreamEvent, StreamConfig, StreamEnd, StreamStops, UniEvent};
 use xmoq_msf::CatalogTrack;
 use xmoq_picture::video_decoder::VideoDecoder;
 use xmoq_subscriber::catalog::{Became, FollowedCatalog};
@@ -55,7 +49,7 @@ use xmoq_subscriber::session::{
 use xmoq_viewer::chat_track::{shown, shown_gap};
 use xmoq_viewer::room;
 use xmoq_viewer_io::chat_tracks::{ChatOutcome, ChatTracks};
-use xmoq_viewer_io::room_client::{ChatTokens, ROOM_COMES_WITHIN, RoomClient};
+use xmoq_viewer_io::room_client::{ChatTokens, ROOM_COMES_WITHIN, RoomClient, relay_address};
 use xmoq_watch::args::{Args, Chat, Fit, Source};
 use xmoq_watch::clock::{AUTO_MOST_US, Clock};
 use xmoq_watch::keys::{KeyCommand, Keys};
@@ -284,12 +278,10 @@ async fn place(args: &Args, client: Option<&RoomClient>, ui: &mut Ui) -> Result<
     let room::Room::Broadcast(broadcast) = answered else {
         bail!("the room answered as a meeting's");
     };
-    let relay = broadcast
-        .relay
-        .ok_or_else(|| anyhow!("the room names no relay"))?;
+    let (url, cert_sha256) = relay_address(broadcast.relay)?;
     ui.note(&format!(
         "ROOM_BROADCAST relay={} namespace={}",
-        room::clean(&relay.relay_url, room::LINE_LIMIT),
+        room::clean(&url, room::LINE_LIMIT),
         room::clean(&broadcast.namespace.join("/"), room::LINE_LIMIT)
     ));
     let mut token = None;
@@ -329,9 +321,8 @@ async fn place(args: &Args, client: Option<&RoomClient>, ui: &mut Ui) -> Result<
         chat_tokens = tokens;
     }
     Ok(Some(Place {
-        url: relay.relay_url,
-        cert_sha256: wt::certificate_hash(&relay.cert_sha256_hex)
-            .ok_or_else(|| anyhow!("the hash of a certificate is 64 hex digits"))?,
+        url,
+        cert_sha256,
         namespace: broadcast.namespace,
         token,
         chat_tokens,
@@ -738,25 +729,8 @@ fn tell_chat(ui: &mut Ui, out: ChatOutcome) {
 }
 
 /// Writes what became of the sound kept on the session.
-fn tell_audio(ui: &mut Ui, said: KeptTrackChange) {
-    let line = match said {
-        KeptTrackChange::Subscribed { track_alias } => {
-            format!("AUDIO_AGAIN track_alias={track_alias}")
-        }
-        KeptTrackChange::Ended { how, pause_ms } => {
-            format!("AUDIO_ENDED {how}; asking again in {pause_ms} ms")
-        }
-        KeptTrackChange::Refused {
-            error_code,
-            pause_ms,
-        } => format!("AUDIO_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"),
-        // As the page: not asked for again on this session.
-        KeptTrackChange::GivenUp(why) | KeptTrackChange::Failed { why, .. } => {
-            format!("AUDIO_GIVEN_UP {why}")
-        }
-        KeptTrackChange::Other(other) => format!("AUDIO_SAID {other:?}"),
-    };
-    ui.note(&line);
+fn tell_audio(ui: &mut Ui, said: &KeptTrackChange) {
+    ui.note(&format!("AUDIO_{said}"));
 }
 
 /// Plays one broadcast until it ends, moves, or the viewer is ended.
@@ -776,26 +750,10 @@ async fn play(
 ) -> Result<Ended> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
-    let (queue, received) = mpsc::channel(64);
-    let mut events = Events::new(received);
-    kept.readers.push(read_uni_streams(
-        Arc::clone(connection),
-        StreamConfig::default(),
-        stops.clone(),
-        queue,
-        |event| event,
-    ));
     // The requests the peer opens: none is served, and each is refused
     // (`session::refuse_peer_request`). They are read from here on and
     // answered once the broadcast plays; until then they wait in the queue.
-    let (asks, mut asked) = mpsc::channel(16);
-    kept.readers.push(read_request_streams(
-        Arc::clone(connection),
-        StreamConfig::default(),
-        stops.clone(),
-        asks,
-        |event| event,
-    ));
+    let (mut events, mut asked) = session::read_peer_streams(connection, &stops, kept);
     let mut refused: HashMap<u64, PeerRequestId> = HashMap::new();
     let control_kept = &mut kept.control;
     let namespace = TrackNamespace::new(
@@ -1068,7 +1026,7 @@ async fn play(
             }
             came = audio.next() => {
                 if let Some(said) = audio.on(&mut session, came)? {
-                    tell_audio(ui, said);
+                    tell_audio(ui, &said);
                 }
             }
             () = async {
@@ -1079,7 +1037,7 @@ async fn play(
             } => {
                 cut_at = None;
                 if let Some(said) = audio.cut(&mut session) {
-                    tell_audio(ui, said);
+                    tell_audio(ui, &said);
                 }
             }
             Some(event) = asked.recv() => {
@@ -1181,12 +1139,7 @@ async fn play(
                     }
                 }
                 Some(UniEvent::FetchOpened { stream, header }) => {
-                    drop(stops.take_fetch_body(stream));
-                    // Its stream is let go of: the FETCH is over once
-                    // it was answered too.
-                    if let FetchStreamOpened::Fetch(request) = session.on_fetch_stream(header.request_id)? {
-                        session.on_fetch_stream_closed(request);
-                    }
+                    session::let_go_of_fetch(&mut session, &stops, stream, header.request_id)?;
                 }
                 Some(UniEvent::Failed(error)) => {
                     failed = Some(error.into());
@@ -1212,16 +1165,11 @@ async fn play(
                 // begin with a session, as after a GOAWAY for the video.
                 Some(UniEvent::TrackMalformed { header, error, .. }) => {
                     ui.note(&format!("TRACK_MALFORMED track_alias={} error={error}", header.track_alias));
-                    events.stop_streams_of(header.track_alias, &stops);
-                    for cancelled in session.cancel_malformed(header.track_alias) {
-                        // The viewer takes no PUBLISH of the relay.
-                        let (MalformedRequest::Subscribe(request) | MalformedRequest::Fetch(request)) = cancelled else {
-                            continue;
-                        };
+                    for request in events.cancel_malformed(&mut session, header.track_alias, &stops) {
                         if request == video.request {
                             video_malformed = true;
                         } else if let Some(said) = audio.malformed(request) {
-                            tell_audio(ui, said);
+                            tell_audio(ui, &said);
                         } else if catalog.as_mut().is_some_and(|catalog| catalog.malformed(request).is_some()) {
                             ui.note("CATALOG_MALFORMED");
                         } else if let Some(outs) = chat.as_mut().and_then(|tracks| tracks.malformed(request)) {

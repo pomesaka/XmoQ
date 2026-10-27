@@ -2,6 +2,7 @@
 //! MSF by a Joining FETCH.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -15,13 +16,18 @@ use xmoq_moqt::immutable::{Of, searched_integers};
 use xmoq_moqt::message::{ControlMessage, FetchRange, GoAway, RequestError, request_error_code};
 use xmoq_moqt::name::{FullTrackName, Location, TrackNamespace};
 use xmoq_moqt::params::{GroupOrder, Parameter, answer_wait_ms};
-use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestEvent, RequestId, Session};
+use xmoq_moqt::session::{
+    ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequestId, RequestEvent, RequestId,
+    Session,
+};
 use xmoq_moqt::stream_reset_code;
+use xmoq_moqt_io::client::UntilClosed;
 use xmoq_moqt_io::refuse::{Refusal, refusal};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
     Connection, FetchChunk, PeerRequestStreamEvent, RecvStream, RequestReader, RequestStreamEvent,
-    SendStream, StreamEnd, StreamStops, Trace, UniEvent, client, send_message,
+    SendStream, StreamConfig, StreamEnd, StreamStops, Trace, UniEvent, client,
+    read_request_streams, read_uni_streams, send_message,
 };
 use xmoq_msf::{CATALOG_TRACK, CatalogTrack, MAX_CATALOG_LENGTH};
 
@@ -77,6 +83,31 @@ impl Events {
             }
             *alias != track_alias
         });
+    }
+
+    /// §2.4.2: the track of `track_alias` is malformed. Stops its subgroup
+    /// streams ([`Self::stop_streams_of`]) and ends its requests in
+    /// `session` (`Session::cancel_malformed`); the `SUBSCRIBE`s and `FETCH`es
+    /// of this endpoint that it ended, for the caller to cancel by whose
+    /// they were. For a client that takes no PUBLISH of the peer, as a
+    /// viewer: one would not be returned.
+    pub fn cancel_malformed(
+        &mut self,
+        session: &mut Session,
+        track_alias: u64,
+        stops: &StreamStops,
+    ) -> Vec<RequestId> {
+        self.stop_streams_of(track_alias, stops);
+        session
+            .cancel_malformed(track_alias)
+            .into_iter()
+            .filter_map(|cancelled| match cancelled {
+                MalformedRequest::Subscribe(request) | MalformedRequest::Fetch(request) => {
+                    Some(request)
+                }
+                MalformedRequest::Publish(_) => None,
+            })
+            .collect()
     }
 
     /// The next event, as [`Self::recv`], for a caller that looks at the
@@ -918,6 +949,58 @@ pub async fn refuse_peer_request<S: std::hash::BuildHasher>(
         // The one close that is no fault of the peer.
         Refusal::Close { error: None, .. } => Err(xmoq_moqt_io::client::ReaderPanicked.into()),
     }
+}
+
+/// The peer's request streams, as the readers of [`read_peer_streams`] give
+/// them.
+pub type PeerRequests = mpsc::Receiver<PeerRequestStreamEvent<Send>>;
+
+/// Begins reading the peer's unidirectional streams, into [`Events`], and
+/// the request streams it opens, into [`PeerRequests`]; the readers are
+/// kept in `kept` until the connection is closed.
+pub fn read_peer_streams(
+    connection: &Arc<WtConnection>,
+    stops: &StreamStops,
+    kept: &mut UntilClosed<WtConnection>,
+) -> (Events, PeerRequests) {
+    let (queue, received) = mpsc::channel(64);
+    kept.readers.push(read_uni_streams(
+        Arc::clone(connection),
+        StreamConfig::default(),
+        stops.clone(),
+        queue,
+        |event| event,
+    ));
+    let (asks, asked) = mpsc::channel(16);
+    kept.readers.push(read_request_streams(
+        Arc::clone(connection),
+        StreamConfig::default(),
+        stops.clone(),
+        asks,
+        |event| event,
+    ));
+    (Events::new(received), asked)
+}
+
+/// Lets go of the stream of a FETCH that the caller does not read: its body
+/// is stopped, and the FETCH is over once it was answered too
+/// (`Session::on_fetch_stream_closed`).
+///
+/// # Errors
+///
+/// What `Session::on_fetch_stream` finds wrong of the stream; the session
+/// is closed with it.
+pub fn let_go_of_fetch(
+    session: &mut Session,
+    stops: &StreamStops,
+    stream: u64,
+    request_id: u64,
+) -> Result<(), xmoq_moqt::Error> {
+    drop(stops.take_fetch_body(stream));
+    if let FetchStreamOpened::Fetch(request) = session.on_fetch_stream(request_id)? {
+        session.on_fetch_stream_closed(request);
+    }
+    Ok(())
 }
 
 /// Where a GOAWAY says to go ([`xmoq_again::next_session::new_url`]).

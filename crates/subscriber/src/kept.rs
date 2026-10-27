@@ -134,6 +134,33 @@ pub enum KeptTrackChange {
     Other(RequestEvent),
 }
 
+/// The line for a log, which a caller puts its name for the track before
+/// (`AUDIO_` of `xmoq-watch`, `XMOQ_AGENT_VIDEO_` of `xmoq-agent`).
+impl std::fmt::Display for KeptTrackChange {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Subscribed { track_alias } => {
+                write!(formatter, "AGAIN track_alias={track_alias}")
+            }
+            Self::Ended { how, pause_ms } => {
+                write!(formatter, "ENDED {how}; asking again in {pause_ms} ms")
+            }
+            Self::Refused {
+                error_code,
+                pause_ms,
+            } => write!(
+                formatter,
+                "REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"
+            ),
+            Self::Failed { why, pause_ms } => {
+                write!(formatter, "FAILED {why}; asking again in {pause_ms} ms")
+            }
+            Self::GivenUp(why) => write!(formatter, "GIVEN_UP {why}"),
+            Self::Other(other) => write!(formatter, "SAID {other:?}"),
+        }
+    }
+}
+
 /// What happened to a kept track: the steps of
 /// `fixtures/kept-track/kept-track.tsv` (its README names each).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -730,6 +757,48 @@ mod tests {
             parameters: vec![],
             track_properties: vec![],
         })
+    }
+
+    #[test]
+    fn what_became_of_a_kept_track_is_told_in_one_line() {
+        let cases = [
+            (
+                KeptTrackChange::Subscribed { track_alias: 3 },
+                "AGAIN track_alias=3",
+            ),
+            (
+                KeptTrackChange::Ended {
+                    how: "PUBLISH_DONE status_code=0x2".to_string(),
+                    pause_ms: 500,
+                },
+                "ENDED PUBLISH_DONE status_code=0x2; asking again in 500 ms",
+            ),
+            (
+                KeptTrackChange::Refused {
+                    error_code: 0x10,
+                    pause_ms: 1000,
+                },
+                "REFUSED error_code=0x10; asking again in 1000 ms",
+            ),
+            (
+                KeptTrackChange::Failed {
+                    why: "no stream".to_string(),
+                    pause_ms: 250,
+                },
+                "FAILED no stream; asking again in 250 ms",
+            ),
+            (
+                KeptTrackChange::GivenUp("no answer".to_string()),
+                "GIVEN_UP no answer",
+            ),
+            (
+                KeptTrackChange::Other(RequestEvent::NamespacesSubscribed),
+                "SAID NamespacesSubscribed",
+            ),
+        ];
+        for (change, expected) in cases {
+            assert_eq!(change.to_string(), expected);
+        }
     }
 
     #[test]

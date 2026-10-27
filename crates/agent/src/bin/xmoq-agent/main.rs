@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use tokio::sync::{mpsc, watch};
 use xmoq_again::next_session::{After, NextSession, Pause};
 use xmoq_agent::args::{Args, Source};
@@ -35,7 +35,9 @@ use xmoq_moqt_io::wt;
 use xmoq_room_token::Role;
 use xmoq_subscriber::follow::RENDEZVOUS_MS;
 use xmoq_viewer::room::{self, NoSeat, Refusal};
-use xmoq_viewer_io::room_client::{ChatTokens, HeldSeat, ROOM_COMES_WITHIN, RoomClient};
+use xmoq_viewer_io::room_client::{
+    ChatTokens, HeldSeat, ROOM_COMES_WITHIN, RoomClient, relay_address,
+};
 
 use crate::attend::{Ended, attend};
 use crate::frames::Pictures;
@@ -538,7 +540,7 @@ async fn place_in(
             )
         }
     };
-    let relay = relay.ok_or_else(|| anyhow!("the room names no relay"))?;
+    let (url, cert_sha256) = relay_address(relay)?;
     let mut token = None;
     let mut chat_tokens = ChatTokens::default();
     let mut transcript_token = None;
@@ -578,9 +580,8 @@ async fn place_in(
         }
     }
     Ok(Some(Place {
-        url: relay.relay_url,
-        cert_sha256: wt::certificate_hash(&relay.cert_sha256_hex)
-            .ok_or_else(|| anyhow!("the hash of a certificate is 64 hex digits"))?,
+        url,
+        cert_sha256,
         namespace,
         token,
         chat_tokens,

@@ -19,16 +19,13 @@ use xmoq_moqt::data::{ObjectStatus, SubgroupObject};
 use xmoq_moqt::message::request_error_code;
 use xmoq_moqt::name::TrackNamespace;
 use xmoq_moqt::params::Parameter;
-use xmoq_moqt::session::{
-    ControlEvent, FetchStreamOpened, MalformedRequest, PeerRequestId, RequestId, Role, Session,
-    Transport,
-};
+use xmoq_moqt::session::{ControlEvent, PeerRequestId, RequestId, Role, Session, Transport};
 use xmoq_moqt::stream_reset_code;
 use xmoq_moqt_io::client::{self, UntilClosed};
 use xmoq_moqt_io::wt::WtConnection;
 use xmoq_moqt_io::{
-    Connection, RequestReader, RequestStreamEvent, SendStream, StreamConfig, StreamStops, Trace,
-    UniEvent, read_request_streams, read_uni_streams, send_message,
+    Connection, RequestReader, RequestStreamEvent, SendStream, StreamStops, Trace, UniEvent,
+    send_message,
 };
 use xmoq_msf::CatalogTrack;
 use xmoq_subscriber::catalog::{Became, FollowedCatalog};
@@ -562,23 +559,7 @@ pub async fn attend(
 ) -> Result<Ended> {
     let mut session = Session::new(Role::Client, Transport::WebTransport);
     let stops = StreamStops::default();
-    let (queue, received) = mpsc::channel(64);
-    let mut events = Events::new(received);
-    kept.readers.push(read_uni_streams(
-        Arc::clone(connection),
-        StreamConfig::default(),
-        stops.clone(),
-        queue,
-        |event| event,
-    ));
-    let (asks, mut asked) = mpsc::channel(16);
-    kept.readers.push(read_request_streams(
-        Arc::clone(connection),
-        StreamConfig::default(),
-        stops.clone(),
-        asks,
-        |event| event,
-    ));
+    let (mut events, mut asked) = session::read_peer_streams(connection, &stops, kept);
     let mut refused: HashMap<u64, PeerRequestId> = HashMap::new();
     let implementation = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
     let setup = session::setup(
@@ -930,12 +911,7 @@ pub async fn attend(
                     }
                 }
                 Some(UniEvent::FetchOpened { stream, header }) => {
-                    drop(stops.take_fetch_body(stream));
-                    // Its stream is let go of: the FETCH is over once
-                    // it was answered too.
-                    if let FetchStreamOpened::Fetch(request) = session.on_fetch_stream(header.request_id)? {
-                        session.on_fetch_stream_closed(request);
-                    }
+                    session::let_go_of_fetch(&mut session, &stops, stream, header.request_id)?;
                 }
                 Some(UniEvent::Failed(error)) => return Err(error.into()),
                 // WHY the requests end at once, where §3.6 recommends
@@ -951,12 +927,7 @@ pub async fn attend(
                 // again on the session, as after any end of it.
                 Some(UniEvent::TrackMalformed { header, error, .. }) => {
                     eprintln!("XMOQ_AGENT_TRACK_MALFORMED track_alias={} error={error}", header.track_alias);
-                    events.stop_streams_of(header.track_alias, &stops);
-                    for cancelled in session.cancel_malformed(header.track_alias) {
-                        // The reader takes no PUBLISH of the relay.
-                        let (MalformedRequest::Subscribe(request) | MalformedRequest::Fetch(request)) = cancelled else {
-                            continue;
-                        };
+                    for request in events.cancel_malformed(&mut session, header.track_alias, &stops) {
                         if video.as_mut().is_ok_and(|video| video.malformed(request))
                             || meeting.as_mut().is_some_and(|in_meeting| in_meeting.malformed(request))
                         {

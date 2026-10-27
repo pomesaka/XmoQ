@@ -250,7 +250,7 @@ impl<T, C: Connection> Follower<T, C> {
     /// over or was given up is not named, the session holds it no more.
     pub fn malformed(&mut self, request: RequestId) -> Option<Vec<FollowOutcome<T>>> {
         if let Some(said) = self.kept.malformed(request) {
-            return Some(self.note_of(said).into_iter().collect());
+            return Some(self.note_of(&said).into_iter().collect());
         }
         if self
             .joining
@@ -289,31 +289,17 @@ impl<T, C: Connection> Follower<T, C> {
     ) -> Vec<FollowOutcome<T>> {
         match said {
             KeptTrackChange::Subscribed { .. } => self.subscribed(session).await,
-            said => self.note_of(said).into_iter().collect(),
+            said => self.note_of(&said).into_iter().collect(),
         }
     }
 
     /// The line for what became of the subscription; none for a new one,
     /// which [`Self::subscribed`] tells of.
-    fn note_of(&self, said: KeptTrackChange) -> Option<FollowOutcome<T>> {
-        let note = self.track.note;
-        Some(match said {
-            KeptTrackChange::Subscribed { .. } => return None,
-            KeptTrackChange::Ended { how, pause_ms } => {
-                FollowOutcome::Note(format!("{note}_ENDED {how}; asking again in {pause_ms} ms"))
-            }
-            KeptTrackChange::Refused {
-                error_code,
-                pause_ms,
-            } => FollowOutcome::Note(format!(
-                "{note}_REFUSED error_code={error_code:#x}; asking again in {pause_ms} ms"
-            )),
-            KeptTrackChange::Failed { why, pause_ms } => FollowOutcome::Note(format!(
-                "{note}_FAILED {why}; asking again in {pause_ms} ms"
-            )),
-            KeptTrackChange::GivenUp(why) => FollowOutcome::Note(format!("{note}_GIVEN_UP {why}")),
-            KeptTrackChange::Other(other) => FollowOutcome::Note(format!("{note}_SAID {other:?}")),
-        })
+    fn note_of(&self, said: &KeptTrackChange) -> Option<FollowOutcome<T>> {
+        if let KeptTrackChange::Subscribed { .. } = said {
+            return None;
+        }
+        Some(FollowOutcome::Note(format!("{}_{said}", self.track.note)))
     }
 
     /// A subscription was made: the Joining FETCH of what was missed.
