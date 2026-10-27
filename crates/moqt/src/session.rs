@@ -3284,6 +3284,163 @@ mod tests {
         }
     }
 
+    /// The messages of a row of a shared table, one after another, or what
+    /// the decoder refuses of them.
+    fn messages_of(hex: &str) -> Result<Vec<ControlMessage>, Error> {
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let mut messages = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let (message, read) = ControlMessage::decode(&bytes[at..])?.expect("a whole message");
+            messages.push(message);
+            at += read;
+        }
+        Ok(messages)
+    }
+
+    /// An error that closes the session, in the words of the shared tables.
+    fn closed_by(error: &Error) -> String {
+        let code = error.termination_code().expect("it closes the session");
+        format!("closed:{:#x}", code.code())
+    }
+
+    /// What the last of `updates` does on a SUBSCRIBE of the peer, Request
+    /// ID 1, in `state`.
+    fn on_a_peer_subscribe(state: &str, updates: Vec<ControlMessage>) -> String {
+        let mut session = client();
+        let first = ControlMessage::Subscribe(Subscribe {
+            request_id: 1,
+            full_track_name: track(b"a"),
+            parameters: vec![],
+        });
+        let PeerRequestOpened::Request(request, _) = session.on_peer_request_opened(first).unwrap()
+        else {
+            panic!("not taken");
+        };
+        match state {
+            "established" => {
+                session.accept_subscribe(request, vec![], vec![]).unwrap();
+            }
+            "refused" => {
+                session
+                    .reject(request, 0x10, 0, ReasonPhrase::default())
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let mut last = None;
+        for update in updates {
+            last = Some(session.on_peer_request_message(request, update));
+        }
+        match last.expect("an update") {
+            Ok(PeerRequestEvent::SubscriptionUpdated {
+                response: ControlMessage::RequestOk(_),
+                ..
+            }) => "ok".to_string(),
+            Ok(PeerRequestEvent::UpdateRefused {
+                then: AfterRefusal::PublishDone,
+                ..
+            }) => "refused".to_string(),
+            Ok(PeerRequestEvent::UpdateRefused {
+                then: AfterRefusal::CloseStream,
+                ..
+            }) => "refused-and-over".to_string(),
+            Ok(PeerRequestEvent::UpdateAlreadyRefused | PeerRequestEvent::LateMessage) => {
+                "ignored".to_string()
+            }
+            Ok(other) => panic!("{other:?}"),
+            Err(RequestFault::Peer(error)) => closed_by(&error),
+            Err(RequestFault::Usage(error)) => panic!("{error}"),
+        }
+    }
+
+    /// What the last of `updates` does on the request `on` of this end,
+    /// Request ID 0, in `state`.
+    fn on_an_own_request(on: &str, state: &str, updates: Vec<ControlMessage>) -> String {
+        let mut session = client();
+        let (request, answer) = match on {
+            "own-publish" => (
+                session.publish(track(b"a"), 1, vec![], vec![]).unwrap().0,
+                request_ok(vec![]),
+            ),
+            "own-subscribe" => (
+                session.subscribe(track(b"a"), vec![]).unwrap().0,
+                subscribe_ok(9, vec![]),
+            ),
+            "own-publish-namespace" => (
+                session.publish_namespace(namespace(), vec![]).unwrap().0,
+                request_ok(vec![]),
+            ),
+            "own-track-status" => (
+                session.track_status(track(b"a"), vec![]).unwrap().0,
+                request_ok(vec![]),
+            ),
+            other => panic!("{other}"),
+        };
+        if state != "pending" {
+            session.feed(request, answer).unwrap();
+        }
+        if state == "done" {
+            session
+                .publish_done(request, 2, 0, ReasonPhrase::default())
+                .unwrap();
+        }
+        let mut last = None;
+        for update in updates {
+            last = Some(session.on_request_message(request, update));
+        }
+        match last.expect("an update") {
+            Ok(RequestEvent::SubscriptionUpdated {
+                response: ControlMessage::RequestOk(_),
+                ..
+            }) => "ok".to_string(),
+            Ok(RequestEvent::UpdateRefused { .. }) => "refused".to_string(),
+            Ok(RequestEvent::UpdateAlreadyRefused | RequestEvent::LateMessage) => {
+                "ignored".to_string()
+            }
+            Ok(other) => panic!("{other:?}"),
+            Err(RequestFault::Peer(error)) => closed_by(&error),
+            Err(RequestFault::Usage(error)) => panic!("{error}"),
+        }
+    }
+
+    /// The rows of `fixtures/request-update/received.tsv`, which `@xmoq/moqt`
+    /// reads as well: a `REQUEST_UPDATE` that a client receives, by the
+    /// request it comes on and the state of that request, and what the
+    /// session makes of it. §10.9: "The sender of a request ... can later
+    /// send a `REQUEST_UPDATE`", and "A subscriber can also send
+    /// `REQUEST_UPDATE` to modify parameters of a subscription established
+    /// with PUBLISH"; on any other stream it is a violation, as before the
+    /// subscription is established (§5.1) and on a `TRACK_STATUS` (§10.14:
+    /// "the subscriber cannot send `REQUEST_UPDATE`"). The draft does not say
+    /// which parameters a publisher applies: the delivery timeouts and
+    /// `NEW_GROUP_REQUEST` are, and any other has the update refused with
+    /// `NOT_SUPPORTED`, the subscription then ending with `UPDATE_FAILED`
+    /// (§10.9.1); later ones get no answer. An update before the answer to a
+    /// SUBSCRIBE of the peer is refused and the request is over. What crosses
+    /// a `PUBLISH_DONE`, and what comes on the stream of a request this end
+    /// refused, is ignored (§5.1, §10.9). A parameter §10.2.1 does not allow
+    /// in an update is a violation first.
+    #[test]
+    fn a_received_request_update_does_what_the_shared_table_says() {
+        let rows = crate::test_util::table_rows::<5>("request-update/received.tsv");
+        // A table that lost rows would pass.
+        assert_eq!(rows.len(), 22);
+        for [name, on, state, hex, verdict] in rows {
+            let got = match messages_of(&hex) {
+                // What the decoder refuses closes the session before the
+                // session sees it.
+                Err(error) => closed_by(&error),
+                Ok(updates) if on == "peer-subscribe" => on_a_peer_subscribe(&state, updates),
+                Ok(updates) => on_an_own_request(&on, &state, updates),
+            };
+            assert_eq!(got, verdict, "{name}");
+        }
+    }
+
     #[test]
     fn a_request_update_is_refused_where_the_peer_may_send_one() {
         // Every update has a Request ID of its own (§10.1).
