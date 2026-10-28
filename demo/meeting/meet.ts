@@ -5,9 +5,13 @@
 // shows the others it receives with `createMeeting` of `@xmoq/meeting`: the
 // sound of all of them, and the small video of the first 8 who came.
 //
-// The sound is the microphone; `?audio=none` sends none, and `mute` sends
-// silence in its place until it is pressed again (`muteWith`). The picture is
-// one the page paints, small (320x180), with its id on it.
+// The sound is the microphone; `?audio=none` sends none. The picture is
+// one the page paints, small (320x180), with its id on it; `?source=camera`
+// takes the camera in its place, at that size. The bar under the picture
+// (`../lib/controls.ts`) mutes the microphone and turns the camera off and
+// on, which sends nothing of it meanwhile, and changes the devices, at
+// once; the source and the sound are lists of their flags, which load the
+// page again.
 // `?hideAfterMs=N` is how long a tile keeps its last picture without a new
 // one. `?uni=N`, `?diag=1` and `?timer=` are as for the pages of the
 // broadcast (`../lib/relay.ts`, `../lib/page.ts`).
@@ -43,6 +47,19 @@ import {
 } from "@xmoq/room-client";
 import { keepFollowingTranscript, TRANSCRIPT_PREFIX } from "@xmoq/transcript";
 import { startChat } from "../lib/chat.ts";
+import {
+	controlBar,
+	deviceList,
+	flagList,
+	toggleButton,
+} from "../lib/controls.ts";
+import {
+	type Camera,
+	createCamera,
+	createRetimer,
+	type Microphone,
+	openMicrophone,
+} from "../lib/devices.ts";
 import { every, say } from "../lib/page.ts";
 import { type Broadcast, connectToRelay, tokenOf, why } from "../lib/relay.ts";
 import {
@@ -242,45 +259,6 @@ function seats(): {
 	};
 }
 
-/** Not in the DOM library of TypeScript yet: a track of a `MediaStream` as a stream of frames (Chromium has it). */
-declare class MediaStreamTrackProcessor {
-	constructor(init: { track: MediaStreamTrack });
-	readonly readable: ReadableStream<VideoFrame | AudioData>;
-}
-
-/** The microphone. */
-async function openMicrophone(): Promise<MediaStreamTrack> {
-	const media = await navigator.mediaDevices.getUserMedia({
-		audio: {
-			sampleRate: SAMPLE_RATE,
-			channelCount: 1,
-			// WHY said: Chromium of Playwright 1.64.0 turned the three on
-			// without them too (its fake microphone, 2026-10-27), but what a
-			// browser does when a page says nothing is the browser's.
-			noiseSuppression: true,
-			echoCancellation: true,
-			autoGainControl: true,
-		},
-	});
-	const [track] = media.getAudioTracks();
-	if (track === undefined) throw new Error("the microphone gave no track");
-	return track;
-}
-
-/** Gives each piece of sound of `track` to `onData`, until it ends. */
-async function fromMicrophone(
-	track: MediaStreamTrack,
-	onData: (data: AudioData) => void,
-): Promise<void> {
-	const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
-	for (;;) {
-		const next = await reader.read();
-		if (next.done) return;
-		if (next.value instanceof AudioData) onData(next.value);
-		else next.value.close();
-	}
-}
-
 /** The tile of a participant: a canvas, made when its first frame comes. */
 function tileOf(id: string): HTMLCanvasElement {
 	const found = document.querySelector<HTMLCanvasElement>(
@@ -331,42 +309,87 @@ function play(id: string, data: AudioData): void {
 	audio.next.set(id, at + buffer.duration);
 }
 
-/**
- * Lets the button `mute` turn `microphone` off and on again; it says
- * `unmute`, pressed, while the voice is not sent.
- *
- * WHY `enabled = false`: the track goes on giving pieces of sound at the
- * same pace, all of them silent (Chromium of Playwright 1.64.0, its fake
- * microphone, 2026-10-27), so the encoder goes on and the audio track goes
- * on having Objects. Those who play it go on from piece to piece without a
- * gap (`play`), the transcriber hears silence, which it cuts no piece of,
- * and nothing is sent that is not wanted: the silence is made by the
- * browser before the page has the sound. WHY NOT stop giving the pieces to
- * the encoder: the Group under way would stay open with no Object for as
- * long as the person keeps still, and a peer stops a subgroup stream that
- * sends nothing for `idle-subgroup-stream-ms` (`fixtures/limits/`) with
- * `INTERNAL_ERROR`, which a relay passes on as a reset. The cost of the
- * silence is the bytes of the encoder's silent pieces.
- */
-function muteWith(microphone: MediaStreamTrack): void {
-	const button = document.getElementById("mute");
-	if (button === null) return;
-	const label = (): void => {
-		button.textContent = microphone.enabled ? "mute" : "unmute";
-		button.setAttribute("aria-pressed", String(!microphone.enabled));
-	};
-	button.addEventListener("click", () => {
-		microphone.enabled = !microphone.enabled;
-		label();
-	});
-	button.removeAttribute("disabled");
-	label();
-}
-
 const others = (id: string): { frames: number; audio: number } => {
 	state.others[id] ??= { frames: 0, audio: 0 };
 	return state.others[id];
 };
+
+/**
+ * The bar under the picture: `sound` (to hear the others), the microphone
+ * muted and its device, the camera off and its device, at once: muted or
+ * off, nothing of it is sent (`pause` of @xmoq/media). The source and the
+ * sound by loading the page again: each decides the catalog.
+ */
+function showControls(options: {
+	microphone: Microphone | undefined;
+	camera: Camera | undefined;
+	pauseVideo(): void;
+	pauseSound?(): void;
+}): void {
+	const { microphone, camera, pauseVideo, pauseSound } = options;
+	const bar = controlBar();
+	if (microphone !== undefined && pauseSound !== undefined) {
+		toggleButton(bar, {
+			id: "mute",
+			labels: ["mute", "unmute"],
+			on: true,
+			async turn(on) {
+				microphone.setOn(on);
+				if (!on) pauseSound();
+				return on;
+			},
+		});
+		deviceList(bar, {
+			id: "microphones",
+			kind: "audioinput",
+			chosen: () => microphone.deviceId(),
+			choose: (id) =>
+				microphone.use(id).catch((error: unknown) => {
+					say(`the microphone failed: ${String(error)}`);
+				}),
+		});
+	}
+	if (camera !== undefined) {
+		toggleButton(bar, {
+			id: "camera",
+			labels: ["stop camera", "start camera"],
+			on: camera.on(),
+			async turn(on) {
+				await camera.turn(on).catch((error: unknown) => {
+					say(`the camera failed: ${String(error)}`);
+				});
+				if (!camera.on()) pauseVideo();
+				cameras.refresh();
+				return camera.on();
+			},
+		});
+		const cameras = deviceList(bar, {
+			id: "cameras",
+			kind: "videoinput",
+			chosen: () => camera.deviceId(),
+			choose: (id) =>
+				camera.use(id).catch((error: unknown) => {
+					say(`the camera failed: ${String(error)}`);
+				}),
+		});
+	}
+	flagList(bar, {
+		name: "source",
+		values: [
+			{ value: "painted", label: "a painted picture" },
+			{ value: "camera", label: "camera" },
+		],
+		fallback: "painted",
+	});
+	flagList(bar, {
+		name: "audio",
+		values: [
+			{ value: "mic", label: "microphone" },
+			{ value: "none", label: "no sound" },
+		],
+		fallback: "mic",
+	});
+}
 
 async function main(): Promise<void> {
 	const theRoom = seats();
@@ -394,16 +417,16 @@ async function main(): Promise<void> {
 				numberOfChannels: 1,
 			})
 		: undefined;
-	if (sound !== undefined) {
-		void (async () => {
-			const microphone = await openMicrophone();
-			muteWith(microphone);
-			await fromMicrophone(microphone, (data) => sound.encode(data));
-		})().catch((error: unknown) => {
-			state.publishing = `the microphone failed: ${String(error)}`;
-			show();
-		});
-	}
+	const microphone =
+		sound === undefined
+			? undefined
+			: await openMicrophone(SAMPLE_RATE, (data) => sound.encode(data)).catch(
+					(error: unknown) => {
+						state.publishing = `the microphone failed: ${String(error)}`;
+						show();
+						return undefined;
+					},
+				);
 	const catalog = createCatalogPublisher({
 		namespace: fields(mine),
 		catalog: {
@@ -726,7 +749,35 @@ async function main(): Promise<void> {
 	preview.height = HEIGHT;
 	const began = Date.now();
 	const hue = Number.parseInt(self.slice(0, 2), 16) * 1.4;
+	const fromTheCamera =
+		new URLSearchParams(location.search).get("source") === "camera";
+	/** The times of the frames of the cameras, one after another and after a while off. */
+	const cameraTimes = createRetimer();
+	const camera = createCamera({
+		width: WIDTH,
+		height: HEIGHT,
+		frameRate: FRAMES_A_SECOND,
+		onFrame(frame, from) {
+			context.drawImage(frame, 0, 0, WIDTH, HEIGHT);
+			const timestamp = cameraTimes.at(from, frame.timestamp, Date.now());
+			frame.close();
+			video.encode(new VideoFrame(preview, { timestamp }));
+		},
+	});
+	if (fromTheCamera) {
+		await camera.turn(true).catch((error: unknown) => {
+			state.publishing = `the camera failed: ${String(error)}`;
+			show();
+		});
+	}
+	showControls({
+		microphone,
+		camera: fromTheCamera ? camera : undefined,
+		pauseVideo: () => video.pause(),
+		...(sound === undefined ? {} : { pauseSound: () => sound.pause() }),
+	});
 	every(1000 / FRAMES_A_SECOND, () => {
+		if (fromTheCamera) return;
 		const elapsed = Date.now() - began;
 		context.fillStyle = `hsl(${hue} 50% 20%)`;
 		context.fillRect(0, 0, WIDTH, HEIGHT);
