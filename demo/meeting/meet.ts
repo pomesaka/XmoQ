@@ -7,14 +7,16 @@
 //
 // The sound is the microphone; `?audio=none` sends none, and `mute` sends
 // silence in its place until it is pressed again (`muteWith`). The picture is
-// one the page paints, small (320x180), with its id on it. `?uni=N`,
-// `?diag=1` and `?timer=` are as for the pages of the broadcast
-// (`../lib/relay.ts`, `../lib/page.ts`).
+// one the page paints, small (320x180), with its id on it.
+// `?hideAfterMs=N` is how long a tile keeps its last picture without a new
+// one. `?uni=N`, `?diag=1` and `?timer=` are as for the pages of the
+// broadcast (`../lib/relay.ts`, `../lib/page.ts`).
 
 import { type ChatRoom, roomFields } from "@xmoq/chat";
 import {
 	createAudioTrackEncoder,
 	createVideoTrackEncoder,
+	DEFAULT_HIDE_AFTER_MS,
 	keepPublishing,
 } from "@xmoq/media";
 import {
@@ -74,6 +76,13 @@ const SHOWN_LINES = 200;
 const WIDTH = 320;
 const HEIGHT = 180;
 const FRAMES_A_SECOND = 15;
+/** `?hideAfterMs=N`: how long a tile keeps its last picture without a new one; 0 keeps it. `DEFAULT_HIDE_AFTER_MS` of @xmoq/media when left out. */
+const HIDE_AFTER_MS = Number(
+	new URLSearchParams(location.search).get("hideAfterMs") ??
+		DEFAULT_HIDE_AFTER_MS,
+);
+/** When each participant's tile was drawn last, until it was made black. */
+const drawnAt = new Map<string, number>();
 /** How long the page waits between two tries at the room or the relay. */
 const AGAIN_MS = 2000;
 
@@ -657,6 +666,7 @@ async function main(): Promise<void> {
 		onFrame(id, frame, at) {
 			others(id).frames += 1;
 			tileOf(id).getContext("2d")?.drawImage(frame, 0, 0, WIDTH, HEIGHT);
+			drawnAt.set(id, Date.now());
 			agent.bridge?.frame(id, frame, at);
 			frame.close();
 		},
@@ -730,6 +740,20 @@ async function main(): Promise<void> {
 	});
 	// The counts of what is received change with every frame.
 	every(500, show);
+	// A tile whose picture did not come for a while is made black, as a
+	// player does (`DEFAULT_HIDE_AFTER_MS` of @xmoq/media, which says why).
+	every(250, () => {
+		if (HIDE_AFTER_MS <= 0) return;
+		const now = Date.now();
+		for (const [id, at] of drawnAt) {
+			if (now - at < HIDE_AFTER_MS) continue;
+			drawnAt.delete(id);
+			const tile = tileOf(id).getContext("2d");
+			if (tile === null) continue;
+			tile.fillStyle = "#000000";
+			tile.fillRect(0, 0, WIDTH, HEIGHT);
+		}
+	});
 }
 
 main().catch((error: unknown) => {

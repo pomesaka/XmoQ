@@ -7,3 +7,4 @@ a-piece-more-than-300-ms-from-the-one-before-begins-at-its-own-time	1500000	1070
 a-piece-after-one-that-has-ended-begins-at-its-own-time	1050000	1000000	1030000	sound	1050000	1070000	no	no
 the-first-piece-whose-time-is-over-is-not-sounded	990000	-	1000000	too-late	-	-	-	-
 a-piece-whose-time-is-over-after-one-that-has-ended-is-not-sounded	990000	980000	1000000	too-late	-	-	-	-
+a-piece-after-a-pause-begins-at-its-own-time-after-a-silence	6050000	1070000	6030000	sound	6050000	6070000	no	no

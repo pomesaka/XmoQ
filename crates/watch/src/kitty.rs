@@ -92,6 +92,13 @@ pub fn lines_under<'a>(rows: usize, lines: impl IntoIterator<Item = &'a str>, ou
     }
 }
 
+/// Removes the picture, and the pixels the terminal holds for it; the lines
+/// under it and the cursor stay where they are. The next frame puts it back
+/// (`a=T` sends the image and places it).
+pub fn hide(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\x1b_Ga=d,d=I,i=1,q=2\x1b\\");
+}
+
 /// Leaves the cursor under the picture and its lines.
 pub fn leave(rows: usize, lines: usize, out: &mut Vec<u8>) {
     out.extend_from_slice(format!("\x1b8\x1b[{}B\n", rows + lines).as_bytes());
@@ -178,5 +185,10 @@ mod tests {
             "\x1b8\x1b[23B\r\x1b[K1 a: hi\x1b[B\r\x1b[K[q] quit\x1b[B"
         );
         assert_eq!(text(|out| lines_under(23, [], out)), "\x1b8\x1b[23B");
+    }
+
+    #[test]
+    fn the_picture_is_removed_by_its_image_id_without_moving_the_cursor() {
+        assert_eq!(text(hide), "\x1b_Ga=d,d=I,i=1,q=2\x1b\\");
     }
 }

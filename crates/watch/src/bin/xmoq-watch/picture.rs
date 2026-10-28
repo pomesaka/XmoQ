@@ -73,6 +73,9 @@ pub struct Seen {
     pub too_large_size: (usize, usize),
     pub decoded: u32,
     pub drawn: u32,
+    /// How many times the picture was removed for no frame drawn
+    /// (`--hide-after-ms`).
+    pub hidden: u32,
     pub decoding: Duration,
     pub drawing: Duration,
     /// For the last frames drawn: how long after it was due each was
@@ -212,6 +215,19 @@ impl Writing {
         Ok(true)
     }
 
+    /// Removes the picture, where one was placed. Whether it was.
+    fn hide(&mut self) -> std::io::Result<bool> {
+        if self.placed.is_none() {
+            return Ok(false);
+        }
+        self.out.clear();
+        kitty::hide(&mut self.out);
+        self.screen.to.write_all(&self.out)?;
+        self.screen.to.flush()?;
+        self.bytes += u64::try_from(self.out.len()).unwrap_or(u64::MAX);
+        Ok(true)
+    }
+
     fn leave(&mut self) {
         for file in self.files.drain(..) {
             let _ = std::fs::remove_file(file);
@@ -235,6 +251,29 @@ pub struct Picture {
     pub measure_marks: Option<Marks>,
     /// Set when the thread is to end without drawing what waits.
     pub stop: Arc<AtomicBool>,
+    /// The picture is removed when no frame was drawn for so long; `None`:
+    /// never.
+    pub hide_after: Option<Duration>,
+}
+
+enum Next {
+    Frame(Frame),
+    /// No frame came by the time the picture is to be removed.
+    Hide,
+    /// The sender is gone.
+    End,
+}
+
+/// Waits for the next frame, until `hide_at` where there is one.
+fn next(frames: &mpsc::Receiver<Frame>, hide_at: Option<Instant>) -> Next {
+    let Some(at) = hide_at else {
+        return frames.recv().map_or(Next::End, Next::Frame);
+    };
+    match frames.recv_timeout(at.saturating_duration_since(Instant::now())) {
+        Ok(frame) => Next::Frame(frame),
+        Err(mpsc::RecvTimeoutError::Timeout) => Next::Hide,
+        Err(mpsc::RecvTimeoutError::Disconnected) => Next::End,
+    }
 }
 
 /// Decodes and draws what comes on `frames`, until the sender is gone or
@@ -247,6 +286,7 @@ pub fn run(picture: Picture) -> Seen {
         began,
         measure_marks,
         stop,
+        hide_after,
     } = picture;
     let mut seen = Seen {
         by: 1,
@@ -271,7 +311,22 @@ pub fn run(picture: Picture) -> Seen {
     let mut was_marked = false;
     let mut shown: Option<(Instant, Instant)> = None;
     let mut after_due = Recent::new(MOST_COUNTED);
-    'frames: for frame in frames {
+    // When the picture that stands was drawn; `None` once it was removed,
+    // so that it is removed once until a frame is drawn again.
+    let mut standing: Option<Instant> = None;
+    'frames: loop {
+        let hide_at = standing.zip(hide_after).map(|(at, after)| at + after);
+        let frame = match next(&frames, hide_at) {
+            Next::Frame(frame) => frame,
+            Next::Hide => {
+                standing = None;
+                // An error: the terminal is gone.
+                let Ok(hidden) = writing.hide() else { break };
+                seen.hidden += u32::from(hidden);
+                continue;
+            }
+            Next::End => break,
+        };
         seen.came += 1;
         if !order.take(frame.group, frame.object) {
             seen.left_out += 1;
@@ -308,6 +363,7 @@ pub fn run(picture: Picture) -> Seen {
         let now = Instant::now();
         seen.drawing += now - before;
         seen.drawn += 1;
+        standing = Some(now);
         shown = Some((shown.map_or(now, |(first, _)| first), now));
         after_due.push(
             i64::try_from(micros_since(frame.due, now)).unwrap_or(i64::MAX)

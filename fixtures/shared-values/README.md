@@ -20,3 +20,4 @@ The rows and their constants:
 | `publish-done-peer-end-wait-ms` | `PUBLISH_DONE_ANSWER_WAIT` of `crates/moqt-client`; `DEFAULT_PEER_STREAM_END_TIMEOUT_MS` of `@xmoq/moqt` |
 | `served-fetch-peer-end-wait-ms` | `FETCH_PEER_END_WAIT_MS` of `crates/relay-core`; `PEER_END_WAIT` of `crates/publisher`; `DEFAULT_PEER_STREAM_END_TIMEOUT_MS` of `@xmoq/moqt` |
 | `chat-recent-lines` | `RECENT_LINES` of `crates/viewer`; `HISTORY_LINES` of `@xmoq/chat`. The tests of [`fixtures/chat-history/`](../chat-history/README.md) take it from here too |
+| `video-hide-after-ms` | `HIDE_AFTER` of `crates/watch` (the default of `--hide-after-ms` of `xmoq-watch`); `DEFAULT_HIDE_AFTER_MS` of `@xmoq/media` (the default of `hideAfterMs` of `createPlayout`, and of `?hideAfterMs=` of the demo's pages) |

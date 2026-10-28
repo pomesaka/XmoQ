@@ -18,6 +18,7 @@ export {
 } from "./core/fastest-way.ts";
 export {
 	createFrameQueue,
+	DEFAULT_HIDE_AFTER_MS,
 	DEFAULT_MAX_WAITING_FRAMES,
 	type FrameQueue,
 	type WaitingFrame,

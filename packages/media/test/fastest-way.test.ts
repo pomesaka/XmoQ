@@ -89,7 +89,7 @@ const LEAST = readFileSync(
 	.map((row) => row.split("\t"));
 
 test("the table of the least has the rows both players count on", () => {
-	expect(LEAST.length).toBe(9);
+	expect(LEAST.length).toBe(10);
 });
 
 test.each(LEAST)(

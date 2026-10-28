@@ -31,6 +31,8 @@
 //                         a new Group (NEW_GROUP_REQUEST 0); with `join=no`,
 //                         the picture begins with the key frame it makes
 //   ?video=no             the sound alone
+//   ?hideAfterMs=N        how long the last picture stays without a new one
+//                         (`DEFAULT_HIDE_AFTER_MS` of @xmoq/media; 0 keeps it)
 //   ?videoTimeout=MS      the delivery timeout asked for the video; 0 asks
 //                         for none (`VIDEO_TIMEOUT_MS` when left out)
 //   ?audioTimeout=MS      the same for the sound; none asked when left out
@@ -396,6 +398,16 @@ async function main(): Promise<void> {
 			}
 			context.drawImage(frame, 0, 0);
 		},
+		hide() {
+			context.fillStyle = "#000000";
+			context.fillRect(0, 0, canvas.width, canvas.height);
+		},
+		// `?hideAfterMs=N`: how long the last picture stays without a new
+		// one; 0 keeps it. `DEFAULT_HIDE_AFTER_MS` of @xmoq/media when left
+		// out.
+		...(query.get("hideAfterMs") === null
+			? {}
+			: { hideAfterMs: Number(query.get("hideAfterMs")) }),
 		onFramesDue(due, now) {
 			for (const each of due) {
 				// A mark that comes on is noted with the frame that shows it,

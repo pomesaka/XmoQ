@@ -359,7 +359,7 @@ mod tests {
             );
             rows += 1;
         }
-        assert_eq!(rows, 9);
+        assert_eq!(rows, 10);
     }
 
     #[test]
