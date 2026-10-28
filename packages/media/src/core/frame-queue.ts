@@ -3,6 +3,19 @@
 /** How many decoded frames may wait to be shown: a second of them at 30 frames. */
 export const DEFAULT_MAX_WAITING_FRAMES = 30;
 
+/**
+ * How long a player shows the last picture without a new one before it
+ * takes it away, in milliseconds. **Provisional.** WHY: a publisher whose
+ * camera is off ends its Group and sends nothing (`pause` of
+ * `createVideoTrackEncoder`), and transport draft 18 has no way to say
+ * that a track pauses, so a player cannot tell that from a link that
+ * stopped; both are shown as no picture, rather than a picture that stands
+ * still. WHY a second: the key frames come every second, and a frame at 15
+ * frames a second every 67 ms. `crates/watch` holds the same
+ * (`fixtures/shared-values/`).
+ */
+export const DEFAULT_HIDE_AFTER_MS = 1000;
+
 export interface WaitingFrame<T> {
 	frame: T;
 	/** When it would be shown with no buffer, and when it came, on the caller's clock in milliseconds. */

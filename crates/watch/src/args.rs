@@ -1,5 +1,7 @@
 //! The flags of the viewer.
 
+use std::time::Duration;
+
 use xmoq_chat_tracks::names::{Kind, Room};
 use xmoq_moqt_io::wt::certificate_hash;
 use xmoq_viewer::reconnect::{CONNECT_WAIT_MS, ROOM_WAIT_MS};
@@ -126,6 +128,9 @@ pub struct Args {
     pub medium: Medium,
     /// `--fit`.
     pub fit: Fit,
+    /// `--hide-after-ms`: the picture is removed when no frame was drawn
+    /// for so long. `None` (`0`): it is never removed.
+    pub hide_after: Option<Duration>,
     /// `--out`: a file for what would go to the terminal.
     pub out: Option<String>,
     /// `--seconds`: the viewer ends after so long.
@@ -163,6 +168,16 @@ const DEFAULT_ANSWER_WAIT_MS: u64 = 10_000;
 /// (`DEFAULT_PLAYOUT_BUFFER_MS` of `@xmoq/media`, where the reasons are).
 /// Decided on 2026-10-21.
 pub const DEFAULT_BUFFER_MS: u64 = 150;
+
+/// The default of `--hide-after-ms`. **Provisional.**
+///
+/// WHY: a publisher whose camera is off ends its Group and sends nothing
+/// until it is on again, and draft 18 has no way to say that a track
+/// pauses; a viewer cannot tell that from a link that stopped, and both are
+/// shown as no picture rather than as the last one standing still. The
+/// watching page has the same default (`DEFAULT_HIDE_AFTER_MS` of
+/// `@xmoq/media`).
+pub const HIDE_AFTER: Duration = Duration::from_millis(1000);
 
 /// What is wrong with the flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +218,7 @@ xmoq-watch --room http(s)://host:port/broadcasts/<name> [--name terminal] [--say
   --scale <n>                       the picture at n times its pixels (1)
   --medium file|direct              a file the terminal reads (file), or the pixels in the escape codes
   --fit terminal|none|<w>x<h>       the most pixels that are written (terminal: the window's)
+  --hide-after-ms <ms>              the picture goes when no frame was drawn that long (1000; 0: never)
   --out <file>                      what would go to the terminal, to a file
   --seconds <n>                     end after so long
   --log <file>                      the lines about the room and the keys
@@ -315,6 +331,7 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
         scale: 1,
         medium: Medium::File,
         fit: Fit::Terminal,
+        hide_after: Some(HIDE_AFTER),
         out: None,
         seconds: None,
         log: None,
@@ -411,6 +428,11 @@ pub fn parse(mut given: impl Iterator<Item = String>) -> Result<Args, Invalid> {
                 )?;
             }
             "--fit" => args.fit = fit(&value)?,
+            "--hide-after-ms" => {
+                // 0 is never, as `hideAfterMs` of the watching page's.
+                let after: u64 = number(&flag, &value)?;
+                args.hide_after = (after > 0).then(|| Duration::from_millis(after));
+            }
             "--out" => args.out = Some(value),
             "--seconds" => args.seconds = Some(number(&flag, &value)?),
             "--cut-sound-s" => args.cut_sound_s = Some(number(&flag, &value)?),
@@ -542,6 +564,7 @@ mod tests {
             scale: 1,
             medium: Medium::File,
             fit: Fit::Terminal,
+            hide_after: Some(Duration::from_millis(1000)),
             out: None,
             seconds: None,
             log: None,
@@ -661,7 +684,7 @@ mod tests {
         assert_eq!(
             parsed(
                 "--room http://h/broadcasts/a --name me --say hello --token no --video v --audio a \
-                 --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --room-wait-ms 600 --connect-wait-ms 700 --rendezvous-timeout-ms 4500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --out o \
+                 --buffer-ms 150 --video-timeout-ms 100 --answer-wait-ms 1500 --setup-wait-ms 2500 --open-wait-ms 3500 --room-wait-ms 600 --connect-wait-ms 700 --rendezvous-timeout-ms 4500 --volume 0.3 --scale 2 --medium direct --fit 960x540 --hide-after-ms 2500 --out o \
                  --seconds 20 --log l --sound off \
                  --measure-marks x=580,y=60,w=640,h=360,every-ms=2000,beep=0.6,ground=0.25 --cut-sound-s 5"
             ),
@@ -695,6 +718,7 @@ mod tests {
                 scale: 2,
                 medium: Medium::Direct,
                 fit: Fit::Most(960, 540),
+                hide_after: Some(Duration::from_millis(2500)),
                 out: Some("o".to_string()),
                 seconds: Some(20),
                 log: Some("l".to_string()),
@@ -847,6 +871,57 @@ mod tests {
         for (flags, said) in cases {
             assert_eq!(parsed(&flags), Err(Invalid(said.to_string())), "{flags}");
         }
+    }
+
+    #[test]
+    fn hide_after_ms_is_a_time_or_0_for_never() {
+        // (the value of `--hide-after-ms`; what it is read as)
+        let cases = [
+            ("2500", Ok(Some(Duration::from_millis(2500)))),
+            ("0", Ok(None)),
+            (
+                "soon",
+                Err(Invalid(
+                    "--hide-after-ms soon: not a number it takes".to_string(),
+                )),
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                parsed(&format!(
+                    "--room http://h/broadcasts/a --hide-after-ms {value}"
+                ))
+                .map(|args| args.hide_after),
+                expected,
+                "{value}"
+            );
+        }
+    }
+
+    /// The rows of `fixtures/shared-values/values.tsv` that name xmoq-watch, by
+    /// name.
+    fn shared_values() -> std::collections::HashMap<&'static str, u64> {
+        include_str!("../../../fixtures/shared-values/values.tsv")
+            .lines()
+            .filter_map(|row| match row.split('\t').collect::<Vec<_>>()[..] {
+                [name, value, holders] => holders
+                    .split(',')
+                    .any(|holder| holder == "xmoq-watch")
+                    .then(|| (name, value.parse().expect("a number"))),
+                _ => panic!("a row of three columns: {row}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_values_held_alike_with_other_parts_are_as_the_shared_table_says() {
+        assert_eq!(
+            shared_values(),
+            std::collections::HashMap::from([(
+                "video-hide-after-ms",
+                u64::try_from(HIDE_AFTER.as_millis()).expect("milliseconds that fit")
+            )])
+        );
     }
 
     #[test]

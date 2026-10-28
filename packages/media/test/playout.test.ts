@@ -35,7 +35,7 @@ describe("fixtures/playout", () => {
 	test("the tables have the rows both players count on", () => {
 		expect({ autoBuffer: autoBuffer.length, seam: seam.length }).toEqual({
 			autoBuffer: 6,
-			seam: 9,
+			seam: 10,
 		});
 	});
 

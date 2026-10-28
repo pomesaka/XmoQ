@@ -8,6 +8,7 @@
 import { placePiece } from "../core/audio-seam.ts";
 import {
 	createFrameQueue,
+	DEFAULT_HIDE_AFTER_MS,
 	DEFAULT_MAX_WAITING_FRAMES,
 	type WaitingFrame,
 } from "../core/frame-queue.ts";
@@ -49,6 +50,14 @@ export interface PlayoutOptions extends PlayoutClockOptions {
 	sampleRate: number;
 	/** Draws a frame, at a repaint. The frame is closed afterwards, here. */
 	draw(frame: VideoFrame): void;
+	/**
+	 * Takes the picture away (`hideAfterMs` without a frame); called once,
+	 * and not again before a frame was drawn. Where left out, the last
+	 * picture stays.
+	 */
+	hide?(): void;
+	/** `DEFAULT_HIDE_AFTER_MS` when left out; 0 never hides. */
+	hideAfterMs?: number;
 	/** `DEFAULT_MAX_WAITING_FRAMES` when left out. */
 	maxWaitingFrames?: number;
 	/** Called at a repaint with the frames whose time has come, before the last of them is drawn and all are closed. */
@@ -98,6 +107,9 @@ export interface Playout {
  */
 export function createPlayout(options: PlayoutOptions): Playout {
 	const clock = createPlayoutClock(options);
+	const hideAfterMs = options.hideAfterMs ?? DEFAULT_HIDE_AFTER_MS;
+	/** When the last frame was drawn, by `Date.now()`; undefined before one was, and once the picture was taken away. */
+	let lastDrawn: number | undefined;
 	const frames = createFrameQueue<VideoFrame>(
 		options.maxWaitingFrames ?? DEFAULT_MAX_WAITING_FRAMES,
 	);
@@ -121,7 +133,19 @@ export function createPlayout(options: PlayoutOptions): Playout {
 			} catch (error) {
 				reportError(error);
 			}
+			lastDrawn = now;
 			for (const each of due) each.frame.close();
+		} else if (
+			hideAfterMs > 0 &&
+			lastDrawn !== undefined &&
+			now - lastDrawn >= hideAfterMs
+		) {
+			lastDrawn = undefined;
+			try {
+				options.hide?.();
+			} catch (error) {
+				reportError(error);
+			}
 		}
 		requestAnimationFrame(repaint);
 	};

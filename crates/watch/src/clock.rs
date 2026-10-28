@@ -380,7 +380,7 @@ mod tests {
             assert_eq!(got.join(" "), after, "{name}");
             rows += 1;
         }
-        assert_eq!(rows, 9);
+        assert_eq!(rows, 10);
     }
 
     /// `fixtures/playout/auto-buffer.tsv`, which `@xmoq/media` reads too.

@@ -663,7 +663,7 @@ impl Played {
         let samples_ms = |samples: u64| samples * 1000 / u64::from(xmoq_watch::playout::RATE);
         format!(
             "AV_PLAYED why=\"{}\" seconds={:.1} buffer_ms={} buffer_auto={} buffer_ms_least/most={}/{} output_lead_ms={} volume={:.1} muted={} \
-             video_size={}x{} made_smaller_by={} written_kb_a_frame={} video_came={} video_left_out={} video_drawn={} fps={fps:.1} \
+             video_size={}x{} made_smaller_by={} written_kb_a_frame={} video_came={} video_left_out={} video_drawn={} video_hidden={} fps={fps:.1} \
              video_after_due_ms_min/p50/p95/max={} decode_ms_a_frame={:.2} draw_ms_a_frame={:.2} \
              audio_packets={} audio_refused={} audio_played_ms={} underruns={} silence_waiting_ms={} audio_left_out_late={} audio_cut_late={} audio_dropped_full={} audio_stretched={} \
              peak={:.3} rms={:.3} audio_came_over_least_ms_min/p50/p95/max={} video_came_over_least_ms_min/p50/p95/max={} \
@@ -685,6 +685,7 @@ impl Played {
             seen.came,
             seen.left_out,
             seen.drawn,
+            seen.hidden,
             spread_ms(&seen.after_due_us),
             a_frame(seen.decoding, seen.decoded),
             a_frame(seen.drawing, seen.drawn),
@@ -932,6 +933,7 @@ async fn play(
         began,
         measure_marks: measure,
         stop: Arc::clone(&stop_picture),
+        hide_after: args.hide_after,
     };
     // WHY its result comes over a channel and the thread is not joined: a
     // terminal that does not take what is written holds the thread, and

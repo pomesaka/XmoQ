@@ -7,3 +7,4 @@ more-than-10-seconds-from-the-least-is-left-out	0:100 10:10101 20:-9901 30:10100
 what-is-left-out-is-not-kept-for-the-least	0:100 1000:20000 60000:130	100 - 130
 after-a-minute-without-an-object-the-next-is-the-first	0:100 70000:50000 70010:50010	100 50000 50000
 a-clock-that-was-set-back-counts-for-the-newest-second	5000:100 2000:50 64000:70 65000:70	100 50 50 70
+a-pause-that-is-in-the-times-moves-nothing	0:100 1000:100 6000:100 7000:100	100 100 100 100
