@@ -1,0 +1,20 @@
+[package]
+name = "xmoq-garden"
+version = "0.0.0"
+description = "The garden of a room: takes what every actor of a room does on its MoQ track acted, changes the room's garden by its rules, and publishes the garden as one track a room."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-again = { path = "../again" }
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+xmoq-pet-tracks = { path = "../pet-tracks" }
+xmoq-publisher = { path = "../publisher" }
+xmoq-room-token = { path = "../room-token" }
+xmoq-subscriber = { path = "../subscriber" }
+anyhow = "=1.0.100"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

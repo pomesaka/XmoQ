@@ -56,6 +56,7 @@ import { chatLimits } from "@xmoq/chat/limits";
 import { BROADCAST_PAGES } from "./broadcast/pages.ts";
 import type { Page, Served } from "./lib/shell.ts";
 import { MEETING_PAGES } from "./meeting/pages.ts";
+import { PET_PAGES } from "./pet/pages.ts";
 
 const { values: options } = parseArgs({
 	options: {
@@ -76,6 +77,8 @@ const { values: options } = parseArgs({
 		"stats-every-ms": { type: "string" },
 		// A file for the relay's lines, for looking into a run.
 		"relay-log": { type: "string" },
+		// A file for the pet's lines (what it was told, and what it decided).
+		"pet-log": { type: "string" },
 		// The gatherer's store: one file for one gatherer, which holds it alone.
 		"chat-store": { type: "string" },
 		// The language the transcriber reads in: `auto` (its default), or a
@@ -106,6 +109,12 @@ const { values: options } = parseArgs({
 		// Whose video a page of the meeting receives at once, the first that
 		// many as they came (decided on 2026-10-25: 8); 0 for none.
 		"meeting-most-watched": { type: "string", default: "8" },
+		// The decisions API the pet asks what it does (`xmoq-pet`
+		// `--decisions-url`), with the token in the environment variable
+		// DECISIONS_API_TOKEN, which the pet reads from this process's
+		// environment; without it, the pet reacts by its own table.
+		"decisions-url": { type: "string" },
+		"decisions-per-minute": { type: "string" },
 		port: { type: "string", default: "8080" },
 	},
 });
@@ -223,6 +232,8 @@ relay.on("exit", (code) => {
 	// hold its store; the transcriber would hold its models.
 	chat?.kill("SIGINT");
 	transcriber?.kill("SIGINT");
+	garden?.kill("SIGINT");
+	pet?.kill("SIGINT");
 	process.exit(code ?? 1);
 });
 // The rooms, where their dependencies are installed.
@@ -344,6 +355,64 @@ transcriber?.on("exit", (code) => {
 	// The watching page has no captions without it; the run goes on.
 	console.log(`the transcriber exited with ${code}`);
 });
+// The garden of the rooms (`xmoq-garden`), where it is built, with the
+// relay's key unless `--no-auth`, as the gatherer: it keeps what lies on
+// each room's floor, which the pages and the pet act on.
+const gardenBinary = join(here, "..", "target", "debug", "xmoq-garden");
+const garden = existsSync(gardenBinary)
+	? spawn(
+			gardenBinary,
+			[
+				"--url",
+				`https://127.0.0.1:${options["relay-port"]}/`,
+				"--cert-sha256",
+				certSha256Hex,
+				...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
+			],
+			// Its lines, one for each thing it does, are not shown.
+			{ stdio: ["ignore", "ignore", "inherit"] },
+		)
+	: undefined;
+garden?.on("exit", (code) => {
+	// The page of the pet has an empty floor without it; the run goes on.
+	console.log(`the garden exited with ${code}`);
+});
+// The pet of the rooms (`xmoq-pet`), where it is built, with the relay's
+// key unless `--no-auth`, as the gatherer.
+const petBinary = join(here, "..", "target", "debug", "xmoq-pet");
+const pet = existsSync(petBinary)
+	? spawn(
+			petBinary,
+			[
+				"--url",
+				`https://127.0.0.1:${options["relay-port"]}/`,
+				"--cert-sha256",
+				certSha256Hex,
+				...(authKeyHex === undefined ? [] : ["--auth-key-hex", authKeyHex]),
+				...(options["decisions-url"] === undefined
+					? []
+					: ["--decisions-url", options["decisions-url"]]),
+				...(options["decisions-per-minute"] === undefined
+					? []
+					: ["--decisions-per-minute", options["decisions-per-minute"]]),
+			],
+			// Its lines, one for each thing it does, are not shown, unless
+			// `--pet-log` keeps them.
+			{
+				stdio: [
+					"ignore",
+					options["pet-log"] === undefined
+						? "ignore"
+						: openSync(options["pet-log"], "w"),
+					"inherit",
+				],
+			},
+		)
+	: undefined;
+pet?.on("exit", (code) => {
+	// The page of the pet shows an empty garden without it; the run goes on.
+	console.log(`the pet exited with ${code}`);
+});
 /** Why the pages have no chat, where they have none. */
 const noChat = `no chat: ${chatBinary} is missing (cargo build -p xmoq-chat)`;
 const stop = (): void => {
@@ -351,6 +420,8 @@ const stop = (): void => {
 	rooms?.kill("SIGINT");
 	chat?.kill("SIGINT");
 	transcriber?.kill("SIGINT");
+	garden?.kill("SIGINT");
+	pet?.kill("SIGINT");
 };
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
@@ -358,7 +429,11 @@ process.on("SIGTERM", stop);
 // Which path is of which application: each assembles its own pages
 // (`pages.ts`), and this server only serves them, so that one could be run
 // apart from the other.
-const PAGES: Record<string, Page> = { ...BROADCAST_PAGES, ...MEETING_PAGES };
+const PAGES: Record<string, Page> = {
+	...BROADCAST_PAGES,
+	...MEETING_PAGES,
+	...PET_PAGES,
+};
 const served: Served = {
 	roomsUrl,
 	noChat: chat === undefined ? noChat : undefined,
@@ -414,6 +489,11 @@ const server = Bun.serve({
 console.log(`publish: http://localhost:${server.port}/publish`);
 console.log(`watch:   http://localhost:${server.port}/watch`);
 console.log(`meet:    http://localhost:${server.port}/meet`);
+console.log(
+	pet === undefined || garden === undefined
+		? `pet:     none: ${pet === undefined ? petBinary : gardenBinary} is missing (cargo build -p xmoq-pet -p xmoq-garden)`
+		: `pet:     http://localhost:${server.port}/pet${options["decisions-url"] === undefined ? " (reacting by its own table)" : ""}`,
+);
 console.log(roomsUrl === null ? "rooms:   none" : `rooms:   ${roomsUrl}`);
 console.log(
 	chat !== undefined

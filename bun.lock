@@ -14,6 +14,7 @@
         "@xmoq/meeting": "workspace:*",
         "@xmoq/moqt": "workspace:*",
         "@xmoq/msf": "workspace:*",
+        "@xmoq/pet": "workspace:*",
         "@xmoq/room-client": "workspace:*",
         "@xmoq/tracks": "workspace:*",
         "@xmoq/transcript": "workspace:*",
@@ -34,6 +35,7 @@
         "@xmoq/meeting": "workspace:*",
         "@xmoq/moqt": "workspace:*",
         "@xmoq/msf": "workspace:*",
+        "@xmoq/pet": "workspace:*",
         "@xmoq/transcript": "workspace:*",
         "moqtail": "0.13.0",
         "playwright-core": "1.64.0",
@@ -109,6 +111,19 @@
     },
     "packages/msf": {
       "name": "@xmoq/msf",
+      "version": "0.0.0",
+      "dependencies": {
+        "@xmoq/json": "workspace:*",
+        "@xmoq/moqt": "workspace:*",
+        "@xmoq/tracks": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "1.4.2",
+        "typescript": "6.0.3",
+      },
+    },
+    "packages/pet": {
+      "name": "@xmoq/pet",
       "version": "0.0.0",
       "dependencies": {
         "@xmoq/json": "workspace:*",
@@ -276,6 +291,8 @@
     "@xmoq/moqt": ["@xmoq/moqt@workspace:packages/moqt"],
 
     "@xmoq/msf": ["@xmoq/msf@workspace:packages/msf"],
+
+    "@xmoq/pet": ["@xmoq/pet@workspace:packages/pet"],
 
     "@xmoq/room": ["@xmoq/room@workspace:packages/room"],
 

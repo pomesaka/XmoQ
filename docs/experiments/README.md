@@ -272,6 +272,7 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-27 [tail -F of a file written anew, and the loop of AGENT.md](2026-10-27-tail-of-a-file-written-anew-and-the-loop-of-agent-md.md)
 - 2026-10-27 [What whisper writes for noise](2026-10-27-what-whisper-writes-for-noise.md)
 - 2026-10-28 [A camera off and a muted microphone send nothing](2026-10-28-a-camera-off-and-a-muted-microphone-send-nothing.md)
+- 2026-10-28 [A pet in a garden that a decisions API moves](2026-10-28-a-pet-in-a-garden-that-a-decisions-api-moves.md)
 
 ### Not tied to a Phase
 

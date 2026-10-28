@@ -1,0 +1,26 @@
+[package]
+name = "xmoq-pet"
+version = "0.0.0"
+description = "The pet of a room, an actor of its garden: perceives the room's garden on its MoQ track, decides what the pet does (by the decisions API where it is given, by a table otherwise), and publishes the pet's state and what it does to the garden on tracks of its own."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xmoq-again = { path = "../again" }
+xmoq-moqt = { path = "../moqt" }
+xmoq-moqt-io = { path = "../moqt-io" }
+xmoq-pet-tracks = { path = "../pet-tracks" }
+xmoq-publisher = { path = "../publisher" }
+xmoq-room-token = { path = "../room-token" }
+xmoq-subscriber = { path = "../subscriber" }
+anyhow = "=1.0.100"
+serde_json = "=1.0.152"
+tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+# The decisions API, in `src/bin/xmoq-pet/decisions.rs` alone. The same version and
+# features as `xmoq-viewer-io` (why, at the top of its `room_client.rs`): rustls with
+# ring, which quinn already builds, and no aws-lc-rs, HTTP/2 or system proxy.
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }

@@ -9,6 +9,7 @@
 		"@xmoq/meeting": "workspace:*",
 		"@xmoq/moqt": "workspace:*",
 		"@xmoq/msf": "workspace:*",
+		"@xmoq/pet": "workspace:*",
 		"@xmoq/room-client": "workspace:*",
 		"@xmoq/tracks": "workspace:*",
 		"@xmoq/transcript": "workspace:*",

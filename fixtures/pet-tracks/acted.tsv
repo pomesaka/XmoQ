@@ -1,0 +1,60 @@
+pet	{"kind":"pet","sentAt":1761300000000}	pet	-	-	-	1761300000000	-	yes
+feed	{"kind":"feed","to":[300,700],"sentAt":5}	feed	[300,700]	-	-	5	-	yes
+call	{"kind":"call","sentAt":5}	call	-	-	-	5	-	yes
+throw	{"kind":"throw","to":[250,900],"sentAt":5}	throw	[250,900]	-	-	5	-	yes
+throw to a corner	{"kind":"throw","to":[0,1000],"sentAt":5}	throw	[0,1000]	-	-	5	-	yes
+talk	{"kind":"talk","text":"いい子だね","sentAt":5}	talk	-	"いい子だね"	-	5	-	yes
+talk with what a terminal would act on	{"kind":"talk","text":"a\u001b[2Jb","sentAt":5}	talk	-	"a\u001b[2Jb"	-	5	-	yes
+a member more	{"kind":"pet","sentAt":5,"x":1}	pet	-	-	-	5	-	no
+not JSON	pet	-	-	-	-	-	not-an-object	-
+an array	["pet"]	-	-	-	-	-	not-an-object	-
+a kind that is none	{"kind":"bite","sentAt":5}	-	-	-	-	-	kind	-
+no kind	{"sentAt":5}	-	-	-	-	-	kind	-
+throw without where	{"kind":"throw","sentAt":5}	-	-	-	-	-	to	-
+throw beyond the floor	{"kind":"throw","to":[1001,0],"sentAt":5}	-	-	-	-	-	to	-
+throw to a place with a fraction	{"kind":"throw","to":[0.5,0],"sentAt":5}	-	-	-	-	-	to	-
+throw to one number	{"kind":"throw","to":[5],"sentAt":5}	-	-	-	-	-	to	-
+where on what is not thrown	{"kind":"pet","to":[5,5],"sentAt":5}	-	-	-	-	-	to	-
+talk without a text	{"kind":"talk","sentAt":5}	-	-	-	-	-	text	-
+talk with an empty text	{"kind":"talk","text":"","sentAt":5}	-	-	-	-	-	text	-
+a text on what is not talk	{"kind":"call","text":"hi","sentAt":5}	-	-	-	-	-	text	-
+no sentAt	{"kind":"pet"}	-	-	-	-	-	sent-at	-
+a negative sentAt	{"kind":"pet","sentAt":-1}	-	-	-	-	-	sent-at	-
+talk of 120 bytes	{"kind":"talk","text":"ああああああああああああああああああああああああああああああああああああああああ","sentAt":5}	talk	-	"ああああああああああああああああああああああああああああああああああああああああ"	-	5	-	yes
+talk over 120 bytes	{"kind":"talk","text":"ああああああああああああああああああああああああああああああああああああああああa","sentAt":5}	-	-	-	-	-	text	-
+throw to three numbers	{"kind":"throw","to":[1,2,3],"sentAt":5}	-	-	-	-	-	to	-
+a kind that is no string	{"kind":1,"sentAt":5}	-	-	-	-	-	kind	-
+where as null on what is not thrown	{"kind":"pet","to":null,"sentAt":5}	-	-	-	-	-	to	-
+feed without where	{"kind":"feed","sentAt":5}	-	-	-	-	-	to	-
+eat	{"kind":"eat","thing":3,"sentAt":5}	eat	-	-	3	5	-	yes
+take	{"kind":"take","thing":0,"sentAt":5}	take	-	-	0	5	-	yes
+take the largest id	{"kind":"take","thing":9007199254740991,"sentAt":5}	take	-	-	9007199254740991	5	-	yes
+a member more on take	{"kind":"take","thing":3,"sentAt":5,"x":1}	take	-	-	3	5	-	no
+feed to a corner	{"kind":"feed","to":[1000,0],"sentAt":5}	feed	[1000,0]	-	-	5	-	yes
+eat without a thing	{"kind":"eat","sentAt":5}	-	-	-	-	-	thing	-
+take without a thing	{"kind":"take","sentAt":5}	-	-	-	-	-	thing	-
+a thing below 0	{"kind":"eat","thing":-1,"sentAt":5}	-	-	-	-	-	thing	-
+a thing beyond 2^53 - 1	{"kind":"take","thing":9007199254740992,"sentAt":5}	-	-	-	-	-	thing	-
+a thing as a string	{"kind":"eat","thing":"3","sentAt":5}	-	-	-	-	-	thing	-
+a thing with a fraction	{"kind":"eat","thing":1.5,"sentAt":5}	-	-	-	-	-	thing	-
+a thing written 2.0	{"kind":"take","thing":2.0,"sentAt":5}	-	-	-	-	-	thing	-
+a thing as null	{"kind":"take","thing":null,"sentAt":5}	-	-	-	-	-	thing	-
+a sentAt written 2.0	{"kind":"pet","sentAt":2.0}	-	-	-	-	-	sent-at	-
+feed to a place written 2.0	{"kind":"feed","to":[2.0,1],"sentAt":5}	-	-	-	-	-	to	-
+feed beyond the floor	{"kind":"feed","to":[0,1001],"sentAt":5}	-	-	-	-	-	to	-
+a kind of a thing is no action	{"kind":"bowl","sentAt":5}	-	-	-	-	-	kind	-
+where on call	{"kind":"call","to":[5,5],"sentAt":5}	-	-	-	-	-	to	-
+where on talk	{"kind":"talk","text":"hi","to":[5,5],"sentAt":5}	-	-	-	-	-	to	-
+where on eat	{"kind":"eat","thing":3,"to":[5,5],"sentAt":5}	-	-	-	-	-	to	-
+where on take	{"kind":"take","thing":3,"to":[5,5],"sentAt":5}	-	-	-	-	-	to	-
+a text on pet	{"kind":"pet","text":"hi","sentAt":5}	-	-	-	-	-	text	-
+a text on feed	{"kind":"feed","to":[5,5],"text":"hi","sentAt":5}	-	-	-	-	-	text	-
+a text on throw	{"kind":"throw","to":[5,5],"text":"hi","sentAt":5}	-	-	-	-	-	text	-
+a text on eat	{"kind":"eat","thing":3,"text":"hi","sentAt":5}	-	-	-	-	-	text	-
+a text on take	{"kind":"take","thing":3,"text":"hi","sentAt":5}	-	-	-	-	-	text	-
+a thing on pet	{"kind":"pet","thing":3,"sentAt":5}	-	-	-	-	-	thing	-
+a thing on feed	{"kind":"feed","to":[5,5],"thing":3,"sentAt":5}	-	-	-	-	-	thing	-
+a thing on call	{"kind":"call","thing":3,"sentAt":5}	-	-	-	-	-	thing	-
+a thing on throw	{"kind":"throw","to":[5,5],"thing":3,"sentAt":5}	-	-	-	-	-	thing	-
+a thing on talk	{"kind":"talk","text":"hi","thing":3,"sentAt":5}	-	-	-	-	-	thing	-
+a thing as null on what takes none	{"kind":"call","thing":null,"sentAt":5}	-	-	-	-	-	thing	-
