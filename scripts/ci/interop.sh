@@ -78,7 +78,7 @@ fi
 cargo build --locked --manifest-path interop/peers/moqtail/rust-client/Cargo.toml
 need_alsa_headers
 need_libclang
-cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat -p xmoq-agent
+cargo build --locked -p xmoq-moqt-client -p xmoq-relay -p xmoq-quiet-peer -p xmoq-chat -p xmoq-agent -p xmoq-garden -p xmoq-pet
 # WHY --release for these: interop/harness.ts, at `TERMINAL_VIEWER_BINARY` and `TRANSCRIBER_BINARY`.
 cargo build --locked --release -p xmoq-watch -p xmoq-transcriber
 # The models the transcriber's runs read with and tell a voice by (`transcriberModel` of

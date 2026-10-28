@@ -53,6 +53,7 @@ import {
 	followCatalog,
 	namespaceTuple,
 } from "@xmoq/msf";
+import { type GardenActor, joinGarden } from "@xmoq/pet";
 import { followTranscript, keepFollowingTranscript } from "@xmoq/transcript";
 import type {
 	PageAgentFolderReport,
@@ -64,6 +65,8 @@ import type {
 	PageFetch,
 	PageFetchReport,
 	PageFetchServing,
+	PageGardenAction,
+	PageGardenReport,
 	PageKeptReport,
 	PageMeetingReport,
 	PageProperty,
@@ -919,6 +922,14 @@ const chat: {
 	gaps: [],
 };
 
+/** The actor of `joinGarden`, and what it was given. */
+const garden: {
+	actor: GardenActor | undefined;
+	gardens: PageGardenReport["gardens"];
+	states: PageGardenReport["states"];
+	malformed: string[];
+} = { actor: undefined, gardens: [], states: [], malformed: [] };
+
 window.xmoqOwn = {
 	connectWithToken: withPlainErrors(
 		async (relayUrl: string, certSha256Hex: string, tokenHex: string) => {
@@ -1373,6 +1384,66 @@ window.xmoqOwn = {
 			heard: status?.heard ?? false,
 			following: status?.following ?? false,
 			lastEnd: status?.lastEnd ?? null,
+		};
+	}),
+
+	joinGarden: withPlainErrors(async (room: string, name: string) => {
+		garden.actor = await joinGarden(connected(), {
+			room,
+			name,
+			onGarden(given) {
+				console.log(
+					`GARDEN things=${given.things.map((thing) => `${thing.kind}:${thing.id}`).join(",") || "none"} events=${given.events.map((event) => `${event.kind}:${event.id}`).join(",") || "none"} at=${given.at}`,
+				);
+				// WHY a bound: the garden is sent again every 2 s; this keeps a
+				// page that stays from holding all of them.
+				if (garden.gardens.length < 1_000) {
+					garden.gardens.push({ ...given, seenAt: Date.now() });
+				}
+			},
+			onState(state) {
+				console.log(
+					`PET_STATE doing=${state.doing} by=${state.by ?? "none"} bubble=${state.bubble ?? "none"} at=${state.at}`,
+				);
+				// WHY a bound: the pet says its state again every 2 s.
+				if (garden.states.length < 1_000) {
+					garden.states.push({ ...state, seenAt: Date.now() });
+				}
+			},
+			onMalformed(track, number, why) {
+				garden.malformed.push(`${track} ${number} ${why}`);
+			},
+			onStatus(status) {
+				console.log(
+					`GARDEN_STATUS heard=${status.heard} garden=${status.garden.following} state=${status.state.following}`,
+				);
+			},
+		});
+	}),
+
+	gardenAct: withPlainErrors(async (action: PageGardenAction) => {
+		if (garden.actor === undefined) throw new Error("joinGarden() first");
+		const outcome = await garden.actor.act(action);
+		return JSON.stringify(outcome, (_key, value: unknown) =>
+			typeof value === "bigint" ? value.toString() : value,
+		);
+	}),
+
+	gardenReport: withPlainErrors(async () => {
+		const status = garden.actor?.status();
+		return {
+			gardens: [...garden.gardens],
+			states: [...garden.states],
+			malformed: [...garden.malformed],
+			heard: status?.heard ?? false,
+			garden: {
+				following: status?.garden.following ?? false,
+				lastEnd: status?.garden.lastEnd ?? null,
+			},
+			state: {
+				following: status?.state.following ?? false,
+				lastEnd: status?.state.lastEnd ?? null,
+			},
 		};
 	}),
 

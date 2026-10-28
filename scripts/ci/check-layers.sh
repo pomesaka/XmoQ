@@ -29,6 +29,7 @@ FREE_OF=(
 	"xmoq-transcript-tracks:C compiler:cc cmake bindgen"
 	"xmoq-viewer:C compiler:cc cmake bindgen"
 	"xmoq-meeting-tracks:C compiler:cc cmake bindgen"
+	"xmoq-pet-tracks:C compiler:cc cmake bindgen"
 	"xmoq-watch:SQLite:libsqlite3-sys"
 )
 
@@ -163,11 +164,11 @@ check_rust() {
 crate_layer() {
 	case "$1" in
 	xmoq-moqt | xmoq-loc | xmoq-msf | xmoq-again) echo 0 ;;
-	xmoq-moqt-io | xmoq-room-token | xmoq-chat-tracks | xmoq-transcript-tracks | xmoq-meeting-tracks | xmoq-picture | xmoq-speech) echo 1 ;;
+	xmoq-moqt-io | xmoq-room-token | xmoq-chat-tracks | xmoq-transcript-tracks | xmoq-meeting-tracks | xmoq-pet-tracks | xmoq-picture | xmoq-speech) echo 1 ;;
 	xmoq-publisher | xmoq-subscriber | xmoq-relay-core | xmoq-viewer) echo 2 ;;
 	xmoq-viewer-io) echo 3 ;;
 	# The programs: nothing of the workspace depends on them.
-	xmoq-relay | xmoq-watch | xmoq-agent | xmoq-chat | xmoq-transcriber | xmoq-moqt-client | xmoq-quiet-peer) echo 4 ;;
+	xmoq-relay | xmoq-watch | xmoq-agent | xmoq-chat | xmoq-garden | xmoq-pet | xmoq-transcriber | xmoq-moqt-client | xmoq-quiet-peer) echo 4 ;;
 	*) echo "" ;;
 	esac
 }
@@ -219,9 +220,9 @@ package_layer() {
 	@xmoq/moqt | @xmoq/loc | @xmoq/json | @xmoq/room-client) echo 0 ;;
 	# What an endpoint does with tracks, whatever they carry, built on the transport alone.
 	@xmoq/tracks) echo 1 ;;
-	# Each publishes or follows its tracks by @xmoq/tracks: the catalog, the chat's tracks
-	# and a transcript's.
-	@xmoq/msf | @xmoq/chat | @xmoq/transcript) echo 2 ;;
+	# Each publishes or follows its tracks by @xmoq/tracks: the catalog, the chat's tracks,
+	# a transcript's and the pet's.
+	@xmoq/msf | @xmoq/chat | @xmoq/transcript | @xmoq/pet) echo 2 ;;
 	# Media publishes its catalog by @xmoq/msf.
 	@xmoq/media) echo 3 ;;
 	@xmoq/meeting) echo 4 ;;

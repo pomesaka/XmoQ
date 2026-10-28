@@ -1,0 +1,22 @@
+an actor	["xmoq","pet","garden","alice"]	-	actor garden alice
+the pet is an actor	["xmoq","pet","garden","pet"]	-	actor garden pet
+the namespace of a room	["xmoq","pet","garden"]	-	none
+too deep	["xmoq","pet","garden","alice","more"]	-	none
+another prefix	["xmoq","chat","garden","alice"]	-	none
+an empty room	["xmoq","pet","","alice"]	-	none
+an empty name	["xmoq","pet","garden",""]	-	none
+the garden of a room	["xmoq","pet","garden"]	garden	garden garden
+the track of an actor	["xmoq","pet","garden","alice"]	acted	acted garden alice
+the pet acts as an actor	["xmoq","pet","garden","pet"]	acted	acted garden pet
+the state of the pet	["xmoq","pet","garden","pet"]	state	state garden
+another actor has no state	["xmoq","pet","garden","alice"]	state	none
+a room has no state	["xmoq","pet","garden"]	state	none
+an actor has no garden	["xmoq","pet","garden","alice"]	garden	none
+the pet has no garden	["xmoq","pet","garden","pet"]	garden	none
+a room has no acted	["xmoq","pet","garden"]	acted	none
+the garden of an empty room	["xmoq","pet",""]	garden	none
+the state of the pet of an empty room	["xmoq","pet","","pet"]	state	none
+the track of an empty name	["xmoq","pet","garden",""]	acted	none
+the state under too deep a namespace	["xmoq","pet","garden","pet","more"]	state	none
+the garden under another prefix	["xmoq","chat","garden"]	garden	none
+another track	["xmoq","pet","garden"]	lines	none

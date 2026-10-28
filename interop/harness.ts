@@ -1351,6 +1351,60 @@ export function spawnChatGatherer(
 	return { ...spawned, stop };
 }
 
+const GARDEN_BINARY = join(here, "..", "target", "debug", "xmoq-garden");
+
+/**
+ * Starts the garden of the rooms (`crates/garden`, `xmoq-garden`) beside
+ * the run's relay, as `spawnChatGatherer` starts the gatherer; `extraArgs`
+ * after its own (`--auth-key-hex`).
+ */
+export function spawnGarden(
+	context: RunContext,
+	label: string,
+	extraArgs: string[] = [],
+): LoggedProcess & { stop(): Promise<void> } {
+	if (!existsSync(GARDEN_BINARY)) {
+		throw new Error(`${GARDEN_BINARY} is missing: cargo build -p xmoq-garden`);
+	}
+	const spawned = spawnLogged(label, GARDEN_BINARY, [
+		"--url",
+		context.relayUrl,
+		"--cert-sha256",
+		context.certSha256Hex,
+		...extraArgs,
+	]);
+	const stop = (): Promise<void> => stopProcess(spawned, "SIGTERM");
+	defer(`stop ${spawned.label}`, stop);
+	return { ...spawned, stop };
+}
+
+const PET_BINARY = join(here, "..", "target", "debug", "xmoq-pet");
+
+/**
+ * Starts the pet of the rooms (`crates/pet`, `xmoq-pet`) beside the run's
+ * relay, as `spawnGarden` starts the garden; `extraArgs` after its own
+ * (`--auth-key-hex`). Without `--decisions-url` its table decides.
+ */
+export function spawnPet(
+	context: RunContext,
+	label: string,
+	extraArgs: string[] = [],
+): LoggedProcess & { stop(): Promise<void> } {
+	if (!existsSync(PET_BINARY)) {
+		throw new Error(`${PET_BINARY} is missing: cargo build -p xmoq-pet`);
+	}
+	const spawned = spawnLogged(label, PET_BINARY, [
+		"--url",
+		context.relayUrl,
+		"--cert-sha256",
+		context.certSha256Hex,
+		...extraArgs,
+	]);
+	const stop = (): Promise<void> => stopProcess(spawned, "SIGTERM");
+	defer(`stop ${spawned.label}`, stop);
+	return { ...spawned, stop };
+}
+
 export function spawnRustClient(
 	context: RunContext,
 	label: string,

@@ -137,3 +137,93 @@ export function deviceList(
 	add(bar, list);
 	return { refresh };
 }
+
+/** A button that does something each time it is pressed; disabled while `press` waits. */
+export function actionButton(
+	bar: HTMLElement,
+	options: { id: string; label: string; press(): Promise<void> },
+): void {
+	const button = document.createElement("button");
+	button.id = options.id;
+	button.textContent = options.label;
+	button.addEventListener("click", () => {
+		button.disabled = true;
+		options.press().finally(() => {
+			button.disabled = false;
+		});
+	});
+	add(bar, button);
+}
+
+/**
+ * A line of text and a button that sends it (and Enter): `send` is given
+ * the text, and the field is emptied where it resolves true.
+ */
+export function textField(
+	bar: HTMLElement,
+	options: {
+		id: string;
+		label: string;
+		size: number;
+		send(text: string): Promise<boolean>;
+	},
+): void {
+	const form = document.createElement("form");
+	form.style.display = "inline";
+	const input = document.createElement("input");
+	input.id = options.id;
+	input.size = options.size;
+	const button = document.createElement("button");
+	button.textContent = options.label;
+	form.append(input, " ", button);
+	form.addEventListener("submit", (event) => {
+		event.preventDefault();
+		const text = input.value;
+		if (text === "") return;
+		button.disabled = true;
+		options
+			.send(text)
+			.then((sent) => {
+				if (sent) input.value = "";
+			})
+			.finally(() => {
+				button.disabled = false;
+			});
+	});
+	add(bar, form);
+}
+
+/**
+ * Buttons of which one is chosen (`aria-pressed`), as the tools of a
+ * drawing program: a press chooses that one.
+ */
+export function choiceButtons(
+	bar: HTMLElement,
+	options: {
+		choices: { id: string; label: string }[];
+		chosen: string;
+		choose(id: string): void;
+	},
+): void {
+	const buttons = options.choices.map(({ id, label }) => {
+		const button = document.createElement("button");
+		button.id = id;
+		button.textContent = label;
+		return button;
+	});
+	const show = (chosen: string): void => {
+		for (const button of buttons) {
+			button.setAttribute("aria-pressed", String(button.id === chosen));
+			button.style.outline =
+				button.id === chosen ? "2px solid #f2c14e" : "none";
+		}
+	};
+	for (const button of buttons) {
+		button.addEventListener("click", () => {
+			show(button.id);
+			options.choose(button.id);
+		});
+		add(bar, button);
+	}
+	show(options.chosen);
+}

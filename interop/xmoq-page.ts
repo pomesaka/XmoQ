@@ -558,6 +558,82 @@ export type OwnPageExtras = {
 	): Promise<void>;
 	/** What the participant has had so far, in the order it came, and its status. */
 	chatReport(): Promise<PageChatReport>;
+	/**
+	 * Joins the garden of `room` (`xmoq/pet/<room>`) as the actor `name`,
+	 * with `joinGarden` of `@xmoq/pet`, on the connection of `connect`, whose
+	 * `serve` handlers it then names. Resolves once the namespace is
+	 * announced; the gardens and the pet's states it is given are in
+	 * `gardenReport`.
+	 */
+	joinGarden(room: string, name: string): Promise<void>;
+	/** Does one thing to the garden with `GardenActor.act`: what became of it, as JSON of `ActOutcome` with the Group in decimal. */
+	gardenAct(action: PageGardenAction): Promise<string>;
+	/** The gardens and the states the actor was given so far, in the order they came, and its status. */
+	gardenReport(): Promise<PageGardenReport>;
+};
+
+// WHY the garden's `Action`, `Garden` and `State` written again here, and
+// not imported from `@xmoq/pet`: its entry point brings in `@xmoq/moqt`'s
+// WebTransport, whose types need the DOM library, which the driver is
+// checked without (tsconfig.json). The page passes these to and from
+// `joinGarden`, so a member that no longer matches fails its type check.
+
+/** `Action` of `@xmoq/pet`. */
+export type PageGardenAction =
+	| { kind: "pet" | "call" }
+	| { kind: "feed" | "throw"; to: [number, number] }
+	| { kind: "talk"; text: string }
+	| { kind: "eat" | "take"; thing: number };
+
+/** `Garden` of `@xmoq/pet`, with the page's `Date.now()` when it was given. */
+export type PageGarden = {
+	things: {
+		id: number;
+		kind: "bowl" | "ball";
+		at: [number, number];
+		by: string;
+	}[];
+	events: {
+		id: number;
+		kind: "call" | "pet" | "talk";
+		by: string;
+		text: string | null;
+		at: number;
+	}[];
+	at: number;
+	seenAt: number;
+};
+
+/** `State` of `@xmoq/pet`, with the page's `Date.now()` when it was given. */
+export type PagePetState = {
+	from: [number, number];
+	to: [number, number];
+	began: number;
+	arrives: number;
+	facing: string;
+	doing: string;
+	mood: number;
+	bubble: string | null;
+	by: string | null;
+	at: number;
+	seenAt: number;
+};
+
+/** `FollowStatus` of `@xmoq/tracks`, in values that survive `page.evaluate`. */
+export type PageFollowStatus = { following: boolean; lastEnd: string | null };
+
+/** What an actor of the garden had, in values that survive `page.evaluate`. */
+export type PageGardenReport = {
+	/** The gardens given to `onGarden`, in the order they came. */
+	gardens: PageGarden[];
+	/** The states given to `onState`, in the order they came. */
+	states: PagePetState[];
+	/** Objects of `garden` or `state` that were none: "<track> <Group> <why>". */
+	malformed: string[];
+	/** `GardenActor.status()`. */
+	heard: boolean;
+	garden: PageFollowStatus;
+	state: PageFollowStatus;
 };
 
 /** `catchUpLines` and `lastHad` (in decimal) of `joinChat`. */

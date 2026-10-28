@@ -19,6 +19,7 @@ const BLUE = {
 		["xmoq", "broadcast", "blue"],
 		["xmoq", "meet", "blue"],
 	],
+	pet: ["xmoq", "pet", "blue"],
 };
 
 test.each<{
@@ -187,6 +188,48 @@ test.each<{
 		name: "not in a meeting",
 		role: "pub",
 		asked: ["xmoq", "meet", "blue", "x"],
+		namespace: undefined,
+	},
+	{
+		name: "the room's garden",
+		role: "sub",
+		asked: ["xmoq", "pet", "blue"],
+		namespace: ["xmoq", "pet", "blue"],
+	},
+	{
+		name: "an actor of the room's garden, to act",
+		role: "pub",
+		asked: ["xmoq", "pet", "blue", "ann"],
+		namespace: ["xmoq", "pet", "blue", "ann"],
+	},
+	{
+		name: "not to publish as the garden",
+		role: "pub",
+		asked: ["xmoq", "pet", "blue"],
+		namespace: undefined,
+	},
+	{
+		name: "not to read one actor alone",
+		role: "sub",
+		asked: ["xmoq", "pet", "blue", "ann"],
+		namespace: undefined,
+	},
+	{
+		name: "not the pet of another room",
+		role: "pub",
+		asked: ["xmoq", "pet", "red", "ann"],
+		namespace: undefined,
+	},
+	{
+		name: "under the room's garden, to read the pet's body",
+		role: "sub",
+		asked: ["xmoq", "pet", "blue", "*"],
+		namespace: ["xmoq", "pet", "blue", "*"],
+	},
+	{
+		name: "not to publish under the room's garden as a whole",
+		role: "pub",
+		asked: ["xmoq", "pet", "blue", "*"],
 		namespace: undefined,
 	},
 ])("token-for: $name", ({ role, asked, namespace }) => {

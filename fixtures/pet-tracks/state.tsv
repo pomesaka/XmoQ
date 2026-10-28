@@ -1,0 +1,19 @@
+walking	{"from":[100,500],"to":[400,600],"began":1000,"arrives":2500,"facing":"right","doing":"walk","mood":2,"bubble":null,"by":null,"at":1000}	[100,500]	[400,600]	1000	2500	right	walk	2	-	-	1000	-	yes
+a reaction with a bubble and whom	{"from":[400,600],"to":[400,600],"began":3000,"arrives":3000,"facing":"left","doing":"jump","mood":4,"bubble":"もっと！","by":"alice","at":3000}	[400,600]	[400,600]	3000	3000	left	jump	4	"もっと！"	"alice"	3000	-	yes
+asleep in a corner	{"from":[0,1000],"to":[0,1000],"began":0,"arrives":0,"facing":"left","doing":"sleep","mood":0,"bubble":"zz","by":null,"at":9007199254740991}	[0,1000]	[0,1000]	0	0	left	sleep	0	"zz"	-	9007199254740991	-	yes
+a member more	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":null,"by":null,"at":1,"x":0}	[1,1]	[1,1]	1	1	left	sit	2	-	-	1	-	no
+not JSON	state	-	-	-	-	-	-	-	-	-	-	not-an-object	-
+from beyond the floor	{"from":[1001,0],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":null,"by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	from	-
+to with a fraction	{"from":[1,1],"to":[1.5,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":null,"by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	to	-
+arrives before it began	{"from":[1,1],"to":[1,1],"began":5,"arrives":4,"facing":"left","doing":"sit","mood":2,"bubble":null,"by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	arrives	-
+a facing that is none	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"up","doing":"sit","mood":2,"bubble":null,"by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	facing	-
+a doing that is none	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"fly","mood":2,"bubble":null,"by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	doing	-
+a mood over 4	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":5,"bubble":null,"by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	mood	-
+an empty bubble	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":"","by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	bubble	-
+by an empty name	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":null,"by":"","at":1}	-	-	-	-	-	-	-	-	-	-	by	-
+no at	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":null,"by":null}	-	-	-	-	-	-	-	-	-	-	at	-
+a bubble of 64 bytes	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":"あああああああああああああああああああああa","by":null,"at":1}	[1,1]	[1,1]	1	1	left	sit	2	"あああああああああああああああああああああa"	-	1	-	yes
+a bubble over 64 bytes	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":"あああああああああああああああああああああab","by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	bubble	-
+no bubble	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	bubble	-
+no by	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2,"bubble":null,"at":1}	-	-	-	-	-	-	-	-	-	-	by	-
+a mood with a fraction of none	{"from":[1,1],"to":[1,1],"began":1,"arrives":1,"facing":"left","doing":"sit","mood":2.0,"bubble":null,"by":null,"at":1}	-	-	-	-	-	-	-	-	-	-	mood	-

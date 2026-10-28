@@ -1,0 +1,12 @@
+[package]
+name = "xmoq-pet-tracks"
+version = "0.0.0"
+description = "The tracks of a room's garden: the names of its namespaces and tracks, and the payloads of garden, acted and state. Without I/O."
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = "=1.0.152"

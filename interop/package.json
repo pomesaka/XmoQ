@@ -13,6 +13,7 @@
 		"@xmoq/meeting": "workspace:*",
 		"@xmoq/moqt": "workspace:*",
 		"@xmoq/msf": "workspace:*",
+		"@xmoq/pet": "workspace:*",
 		"@xmoq/transcript": "workspace:*",
 		"moqtail": "0.13.0",
 		"playwright-core": "1.64.0"

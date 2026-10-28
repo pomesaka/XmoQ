@@ -168,6 +168,7 @@ async function broadcastRoom(
 			chat: { kind: "broadcast", name },
 			broadcast,
 			transcripts: transcript === null ? [] : [transcript],
+			pet: ["xmoq", "pet", name],
 		});
 	}
 	return json({ error: "no such path" }, 404);

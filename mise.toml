@@ -61,6 +61,14 @@ run = "cargo run --release --locked -p xmoq-watch --"
 description = "The gatherer of the chat: mise run chat -- --url https://host:port/ --cert-sha256 <hex> --store chat.sqlite3"
 run = "cargo run --locked -p xmoq-chat --"
 
+[tasks.garden]
+description = "The garden of a room: mise run garden -- --url https://host:port/ --cert-sha256 <hex>"
+run = "cargo run --locked -p xmoq-garden --"
+
+[tasks.pet]
+description = "The pet of a room: mise run pet -- --url https://host:port/ --cert-sha256 <hex>"
+run = "cargo run --locked -p xmoq-pet --"
+
 [tasks.transcriber]
 description = "The transcriber: mise run transcriber -- --url https://host:port/ --cert-sha256 <hex> --namespace xmoq/broadcast/demo"
 run = "cargo run --release --locked -p xmoq-transcriber --"

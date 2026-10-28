@@ -2851,6 +2851,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "xmoq-garden"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "xmoq-again",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
+ "xmoq-pet-tracks",
+ "xmoq-publisher",
+ "xmoq-room-token",
+ "xmoq-subscriber",
+]
+
+[[package]]
 name = "xmoq-loc"
 version = "0.0.0"
 
@@ -2888,6 +2903,31 @@ dependencies = [
 
 [[package]]
 name = "xmoq-msf"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "xmoq-pet"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "xmoq-again",
+ "xmoq-moqt",
+ "xmoq-moqt-io",
+ "xmoq-pet-tracks",
+ "xmoq-publisher",
+ "xmoq-room-token",
+ "xmoq-subscriber",
+]
+
+[[package]]
+name = "xmoq-pet-tracks"
 version = "0.0.0"
 dependencies = [
  "serde_json",

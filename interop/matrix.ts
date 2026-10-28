@@ -60,7 +60,8 @@ interface Pairing {
 		| "meeting-pages.ts"
 		| "rendezvous.ts"
 		| "new-group.ts"
-		| "track-status.ts";
+		| "track-status.ts"
+		| "pet.ts";
 	/** The arguments of the driver, without the relay and the port. */
 	args: string[];
 	/**
@@ -1451,6 +1452,16 @@ function pairingsThrough(relays: string[]): RelayPairing[] {
 			script: "chat-pages.ts",
 			args: ["--restart", "no"],
 			relay: "moqtail",
+		},
+		// The garden of a room (`crates/garden`) and its pet (`crates/pet`)
+		// with own pages as actors (`joinGarden` of `@xmoq/pet`), through the
+		// own relay, without the decisions API, so that the pet's fixed table
+		// decides.
+		{
+			name: "own relay: garden and pet: a page feeds, throws the ball and pets in the garden, the pet eats the bowl and takes the ball, and the page is given the gardens and the pet's states; a page that comes after is given a garden and a state within 2 s",
+			script: "pet.ts",
+			args: [],
+			relay: "own",
 		},
 		// The tokens of a participant (`publishNamespaceToken` of `joinChat`)
 		// through the own relay with `--auth-key-hex`, the one relay that

@@ -46,6 +46,8 @@ export interface RoomNamespaces {
 	broadcast?: readonly string[];
 	/** The prefixes of the room's transcripts (`transcriptPrefix`), those that are there. */
 	transcripts: readonly (readonly string[])[];
+	/** The namespace of the room's pet (`xmoq/pet/<room>`); none for a meeting's room. */
+	pet?: readonly string[];
 }
 
 const sameFields = (a: readonly string[], b: readonly string[]): boolean =>
@@ -58,8 +60,8 @@ const sameFields = (a: readonly string[], b: readonly string[]): boolean =>
  *
  * | Role | Namespace |
  * |---|---|
- * | `sub` | `xmoq/chat/<kind>/<room>`, and `xmoq/chat/<kind>/<room>/*` to watch who is in it; `xmoq/transcript/<prefix>` of a transcript of the room; the room's broadcast |
- * | `pub` | `xmoq/chat/<kind>/<room>/<one field>`; the room's broadcast |
+ * | `sub` | `xmoq/chat/<kind>/<room>`, and `xmoq/chat/<kind>/<room>/*` to watch who is in it; `xmoq/transcript/<prefix>` of a transcript of the room; the room's broadcast; the room's garden, `xmoq/pet/<room>`, and `xmoq/pet/<room>/*` to read the pet's body under it |
+ * | `pub` | `xmoq/chat/<kind>/<room>/<one field>`; the room's broadcast; `xmoq/pet/<room>/<one field>`, an actor of the garden |
  *
  * WHY only these: a token for `sub` in `xmoq` allows a SUBSCRIBE_NAMESPACE
  * for that prefix (transport §10.18; the relay checks its prefix as a
@@ -87,9 +89,29 @@ export function tokenForNamespace(
 	) {
 		return namespace;
 	}
+	// WHY `*` under the garden: the pet's body is `state` under
+	// `xmoq/pet/<room>/pet`, which a token of the room's namespace alone does
+	// not allow (`allows_under` of `crates/relay/src/auth.rs`); the page's
+	// connection carries one token for both. As the chat's `*`, it tells who
+	// acts in the room, which the garden tells anyway.
+	if (
+		role === "sub" &&
+		of.pet !== undefined &&
+		sameFields(namespace, [...of.pet, "*"])
+	) {
+		return namespace;
+	}
 	if (!namespace.every(fieldOfANamespace)) return undefined;
 	if (meetingNamespace(namespace)) return undefined;
+	const pet = of.pet;
+	const ofThePet =
+		pet !== undefined &&
+		(role === "sub"
+			? sameFields(namespace, pet)
+			: namespace.length === pet.length + 1 &&
+				sameFields(namespace.slice(0, pet.length), pet));
 	const ofTheRoom =
+		ofThePet ||
 		(of.broadcast !== undefined && sameFields(namespace, of.broadcast)) ||
 		(role === "sub"
 			? sameFields(namespace, chat) ||
