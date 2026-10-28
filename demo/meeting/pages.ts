@@ -6,7 +6,7 @@ import { chatHtml, type Page, pageHtml, type Served } from "../lib/shell.ts";
 
 const body = (served: Served): string =>
 	`<canvas width="640" height="360"></canvas>
-		<p><button id="sound">sound</button> <button id="mute" aria-pressed="false" disabled>mute</button></p><div id="tiles" style="display: flex; flex-wrap: wrap; gap: 4px;"></div>
+		<p id="controls"><button id="sound">sound</button></p><div id="tiles" style="display: flex; flex-wrap: wrap; gap: 4px;"></div>
 		<pre id="status">loading</pre>
 		${
 			served.roomsUrl === null
