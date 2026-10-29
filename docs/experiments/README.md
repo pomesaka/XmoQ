@@ -303,3 +303,4 @@ OS, browser and version, Rust toolchain, exact library versions, MoQ draft revis
 - 2026-10-26 [The audio run drops a piece that comes after the next](2026-10-26-the-audio-run-drops-a-piece-that-comes-after-the-next.md)
 - 2026-10-26 [What the interop runs wait for, and what they leave behind](2026-10-26-what-the-interop-runs-wait-for-and-leave-behind.md)
 - 2026-10-27 [The moqtail relay turns the moqtail Rust client away in HTTP/3, once](2026-10-27-the-moqtail-relay-turns-the-moqtail-rust-client-away-in-http3.md)
+- 2026-10-29 [The demo from the LAN address](2026-10-29-the-demo-from-the-lan-address.md)
