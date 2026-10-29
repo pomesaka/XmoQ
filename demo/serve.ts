@@ -1,6 +1,6 @@
 // Starts the demo: the own relay, and a web server with the two pages.
 //
-// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--no-auth] [--relay-binary FILE] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--stats-every-ms N] [--chat-store FILE] [--transcribe-language auto|ja|en|...]
+// Usage: bun demo/serve.ts [--relay-port 4443] [--port 8080] [--rooms-port 8787] [--no-auth] [--relay-binary FILE] [--relay-log FILE] [--congestion cubic|newreno|bbr] [--delivery-patience-ms N] [--stats-every-ms N] [--chat-store FILE] [--transcribe-language auto|ja|en|...] [--lan IP]
 //
 // Tokens are asked for unless `--no-auth` (decided on 2026-10-26; who may
 // get a token is undecided): a key is made for each run and given to the
@@ -43,10 +43,20 @@
 // more other tabs; or /meet in two or more, each a participant of the
 // meeting of its room, whose transcript the transcriber reads for the room
 // "demo" alone. Ctrl-C stops the relay as well.
+//
+// `--lan IP` serves the pages over HTTPS from that address of this machine,
+// for others on the same network, with a certificate of its own that no
+// browser trusts: a browser past its warning ("proceed") still takes the
+// page as a secure context, and has WebTransport and the camera (Chromium of
+// Playwright 1.64.0, 2026-10-29). The relay already listens on every
+// interface, and the pages take it by its hash at that address, though the
+// certificate names only localhost and 127.0.0.1. The rooms stay on
+// 127.0.0.1, and the pages reach them through this server under /rooms/.
 
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
@@ -116,10 +126,23 @@ const { values: options } = parseArgs({
 		"decisions-url": { type: "string" },
 		"decisions-per-minute": { type: "string" },
 		port: { type: "string", default: "8080" },
+		// An address of this machine on the LAN, to show the demo to others
+		// on the same network: the pages are served over HTTPS from it, and
+		// given the relay and the rooms there. Without it, localhost alone.
+		lan: { type: "string" },
 	},
 });
 
 const here = import.meta.dir;
+const lan = options.lan;
+if (lan !== undefined && isIP(lan) === 0) {
+	throw new RangeError(`--lan is an address of this machine, not ${lan}`);
+}
+/** The host the pages reach the relay and the rooms at. */
+const pageHost =
+	lan === undefined ? "127.0.0.1" : isIP(lan) === 6 ? `[${lan}]` : lan;
+/** The relay as the pages and the rooms name it. The roles beside the relay connect over 127.0.0.1. */
+const relayUrlOfThePages = `https://${pageHost}:${options["relay-port"]}/`;
 // The values given to the gatherer and the pages, checked before anything is
 // started: a value that is none stops the demo, as the gatherer would stop.
 const chatLimitsOfTheRun = chatLimits({
@@ -247,7 +270,7 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 				// Not set with --no-auth: the rooms then have no key (an empty one would stop them).
 				...(authKeyHex === undefined ? {} : { AUTH_KEY_HEX: authKeyHex }),
 				// The relay the rooms name.
-				RELAY_URL: `https://127.0.0.1:${options["relay-port"]}/`,
+				RELAY_URL: relayUrlOfThePages,
 				RELAY_CERT_SHA256_HEX: certSha256Hex,
 				// The prefixes the transcriber listens under for a room: the
 				// room's broadcast and its meeting, which it reads for the
@@ -257,8 +280,18 @@ const rooms = existsSync(join(roomsDir, "node_modules", "miniflare"))
 			},
 		})
 	: undefined;
+/**
+ * Where the pages reach the rooms through this server under `--lan`: the
+ * same origin as the pages. WHY: a page over HTTPS may not fetch over plain
+ * HTTP, and a second origin would be a second certificate to pass by.
+ */
+const ROOMS_PATH = "/rooms/";
 const roomsUrl =
-	rooms === undefined ? null : `http://127.0.0.1:${options["rooms-port"]}/`;
+	rooms === undefined
+		? null
+		: lan === undefined
+			? `http://127.0.0.1:${options["rooms-port"]}/`
+			: `https://${pageHost}:${options.port}${ROOMS_PATH}`;
 // The gatherer of the chat, where it is built, with the relay's key unless
 // `--no-auth`.
 const chatBinary = join(here, "..", "target", "debug", "xmoq-chat");
@@ -452,7 +485,7 @@ for (const [path, page] of Object.entries(PAGES)) {
 				mostWatched,
 				chatTracks: chat !== undefined,
 				transcript: transcriber !== undefined,
-				relayUrl: `https://127.0.0.1:${options["relay-port"]}/`,
+				relayUrl: relayUrlOfThePages,
 				certSha256Hex,
 			}),
 		},
@@ -465,11 +498,68 @@ for (const [path, page] of Object.entries(PAGES)) {
 	scripts.set(`${path}.js`, await bundle.text());
 }
 
+/**
+ * The certificate of the pages under `--lan`, one for each address, kept
+ * for a year: nobody trusts it, and a browser asks once to go on past it.
+ * WHY not the relay's: that one is made anew within 13 days, and each new
+ * one would be asked about again. WHY RSA: Bun's TLS did not take an EC key
+ * of openssl (Bun 1.3.14).
+ */
+const pageTls =
+	lan === undefined
+		? undefined
+		: (() => {
+				const pageCertFile = join(certDir, `page-${lan}.pem`);
+				const pageKeyFile = join(certDir, `page-${lan}-key.pem`);
+				if (!existsSync(pageCertFile) || !existsSync(pageKeyFile)) {
+					execFileSync("openssl", [
+						"req",
+						"-x509",
+						"-newkey",
+						"rsa:2048",
+						"-nodes",
+						"-keyout",
+						pageKeyFile,
+						"-out",
+						pageCertFile,
+						"-days",
+						"365",
+						"-subj",
+						`/CN=${lan}`,
+						"-addext",
+						`subjectAltName=IP:${lan}`,
+					]);
+				}
+				return {
+					cert: readFileSync(pageCertFile),
+					key: readFileSync(pageKeyFile),
+				};
+			})();
+
+/** A request of a page to the rooms under `--lan`, passed on to them. */
+async function passToTheRooms(request: Request, url: URL): Promise<Response> {
+	const answer = await fetch(
+		`http://127.0.0.1:${options["rooms-port"]}/${url.pathname.slice(ROOMS_PATH.length)}${url.search}`,
+		{ method: request.method, headers: request.headers, body: request.body },
+	);
+	// WHY: Bun's fetch gives the body uncompressed and keeps the header that
+	// says it is compressed, which a browser then fails to read (Bun 1.3.14).
+	const headers = new Headers(answer.headers);
+	headers.delete("content-encoding");
+	headers.delete("content-length");
+	return new Response(answer.body, { status: answer.status, headers });
+}
+
 const server = Bun.serve({
-	hostname: "127.0.0.1",
+	hostname: lan ?? "127.0.0.1",
 	port: Number(options.port),
+	tls: pageTls,
 	fetch(request) {
-		const { pathname } = new URL(request.url);
+		const url = new URL(request.url);
+		const { pathname } = url;
+		if (lan !== undefined && pathname.startsWith(ROOMS_PATH)) {
+			return passToTheRooms(request, url);
+		}
 		const script = scripts.get(pathname);
 		if (script !== undefined) {
 			return new Response(script, {
@@ -485,14 +575,19 @@ const server = Bun.serve({
 		return new Response(null, { status: 404 });
 	},
 });
-// WHY localhost: it is a secure context, which WebTransport and the camera need.
-console.log(`publish: http://localhost:${server.port}/publish`);
-console.log(`watch:   http://localhost:${server.port}/watch`);
-console.log(`meet:    http://localhost:${server.port}/meet`);
+// WHY localhost, or HTTPS under `--lan`: a secure context, which
+// WebTransport and the camera need.
+const origin =
+	lan === undefined
+		? `http://localhost:${server.port}`
+		: `https://${pageHost}:${server.port}`;
+console.log(`publish: ${origin}/publish`);
+console.log(`watch:   ${origin}/watch`);
+console.log(`meet:    ${origin}/meet`);
 console.log(
 	pet === undefined || garden === undefined
 		? `pet:     none: ${pet === undefined ? petBinary : gardenBinary} is missing (cargo build -p xmoq-pet -p xmoq-garden)`
-		: `pet:     http://localhost:${server.port}/pet${options["decisions-url"] === undefined ? " (reacting by its own table)" : ""}`,
+		: `pet:     ${origin}/pet${options["decisions-url"] === undefined ? " (reacting by its own table)" : ""}`,
 );
 console.log(roomsUrl === null ? "rooms:   none" : `rooms:   ${roomsUrl}`);
 console.log(
