@@ -11,6 +11,7 @@ import {
 	type ReceivedObject,
 	type SubscriptionEnd,
 } from "@xmoq/moqt";
+import { decoderCodecs } from "../core/decoder-codecs.ts";
 import {
 	type DeliveryTimeouts,
 	deliveryTimeoutParameters,
@@ -182,7 +183,8 @@ export interface VideoPlayback {
  * `isConfigSupported` does, with a `TypeError`.
  *
  * - The decoder is configured for Annex B, without a description:
- *   `{ codec, optimizeForLatency: true }`.
+ *   `{ codec, optimizeForLatency: true }`, with the first codec string of
+ *   `decoderCodecs` the browser has a decoder for.
  * - **A decoder that fails is closed and made anew**, and the Group it
  *   failed in is given up: the next chunk it gets is the key frame of a
  *   later Group. After `maxDecoderFailures` failures with no frame decoded
@@ -232,12 +234,17 @@ export async function playVideoTrack(
 			"NotSupportedError",
 		);
 	}
-	const config: VideoDecoderConfig = {
-		codec: options.codec,
-		optimizeForLatency: true,
-	};
-	const { supported } = await VideoDecoder.isConfigSupported(config);
-	if (supported !== true) {
+	let supportedConfig: VideoDecoderConfig | undefined;
+	for (const codec of decoderCodecs(options.codec)) {
+		const candidate: VideoDecoderConfig = { codec, optimizeForLatency: true };
+		const { supported } = await VideoDecoder.isConfigSupported(candidate);
+		if (supported === true) {
+			supportedConfig = candidate;
+			break;
+		}
+	}
+	const config = supportedConfig;
+	if (config === undefined) {
 		throw new DOMException(
 			`this browser has no decoder for ${options.codec}`,
 			"NotSupportedError",
